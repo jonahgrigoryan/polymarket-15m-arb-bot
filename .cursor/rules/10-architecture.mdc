@@ -1,0 +1,14 @@
+---
+description: Always-on architecture guardrails for the replay-first trading system
+alwaysApply: true
+---
+
+# Architecture Guardrails
+
+- Hot-path implementation is Rust + Tokio.
+- Prefer one Rust binary with explicit internal modules until complexity justifies splitting.
+- Use WebSockets for live market data; use REST for startup, recovery, and metadata.
+- Persist raw feed messages and normalized events so every decision can be replayed and audited.
+- Live paper mode and replay mode must share the same normalized event model.
+- Optimize for correctness, auditability, deterministic replay, and risk control before live speed.
+- Keep implementation choices tied to `PRD.md`, `ARCHITECTURE.md`, and `IMPLEMENTATION_PLAN.md`.

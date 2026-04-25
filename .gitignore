@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Rust build artifacts
+target/
+
+# Local editor workspace files
+*.code-workspace

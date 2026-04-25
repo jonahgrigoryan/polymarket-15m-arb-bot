@@ -1,0 +1,11 @@
+---
+description: Read the project source documents before architectural changes
+alwaysApply: true
+---
+
+# Read Project Docs First
+
+- Before architectural changes, read `PRD.md`.
+- Keep edits tied to `AGENTS.md` and the active project documentation.
+- If implementation choices materially affect latency, correctness, compliance, storage, replay, or risk behavior, surface the tradeoff before coding.
+- Do not treat Cursor rules as a replacement for the PRD, architecture, implementation plan, or API verification checklist.

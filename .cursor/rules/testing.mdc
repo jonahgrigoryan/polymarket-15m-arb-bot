@@ -1,0 +1,48 @@
+---
+description: Rules for testing and milestone exit gates
+globs:
+  - "src/**/*.rs"
+  - "tests/**"
+---
+
+# Testing Rules
+
+## Unit Tests Required For
+- Fee math
+- Fair-probability calculations
+- Order book state updates (determinism)
+- Paper fill simulation (maker queue, taker depth, partial fills)
+- Risk halt logic (every gate)
+- Market lifecycle parsing
+- Event serialization round-trip
+
+## Integration Tests Required For
+- Market discovery (Gamma/keyset endpoint)
+- WebSocket subscription (CLOB market channel)
+- Resolution-source feed ingestion
+- Binance/Coinbase feed ingestion
+- Geoblock check
+- Storage write/read path
+
+## Replay Tests
+- Must be deterministic for identical input data and config.
+- Verify no trades occur on stale reference data.
+- Verify fee-adjusted P&L is stable.
+- Verify market lifecycle transitions are correct.
+- Determinism check must fail on intentional event drift.
+
+## Failure Tests Required For
+- Dropped Polymarket WebSocket
+- Delayed Binance/Coinbase feed
+- Missing/stale resolution-source feed
+- Bad market metadata
+- Book snapshot reset
+- Rate-limit responses
+- Geoblock-blocked response
+- Storage outage
+
+## Milestone Exit Gates
+- Do NOT start next milestone until current exit gate passes.
+- Exit gate = all build tasks complete + all verification checks pass + all done criteria met.
+- Failing/skipped checks must be recorded with a reason before proceeding.
+- M2+ requires API verification sections to be complete.

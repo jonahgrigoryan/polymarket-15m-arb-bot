@@ -1,0 +1,55 @@
+---
+description: Rules for API integration and Polymarket CLOB V2
+globs:
+  - "src/**/feed_ingestion/**"
+  - "src/**/market_discovery/**"
+  - "src/**/compliance/**"
+  - "src/**/normalization/**"
+  - "src/**/storage/**"
+  - "migrations/**"
+  - "verification/**"
+  - "API_VERIFICATION.md"
+---
+
+# API Integration Rules
+
+## CLOB V2 Migration
+- CLOB V2 go-live: April 28, 2026 ~11:00 UTC.
+- V2 uses pUSD collateral, new exchange contracts, and new signing fields.
+- V2 removes nonce, feeRateBps, taker from user-set order fields.
+- V2 adds timestamp, metadata, builder to order fields.
+- Open orders are wiped at cutover.
+- Before cutover: test against https://clob-v2.polymarket.com
+- After cutover: production at https://clob.polymarket.com
+
+## Verification-First
+- If API behavior is uncertain, verify against official docs or live read-only endpoints BEFORE coding.
+- If docs and live behavior disagree, live behavior wins only after reproduced and documented.
+- Mark implementation areas BLOCKED if verification fails or is ambiguous.
+- Capture evidence: command, timestamp, endpoint, sanitized response, result (PASS/FAIL/BLOCKED).
+- See API_VERIFICATION.md for full checklist.
+
+## Endpoints
+- Market discovery: GET https://gamma-api.polymarket.com/markets/keyset
+- CLOB market info: GET https://clob.polymarket.com/clob-markets/{condition_id}
+- WebSocket: wss://ws-subscriptions-clob.polymarket.com/ws/market
+- Geoblock: GET https://polymarket.com/api/geoblock
+- Fee rate: GET https://clob.polymarket.com/fee-rate?token_id={token_id}
+- Server time: GET https://clob.polymarket.com/time
+
+## Fee Model
+- Makers: zero fees.
+- Takers: pay fees on fee-enabled markets.
+- Fee rate determined at match time, not set by user in V2.
+- All taker paper fills MUST include taker fees.
+
+## Geoblock
+- Check at startup BEFORE any trading-capable mode.
+- Blocked = true → fail closed. No bypass.
+- Persist geoblock result with the run.
+
+## Rate Limits
+- REST only for startup, recovery, metadata.
+- WebSocket for all live market data.
+- Include conservative polling intervals and request budgets in config.
+- Rate-limit responses → degraded state, not silent failure.

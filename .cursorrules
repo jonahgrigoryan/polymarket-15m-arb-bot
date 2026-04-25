@@ -1,0 +1,5 @@
+# Legacy Cursor Rules
+
+This project uses version-controlled Cursor Project Rules in `.cursor/rules/`.
+
+Treat `.cursor/rules/*.mdc`, `AGENTS.md`, and `PRD.md` as the authoritative agent instructions. This legacy file exists only to redirect older Cursor setups and should not contain independent project constraints.

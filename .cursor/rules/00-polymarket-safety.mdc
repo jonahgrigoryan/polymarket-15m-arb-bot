@@ -1,0 +1,13 @@
+---
+description: Core safety and compliance constraints for the Polymarket paper/replay bot
+alwaysApply: true
+---
+
+# Polymarket Safety
+
+- MVP scope is paper trading and replay only.
+- Do not add live order placement unless the user explicitly requests a separate live-trading phase.
+- Do not implement or suggest geoblock bypassing.
+- Verify Polymarket access, CLOB V2 behavior, fees, and API shapes against official docs or read-only endpoints before relying on assumptions.
+- Keep BTC, ETH, and SOL as the only default assets unless the user expands scope.
+- Do not add wallet/private-key handling, signing, or order-routing code to the hot path without a separate live-readiness design and approval.
