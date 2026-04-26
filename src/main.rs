@@ -1,25 +1,10 @@
-mod compliance;
-mod config;
-mod feed_ingestion;
-mod market_discovery;
-mod metrics;
-mod normalization;
-mod paper_executor;
-mod replay;
-mod reporting;
-mod risk_engine;
-mod safety;
-mod signal_engine;
-mod state;
-mod storage;
-
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use config::AppConfig;
+use polymarket_15m_arb_bot::{config::AppConfig, module_names, safety};
 use tracing::field::{Field, Visit};
 use tracing::info;
 use tracing::{Event, Subscriber};
@@ -283,23 +268,4 @@ fn generate_run_id() -> String {
     let pid = std::process::id();
     let sequence = RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("{now_ns:x}-{pid:x}-{sequence:x}")
-}
-
-fn module_names() -> Vec<&'static str> {
-    vec![
-        compliance::MODULE,
-        config::MODULE,
-        feed_ingestion::MODULE,
-        market_discovery::MODULE,
-        metrics::MODULE,
-        normalization::MODULE,
-        paper_executor::MODULE,
-        replay::MODULE,
-        reporting::MODULE,
-        risk_engine::MODULE,
-        safety::MODULE,
-        signal_engine::MODULE,
-        state::MODULE,
-        storage::MODULE,
-    ]
 }

@@ -4,11 +4,11 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const MODULE: &str = "config";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub runtime: RuntimeConfig,
     pub assets: AssetsConfig,
@@ -204,18 +204,18 @@ impl AppConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RuntimeConfig {
     pub mode: String,
     pub log_level: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AssetsConfig {
     pub symbols: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PolymarketConfig {
     pub clob_rest_url: String,
     pub market_ws_url: String,
@@ -223,20 +223,20 @@ pub struct PolymarketConfig {
     pub geoblock_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FeedsConfig {
     pub resolution_source_url: String,
     pub binance_ws_url: String,
     pub coinbase_ws_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
     pub clickhouse_url: String,
     pub postgres_url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StrategyConfig {
     pub min_edge_bps: u64,
     pub latency_buffer_ms: u64,
@@ -244,7 +244,7 @@ pub struct StrategyConfig {
     pub final_seconds_no_trade: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RiskConfig {
     pub max_loss_per_market: f64,
     pub max_notional_per_market: f64,
@@ -257,18 +257,18 @@ pub struct RiskConfig {
     pub daily_drawdown_limit: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PaperConfig {
     pub starting_balance: f64,
     pub max_orders_per_market: u64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MetricsConfig {
     pub bind_addr: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReplayConfig {
     pub output_dir: String,
     pub deterministic: bool,
