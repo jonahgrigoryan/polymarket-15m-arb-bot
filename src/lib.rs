@@ -1,0 +1,37 @@
+pub mod compliance;
+pub mod config;
+pub mod domain;
+pub mod events;
+pub mod feed_ingestion;
+pub mod market_discovery;
+pub mod metrics;
+pub mod normalization;
+pub mod paper_executor;
+pub mod replay;
+pub mod reporting;
+pub mod risk_engine;
+pub mod safety;
+pub mod signal_engine;
+pub mod state;
+pub mod storage;
+
+pub fn module_names() -> Vec<&'static str> {
+    vec![
+        compliance::MODULE,
+        config::MODULE,
+        domain::MODULE,
+        events::MODULE,
+        feed_ingestion::MODULE,
+        market_discovery::MODULE,
+        metrics::MODULE,
+        normalization::MODULE,
+        paper_executor::MODULE,
+        replay::MODULE,
+        reporting::MODULE,
+        risk_engine::MODULE,
+        safety::MODULE,
+        signal_engine::MODULE,
+        state::MODULE,
+        storage::MODULE,
+    ]
+}
