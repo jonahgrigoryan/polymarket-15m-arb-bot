@@ -1,0 +1,13 @@
+[package]
+name = "polymarket-15m-arb-bot"
+version = "0.1.0"
+edition = "2021"
+description = "Replay-first and paper-trading-first Polymarket 15m crypto arbitrage bot"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

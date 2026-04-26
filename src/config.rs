@@ -1,0 +1,419 @@
+use std::env;
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+use std::fs;
+use std::path::Path;
+
+use serde::Deserialize;
+
+pub const MODULE: &str = "config";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppConfig {
+    pub runtime: RuntimeConfig,
+    pub assets: AssetsConfig,
+    pub polymarket: PolymarketConfig,
+    pub feeds: FeedsConfig,
+    pub storage: StorageConfig,
+    pub strategy: StrategyConfig,
+    pub risk: RiskConfig,
+    pub paper: PaperConfig,
+    pub metrics: MetricsConfig,
+    pub replay: ReplayConfig,
+}
+
+impl AppConfig {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
+        let path = path.as_ref();
+        let path_display = path.display().to_string();
+        let contents = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path_display.clone(),
+            source,
+        })?;
+
+        let mut config: AppConfig =
+            toml::from_str(&contents).map_err(|source| ConfigError::Parse {
+                path: path_display,
+                source,
+            })?;
+
+        config.apply_env_overrides();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn asset_list(&self) -> String {
+        self.assets.symbols.join(",")
+    }
+
+    fn apply_env_overrides(&mut self) {
+        apply_string_override("P15M_LOG_LEVEL", &mut self.runtime.log_level);
+        apply_string_override("P15M_CLICKHOUSE_URL", &mut self.storage.clickhouse_url);
+        apply_string_override("P15M_POSTGRES_URL", &mut self.storage.postgres_url);
+        apply_string_override("P15M_METRICS_BIND_ADDR", &mut self.metrics.bind_addr);
+    }
+
+    fn validate(&self) -> Result<(), ConfigError> {
+        let mut errors = Vec::new();
+
+        require_non_empty(&mut errors, "runtime.log_level", &self.runtime.log_level);
+        require_supported_mode(&mut errors, &self.runtime.mode);
+
+        require_exact_assets(&mut errors, &self.assets.symbols);
+
+        require_url(
+            &mut errors,
+            "polymarket.clob_rest_url",
+            &self.polymarket.clob_rest_url,
+            &["https://", "http://"],
+        );
+        require_url(
+            &mut errors,
+            "polymarket.market_ws_url",
+            &self.polymarket.market_ws_url,
+            &["wss://", "ws://"],
+        );
+        require_url(
+            &mut errors,
+            "polymarket.gamma_markets_url",
+            &self.polymarket.gamma_markets_url,
+            &["https://", "http://"],
+        );
+        require_url(
+            &mut errors,
+            "polymarket.geoblock_url",
+            &self.polymarket.geoblock_url,
+            &["https://", "http://"],
+        );
+        require_url(
+            &mut errors,
+            "feeds.resolution_source_url",
+            &self.feeds.resolution_source_url,
+            &["https://", "http://", "wss://", "ws://"],
+        );
+        require_url(
+            &mut errors,
+            "feeds.binance_ws_url",
+            &self.feeds.binance_ws_url,
+            &["wss://", "ws://"],
+        );
+        require_url(
+            &mut errors,
+            "feeds.coinbase_ws_url",
+            &self.feeds.coinbase_ws_url,
+            &["wss://", "ws://"],
+        );
+        require_url(
+            &mut errors,
+            "storage.clickhouse_url",
+            &self.storage.clickhouse_url,
+            &["https://", "http://"],
+        );
+        require_url(
+            &mut errors,
+            "storage.postgres_url",
+            &self.storage.postgres_url,
+            &["postgres://", "postgresql://"],
+        );
+
+        require_positive_u64(
+            &mut errors,
+            "strategy.min_edge_bps",
+            self.strategy.min_edge_bps,
+        );
+        require_positive_u64(
+            &mut errors,
+            "strategy.latency_buffer_ms",
+            self.strategy.latency_buffer_ms,
+        );
+        require_positive_u64(
+            &mut errors,
+            "strategy.adverse_selection_bps",
+            self.strategy.adverse_selection_bps,
+        );
+        require_positive_u64(
+            &mut errors,
+            "strategy.final_seconds_no_trade",
+            self.strategy.final_seconds_no_trade,
+        );
+
+        require_positive_f64(
+            &mut errors,
+            "risk.max_loss_per_market",
+            self.risk.max_loss_per_market,
+        );
+        require_positive_f64(
+            &mut errors,
+            "risk.max_notional_per_market",
+            self.risk.max_notional_per_market,
+        );
+        require_positive_f64(
+            &mut errors,
+            "risk.max_notional_per_asset",
+            self.risk.max_notional_per_asset,
+        );
+        require_positive_f64(
+            &mut errors,
+            "risk.max_total_notional",
+            self.risk.max_total_notional,
+        );
+        require_positive_f64(
+            &mut errors,
+            "risk.max_correlated_notional",
+            self.risk.max_correlated_notional,
+        );
+        require_positive_u64(
+            &mut errors,
+            "risk.stale_reference_ms",
+            self.risk.stale_reference_ms,
+        );
+        require_positive_u64(&mut errors, "risk.stale_book_ms", self.risk.stale_book_ms);
+        require_positive_u64(
+            &mut errors,
+            "risk.max_orders_per_minute",
+            self.risk.max_orders_per_minute,
+        );
+        require_positive_f64(
+            &mut errors,
+            "risk.daily_drawdown_limit",
+            self.risk.daily_drawdown_limit,
+        );
+
+        require_positive_f64(
+            &mut errors,
+            "paper.starting_balance",
+            self.paper.starting_balance,
+        );
+        require_positive_u64(
+            &mut errors,
+            "paper.max_orders_per_market",
+            self.paper.max_orders_per_market,
+        );
+
+        require_non_empty(&mut errors, "metrics.bind_addr", &self.metrics.bind_addr);
+        require_non_empty(&mut errors, "replay.output_dir", &self.replay.output_dir);
+        if !self.replay.deterministic {
+            errors.push("replay.deterministic must remain true for the MVP".to_string());
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Validation(errors))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuntimeConfig {
+    pub mode: String,
+    pub log_level: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssetsConfig {
+    pub symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolymarketConfig {
+    pub clob_rest_url: String,
+    pub market_ws_url: String,
+    pub gamma_markets_url: String,
+    pub geoblock_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeedsConfig {
+    pub resolution_source_url: String,
+    pub binance_ws_url: String,
+    pub coinbase_ws_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StorageConfig {
+    pub clickhouse_url: String,
+    pub postgres_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyConfig {
+    pub min_edge_bps: u64,
+    pub latency_buffer_ms: u64,
+    pub adverse_selection_bps: u64,
+    pub final_seconds_no_trade: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RiskConfig {
+    pub max_loss_per_market: f64,
+    pub max_notional_per_market: f64,
+    pub max_notional_per_asset: f64,
+    pub max_total_notional: f64,
+    pub max_correlated_notional: f64,
+    pub stale_reference_ms: u64,
+    pub stale_book_ms: u64,
+    pub max_orders_per_minute: u64,
+    pub daily_drawdown_limit: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperConfig {
+    pub starting_balance: f64,
+    pub max_orders_per_market: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetricsConfig {
+    pub bind_addr: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplayConfig {
+    pub output_dir: String,
+    pub deterministic: bool,
+}
+
+#[derive(Debug)]
+pub enum ConfigError {
+    Read {
+        path: String,
+        source: std::io::Error,
+    },
+    Parse {
+        path: String,
+        source: toml::de::Error,
+    },
+    Validation(Vec<String>),
+}
+
+impl Display for ConfigError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::Read { path, source } => {
+                write!(formatter, "failed to read config {path}: {source}")
+            }
+            ConfigError::Parse { path, source } => {
+                write!(formatter, "failed to parse config {path}: {source}")
+            }
+            ConfigError::Validation(errors) => {
+                writeln!(formatter, "configuration validation failed:")?;
+                for error in errors {
+                    writeln!(formatter, "- {error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Error for ConfigError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            ConfigError::Read { source, .. } => Some(source),
+            ConfigError::Parse { source, .. } => Some(source),
+            ConfigError::Validation(_) => None,
+        }
+    }
+}
+
+fn apply_string_override(env_key: &str, target: &mut String) {
+    if let Ok(value) = env::var(env_key) {
+        if !value.trim().is_empty() {
+            *target = value;
+        }
+    }
+}
+
+fn require_supported_mode(errors: &mut Vec<String>, mode: &str) {
+    match mode {
+        "validate" | "paper" | "replay" => {}
+        _ => errors.push(format!(
+            "runtime.mode must be one of validate, paper, replay; got {mode}"
+        )),
+    }
+}
+
+fn require_exact_assets(errors: &mut Vec<String>, symbols: &[String]) {
+    let expected = ["BTC", "ETH", "SOL"];
+    for symbol in expected {
+        if !symbols.iter().any(|item| item == symbol) {
+            errors.push(format!("assets.symbols is missing required asset {symbol}"));
+        }
+    }
+
+    for symbol in symbols {
+        if !expected.contains(&symbol.as_str()) {
+            errors.push(format!(
+                "assets.symbols contains unsupported MVP asset {symbol}"
+            ));
+        }
+    }
+}
+
+fn require_non_empty(errors: &mut Vec<String>, name: &str, value: &str) {
+    if value.trim().is_empty() {
+        errors.push(format!("{name} must not be empty"));
+    }
+}
+
+fn require_url(errors: &mut Vec<String>, name: &str, value: &str, schemes: &[&str]) {
+    require_non_empty(errors, name, value);
+    if !schemes.iter().any(|scheme| value.starts_with(scheme)) {
+        errors.push(format!(
+            "{name} must start with one of {}; got {value}",
+            schemes.join(", ")
+        ));
+    }
+}
+
+fn require_positive_u64(errors: &mut Vec<String>, name: &str, value: u64) {
+    if value == 0 {
+        errors.push(format!("{name} must be greater than zero"));
+    }
+}
+
+fn require_positive_f64(errors: &mut Vec<String>, name: &str, value: f64) {
+    if !value.is_finite() || value <= 0.0 {
+        errors.push(format!("{name} must be a finite value greater than zero"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_CONFIG: &str = include_str!("../config/default.toml");
+
+    #[test]
+    fn default_config_is_valid() {
+        let config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.validate().expect("default config validates");
+    }
+
+    #[test]
+    fn config_rejects_missing_required_asset() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.assets.symbols = vec!["BTC".to_string(), "ETH".to_string()];
+
+        let error = config.validate().expect_err("missing SOL fails validation");
+
+        assert!(error
+            .to_string()
+            .contains("assets.symbols is missing required asset SOL"));
+    }
+
+    #[test]
+    fn config_rejects_empty_endpoint() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.polymarket.clob_rest_url.clear();
+
+        let error = config
+            .validate()
+            .expect_err("empty endpoint fails validation");
+
+        assert!(error
+            .to_string()
+            .contains("polymarket.clob_rest_url must not be empty"));
+    }
+}

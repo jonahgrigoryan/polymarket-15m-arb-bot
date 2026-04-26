@@ -1,0 +1,49 @@
+[runtime]
+mode = "validate"
+log_level = "info"
+
+[assets]
+symbols = ["BTC", "ETH", "SOL"]
+
+[polymarket]
+clob_rest_url = "https://clob-v2.polymarket.com"
+market_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+gamma_markets_url = "https://gamma-api.polymarket.com/markets/keyset"
+geoblock_url = "https://polymarket.com/api/geoblock"
+
+[feeds]
+resolution_source_url = "https://data.chain.link/streams"
+binance_ws_url = "wss://stream.binance.com:9443/ws"
+coinbase_ws_url = "wss://ws-feed.exchange.coinbase.com"
+
+[storage]
+clickhouse_url = "http://localhost:8123"
+postgres_url = "postgres://polymarket:polymarket@localhost:5432/polymarket_15m"
+
+[strategy]
+min_edge_bps = 50
+latency_buffer_ms = 250
+adverse_selection_bps = 25
+final_seconds_no_trade = 30
+
+[risk]
+max_loss_per_market = 25.0
+max_notional_per_market = 100.0
+max_notional_per_asset = 250.0
+max_total_notional = 500.0
+max_correlated_notional = 350.0
+stale_reference_ms = 1_000
+stale_book_ms = 1_000
+max_orders_per_minute = 120
+daily_drawdown_limit = 100.0
+
+[paper]
+starting_balance = 1_000.0
+max_orders_per_market = 20
+
+[metrics]
+bind_addr = "127.0.0.1:9100"
+
+[replay]
+output_dir = "reports"
+deterministic = true
