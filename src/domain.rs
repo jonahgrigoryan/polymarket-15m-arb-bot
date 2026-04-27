@@ -193,6 +193,7 @@ pub struct PaperOrder {
     pub asset: Asset,
     pub side: Side,
     pub order_kind: OrderKind,
+    pub fee_parameters: FeeParameters,
     pub price: f64,
     pub size: f64,
     pub filled_size: f64,
