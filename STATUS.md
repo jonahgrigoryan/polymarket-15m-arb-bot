@@ -17,15 +17,15 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m7/replay-reports`
-- Short commit: `5f4d166`
-- Worktree status: M7 replay/report/storage completion fixes are present but uncommitted.
+- Branch: `m8/observability-runbook`
+- Short commit: `ba0f75c`
+- Worktree status: M8 observability/runbook implementation is present but uncommitted.
 
 ## Milestones
 
-- Last completed milestone: M7 - Replay Engine And Reports.
-- Active milestone: M7 final handoff; M6 final settlement artifact verification remains PARTIAL.
-- Next milestone: M8 - Observability And Production-Like Runbook.
+- Last completed milestone: M8 - Observability And Production-Like Runbook.
+- Active milestone: M8 final handoff; M6 final settlement artifact verification remains PARTIAL.
+- Next milestone: M9 - Multi-Session Validation And Live-Readiness Review.
 
 ## M3 Scope Lock
 
@@ -95,6 +95,16 @@ Heartbeat intent for M3:
 | M4/M5/M6 logic is reused | PASS | Replay updates `StateStore`, evaluates `SignalEngine`/`RiskEngine`, opens/fills only through `PaperExecutor`, and updates `PaperPositionBook`. |
 | Runtime scope lock | PASS | `paper` and `replay` runtime stubs remain unchanged; M7 is library/offline wiring only. |
 
+## M8 Acceptance Matrix
+
+| Gate item | Status | Evidence / decision |
+| --- | --- | --- |
+| Metrics endpoint works against test config | PASS | `validate --local-only --metrics-smoke` renders the M8 metric families through an ephemeral loopback `/metrics` endpoint and verifies the response body. |
+| Structured logs include operational fields | PASS | Runtime logs include `run_id`, `mode`, `source`, `event_type`, `reason`, and shutdown fields; the metrics field contract includes market, asset, risk reason, and replay fingerprint fields. |
+| Graceful shutdown works | PASS | `GracefulShutdownState` transitions running -> draining -> complete and runtime commands emit a final shutdown log with `accepting_new_work=false` on successful and failed command paths. |
+| Runbook commands work against test config | PASS | M8 runbook commands cover local validation, metrics smoke, offline replay stub, report/reporting tests, safety scan, and service-template expectations. |
+| Runtime scope lock | PASS | `paper` and `replay` runtime stubs remain unchanged; metrics smoke is local/test-only and no live trading path was added. |
+
 ## M6 Current State
 
 - `main.rs` still reports `paper_mode_status=stubbed_until_later_milestones` and `replay_status=stubbed_until_later_milestones`; this confirms M6 work has not been wired into runtime yet.
@@ -146,6 +156,20 @@ M7 verification status: PASS.
 - M7 safety scan found no new source path for live order placement, signing, wallet, API key, private-key handling, live feed, or network behavior in the replay/report diff. Full-tree network/feed hits are existing M3 read-only validation/feed-ingestion paths and documented endpoint config.
 - No new runtime verification was started; `paper` and `replay` runtime stubs remain unchanged.
 
+M8 verification status: PASS.
+- M8 local checks passed: `cargo fmt --check`, `cargo test --offline` (102 tests), and `cargo clippy --offline -- -D warnings`.
+- M8 baseline validate passed: `cargo run --offline -- validate --local-only --config config/default.toml`.
+- M8 metrics smoke passed: `cargo run --offline -- validate --local-only --metrics-smoke --config config/default.toml`; the smoke now checks every required M8 metric family.
+- M8 replay/runbook smoke passed: `cargo run --offline -- --config config/default.toml replay --run-id test-run`.
+- M8 paper/runbook smoke passed: `cargo run --offline -- --config config/default.toml paper`; paper remains stubbed and emitted the final shutdown log.
+- M8 handoff checks passed: `cargo test --offline replay::` and `cargo test --offline reporting::`.
+- M8 metrics tests cover stable Prometheus metric names/labels, rendering/counting, every required M8 metric family, one-shot local `/metrics` behavior, and structured log field contract.
+- M8 shutdown tests cover fail-closed shutdown state transitions and CLI runtime mode names.
+- M8 runbook artifacts were added under `docs/m8-observability-runbook.md` and `runbooks/polymarket-15m-arb-bot.service.template`.
+- M8 safety scan found no source path for live order placement, signing, wallet, API key, private-key handling, live trading, external write behavior, or live feed subscription in the M8 diff. New network hits are limited to local loopback metrics smoke (`TcpListener` on `127.0.0.1:0` and a single local `GET /metrics`).
+- Full source/config safety scan over `src`, `Cargo.toml`, and `config` found only the expected `live_order_placement_enabled=false` output fields.
+- Direct scrape of `http://127.0.0.1:9100/metrics` is not applicable yet because no long-running metrics process is bound; M8 currently verifies metrics through the one-shot loopback smoke endpoint.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -153,11 +177,11 @@ M7 verification status: PASS.
 - Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
 - Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
-- Final start/end settlement artifact verification is still required before M6/M7 reporting can claim live post-market reconciliation.
+- Final start/end settlement artifact verification is still required before M6/M7/M8 reporting can claim live post-market reconciliation.
 
 ## Next Concrete Action
 
-Proceed to M8 observability/runbook, or separately verify final start/end settlement artifacts if live post-market reconciliation evidence is needed before M8.
+Proceed to M9 multi-session validation/live-readiness review, or separately verify final start/end settlement artifacts if live post-market reconciliation evidence is needed before M9.
 
 ## Update Checklist
 
