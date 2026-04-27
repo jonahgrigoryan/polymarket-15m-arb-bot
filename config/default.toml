@@ -10,6 +10,12 @@ clob_rest_url = "https://clob-v2.polymarket.com"
 market_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 gamma_markets_url = "https://gamma-api.polymarket.com/markets/keyset"
 geoblock_url = "https://polymarket.com/api/geoblock"
+request_timeout_ms = 8_000
+market_discovery_page_limit = 100
+market_discovery_max_pages = 5
+market_discovery_poll_ms = 60_000
+gamma_markets_request_limit_per_10s = 100
+clob_market_info_request_limit_per_10s = 50
 
 [feeds]
 resolution_source_url = "https://data.chain.link/streams"
