@@ -1,0 +1,38 @@
+# Production-like paper-mode template for the replay-first MVP.
+# Copy and edit outside the repo when installing on a Linux host.
+# This template intentionally contains no wallet, private key, API key, signing,
+# real CLOB order-client, or live trading configuration.
+
+[Unit]
+Description=Polymarket 15m Arb Bot paper/replay MVP
+Documentation=file:/opt/polymarket-15m-arb-bot/docs/m8-observability-runbook.md
+After=network-online.target postgresql.service clickhouse-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polymarket
+Group=polymarket
+WorkingDirectory=/opt/polymarket-15m-arb-bot
+ExecStart=/opt/polymarket-15m-arb-bot/target/release/polymarket-15m-arb-bot --config /etc/polymarket-15m-arb-bot/default.toml paper
+ExecStartPre=/opt/polymarket-15m-arb-bot/target/release/polymarket-15m-arb-bot --config /etc/polymarket-15m-arb-bot/default.toml validate --local-only
+Restart=on-failure
+RestartSec=10s
+KillSignal=SIGTERM
+TimeoutStopSec=45s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-15m-arb-bot
+
+# Keep the MVP local and auditable. Do not add secrets or live trading credentials.
+Environment=RUST_LOG=info
+
+# Hardening notes: tune only after the paper/replay loop proves useful.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/polymarket-15m-arb-bot /var/log/polymarket-15m-arb-bot
+
+[Install]
+WantedBy=multi-user.target

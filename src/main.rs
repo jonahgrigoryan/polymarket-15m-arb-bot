@@ -14,11 +14,14 @@ use polymarket_15m_arb_bot::{
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
     market_discovery::{emit_market_lifecycle_events, MarketDiscoveryClient},
+    metrics::{m8_smoke_metrics_snapshot, required_m8_metric_families, serve_prometheus_once},
     module_names,
     normalization::{SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB},
     safety,
+    shutdown::{GracefulShutdownState, RuntimeMode},
     storage::{InMemoryStorage, PostgresMarketStore, StorageError},
 };
+use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::info;
 use tracing::{Event, Subscriber};
@@ -54,6 +57,8 @@ enum Commands {
         local_only: bool,
         #[arg(long, help = "Run M3 read-only feed WebSocket smoke checks")]
         feed_smoke: bool,
+        #[arg(long, help = "Run M8 local loopback metrics endpoint smoke check")]
+        metrics_smoke: bool,
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
@@ -72,6 +77,14 @@ impl Commands {
             Commands::Validate { .. } => "validate",
             Commands::Paper => "paper",
             Commands::Replay { .. } => "replay",
+        }
+    }
+
+    fn runtime_mode(&self) -> RuntimeMode {
+        match self {
+            Commands::Validate { .. } => RuntimeMode::Validate,
+            Commands::Paper => RuntimeMode::Paper,
+            Commands::Replay { .. } => RuntimeMode::Replay,
         }
     }
 }
@@ -93,6 +106,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let run_id = generate_run_id();
     let modules = module_names();
     let mode = cli.command.name();
+    let runtime_mode = cli.command.runtime_mode();
+    let mut shutdown = GracefulShutdownState::new(run_id.clone(), runtime_mode);
 
     info!(
         %run_id,
@@ -103,60 +118,144 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         "startup validation complete"
     );
 
-    match cli.command {
-        Commands::Validate {
-            local_only,
-            feed_smoke,
-            feed_message_limit,
-        } => {
-            println!("validation_status=ok");
-            println!("run_id={run_id}");
-            println!("mode=validate");
-            println!("config_path={}", cli.config.display());
-            println!("assets={}", config.asset_list());
-            println!("modules={}", modules.join(","));
-            println!(
-                "live_order_placement_enabled={}",
-                safety::LIVE_ORDER_PLACEMENT_ENABLED
-            );
-            if local_only {
-                println!("online_validation_status=skipped");
-            } else {
-                run_m2_online_validation(&config, &run_id).await?;
+    let command = cli.command;
+    let command_result: Result<(), Box<dyn std::error::Error>> = async {
+        match command {
+            Commands::Validate {
+                local_only,
+                feed_smoke,
+                metrics_smoke,
+                feed_message_limit,
+            } => {
+                println!("validation_status=ok");
+                println!("run_id={run_id}");
+                println!("mode=validate");
+                println!("config_path={}", cli.config.display());
+                println!("assets={}", config.asset_list());
+                println!("modules={}", modules.join(","));
+                println!(
+                    "live_order_placement_enabled={}",
+                    safety::LIVE_ORDER_PLACEMENT_ENABLED
+                );
+                if local_only {
+                    println!("online_validation_status=skipped");
+                } else {
+                    run_m2_online_validation(&config, &run_id).await?;
+                }
+                if feed_smoke {
+                    run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
+                }
+                if metrics_smoke {
+                    run_m8_metrics_smoke(&config, &run_id, mode).await?;
+                }
             }
-            if feed_smoke {
-                run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
+            Commands::Paper => {
+                let geoblock = compliance_client(&config)?.check_geoblock().await?;
+                ComplianceError::fail_if_blocked(&geoblock)?;
+                println!("validation_status=ok");
+                println!("run_id={run_id}");
+                println!("mode=paper");
+                println!("paper_mode_status=stubbed_until_later_milestones");
+                println!(
+                    "live_order_placement_enabled={}",
+                    safety::LIVE_ORDER_PLACEMENT_ENABLED
+                );
+            }
+            Commands::Replay {
+                run_id: replay_run_id,
+            } => {
+                println!("validation_status=ok");
+                println!("run_id={run_id}");
+                println!("mode=replay");
+                println!(
+                    "target_replay_run_id={}",
+                    replay_run_id.unwrap_or_else(|| "not_provided".to_string())
+                );
+                println!("replay_status=stubbed_until_later_milestones");
+                println!(
+                    "live_order_placement_enabled={}",
+                    safety::LIVE_ORDER_PLACEMENT_ENABLED
+                );
             }
         }
-        Commands::Paper => {
-            let geoblock = compliance_client(&config)?.check_geoblock().await?;
-            ComplianceError::fail_if_blocked(&geoblock)?;
-            println!("validation_status=ok");
-            println!("run_id={run_id}");
-            println!("mode=paper");
-            println!("paper_mode_status=stubbed_until_later_milestones");
-            println!(
-                "live_order_placement_enabled={}",
-                safety::LIVE_ORDER_PLACEMENT_ENABLED
-            );
-        }
-        Commands::Replay {
-            run_id: replay_run_id,
-        } => {
-            println!("validation_status=ok");
-            println!("run_id={run_id}");
-            println!("mode=replay");
-            println!(
-                "target_replay_run_id={}",
-                replay_run_id.unwrap_or_else(|| "not_provided".to_string())
-            );
-            println!("replay_status=stubbed_until_later_milestones");
-            println!(
-                "live_order_placement_enabled={}",
-                safety::LIVE_ORDER_PLACEMENT_ENABLED
-            );
-        }
+
+        Ok(())
     }
+    .await;
+
+    let shutdown_reason = if command_result.is_ok() {
+        "command_completed"
+    } else {
+        "command_failed"
+    };
+    let command_status = if command_result.is_ok() {
+        "ok"
+    } else {
+        "error"
+    };
+    let command_error = command_result
+        .as_ref()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_default();
+
+    shutdown.request_shutdown(shutdown_reason);
+    shutdown.complete();
+    info!(
+        run_id = %shutdown.run_id(),
+        mode = shutdown.mode().as_str(),
+        shutdown_phase = shutdown.phase_name(),
+        accepting_new_work = shutdown.accepting_new_work(),
+        reason = shutdown.reason().unwrap_or(shutdown_reason),
+        command_status,
+        error = command_error.as_str(),
+        "runtime shutdown complete"
+    );
+
+    command_result?;
+    Ok(())
+}
+
+async fn run_m8_metrics_smoke(
+    config: &AppConfig,
+    run_id: &str,
+    mode: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics_body = m8_smoke_metrics_snapshot().render_prometheus();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(serve_prometheus_once(listener, metrics_body));
+    let response = reqwest::get(format!("http://{address}/metrics")).await?;
+    let body = response.text().await?;
+
+    server.await??;
+
+    let missing_metrics = required_m8_metric_families()
+        .iter()
+        .filter(|metric| !body.contains(**metric))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_metrics.is_empty() {
+        return Err(format!(
+            "metrics smoke response missed required M8 metrics: {}",
+            missing_metrics.join(",")
+        )
+        .into());
+    }
+
+    info!(
+        %run_id,
+        mode,
+        source = "local_metrics_endpoint",
+        event_type = "metrics_smoke",
+        metrics_bind_addr = %config.metrics.bind_addr,
+        reason = "metrics_endpoint_returned_expected_metrics",
+        "metrics smoke complete"
+    );
+    println!("metrics_smoke_status=ok");
+    println!("metrics_config_bind_addr={}", config.metrics.bind_addr);
+    println!("metrics_smoke_url=http://{address}/metrics");
+    println!("metrics_smoke_bytes={}", body.len());
 
     Ok(())
 }
