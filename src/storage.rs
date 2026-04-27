@@ -10,6 +10,7 @@ use serde_json::Value;
 use crate::config::AppConfig;
 use crate::domain::{Market, PaperFill, PaperOrder, RiskState};
 use crate::events::EventEnvelope;
+use crate::state::PositionSnapshot;
 
 pub const MODULE: &str = "storage";
 
@@ -56,6 +57,16 @@ pub struct RiskEvent {
     pub risk_state: RiskState,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PaperBalanceSnapshot {
+    pub run_id: String,
+    pub starting_balance: f64,
+    pub cash_balance: f64,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub updated_ts: i64,
+}
+
 pub type StorageResult<T> = Result<T, StorageError>;
 
 pub trait StorageBackend {
@@ -70,6 +81,10 @@ pub trait StorageBackend {
     fn insert_paper_order(&self, order: PaperOrder) -> StorageResult<()>;
 
     fn insert_paper_fill(&self, fill: PaperFill) -> StorageResult<()>;
+
+    fn upsert_paper_position(&self, position: PositionSnapshot) -> StorageResult<()>;
+
+    fn upsert_paper_balance(&self, balance: PaperBalanceSnapshot) -> StorageResult<()>;
 
     fn insert_risk_event(&self, event: RiskEvent) -> StorageResult<()>;
 
@@ -131,6 +146,8 @@ struct InMemoryState {
     config_snapshots: HashMap<String, ConfigSnapshot>,
     paper_orders: HashMap<String, PaperOrder>,
     paper_fills: HashMap<String, PaperFill>,
+    paper_positions: HashMap<(String, String), PositionSnapshot>,
+    paper_balances: HashMap<String, PaperBalanceSnapshot>,
     risk_events: Vec<RiskEvent>,
 }
 
@@ -175,6 +192,23 @@ impl StorageBackend for InMemoryStorage {
     fn insert_paper_fill(&self, fill: PaperFill) -> StorageResult<()> {
         self.with_state("insert_paper_fill", |state| {
             state.paper_fills.insert(fill.fill_id.clone(), fill);
+            Ok(())
+        })
+    }
+
+    fn upsert_paper_position(&self, position: PositionSnapshot) -> StorageResult<()> {
+        self.with_state("upsert_paper_position", |state| {
+            state.paper_positions.insert(
+                (position.market_id.clone(), position.token_id.clone()),
+                position,
+            );
+            Ok(())
+        })
+    }
+
+    fn upsert_paper_balance(&self, balance: PaperBalanceSnapshot) -> StorageResult<()> {
+        self.with_state("upsert_paper_balance", |state| {
+            state.paper_balances.insert(balance.run_id.clone(), balance);
             Ok(())
         })
     }
@@ -371,6 +405,7 @@ mod tests {
     };
     use crate::domain::{Market, PaperFill, PaperOrder, RiskState};
     use crate::events::{EventEnvelope, NormalizedEvent};
+    use crate::state::PositionSnapshot;
 
     const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
     const CLICKHOUSE_MIGRATION: &str = include_str!("../migrations/clickhouse/0001_events.sql");
@@ -395,6 +430,8 @@ mod tests {
             "config_snapshots",
             "paper_orders",
             "paper_fills",
+            "paper_positions",
+            "paper_balances",
             "risk_events",
             "replay_runs",
         ] {
@@ -411,6 +448,8 @@ mod tests {
         let market = sample_market();
         let order = sample_order();
         let fill = sample_fill();
+        let position = sample_position();
+        let balance = sample_balance();
         let risk_state = RiskState {
             halted: true,
             active_halts: vec![RiskHaltReason::StorageUnavailable],
@@ -448,6 +487,12 @@ mod tests {
             .expect("config snapshot writes");
         storage.insert_paper_order(order).expect("order writes");
         storage.insert_paper_fill(fill).expect("fill writes");
+        storage
+            .upsert_paper_position(position)
+            .expect("position writes");
+        storage
+            .upsert_paper_balance(balance)
+            .expect("balance writes");
         storage
             .insert_risk_event(RiskEvent {
                 run_id: "run-1".to_string(),
@@ -513,6 +558,12 @@ mod tests {
             asset: Asset::Btc,
             side: Side::Buy,
             order_kind: OrderKind::Maker,
+            fee_parameters: FeeParameters {
+                fees_enabled: true,
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 200.0,
+                raw_fee_config: None,
+            },
             price: 0.49,
             size: 10.0,
             filled_size: 0.0,
@@ -536,6 +587,30 @@ mod tests {
             fee_paid: 0.0,
             liquidity: OrderKind::Maker,
             filled_ts: 1_777_000_000_001,
+        }
+    }
+
+    fn sample_position() -> PositionSnapshot {
+        PositionSnapshot {
+            market_id: "market-1".to_string(),
+            token_id: "token-up".to_string(),
+            asset: Asset::Btc,
+            size: 5.0,
+            average_price: 0.49,
+            realized_pnl: 0.0,
+            unrealized_pnl: 0.05,
+            updated_ts: 1_777_000_000_002,
+        }
+    }
+
+    fn sample_balance() -> PaperBalanceSnapshot {
+        PaperBalanceSnapshot {
+            run_id: "run-1".to_string(),
+            starting_balance: 1_000.0,
+            cash_balance: 997.55,
+            realized_pnl: 0.0,
+            unrealized_pnl: 0.05,
+            updated_ts: 1_777_000_000_002,
         }
     }
 }

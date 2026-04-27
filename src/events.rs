@@ -369,6 +369,12 @@ mod tests {
             asset: Asset::Btc,
             side: Side::Buy,
             order_kind: OrderKind::Maker,
+            fee_parameters: FeeParameters {
+                fees_enabled: true,
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 200.0,
+                raw_fee_config: None,
+            },
             price: 0.49,
             size: 10.0,
             filled_size: 0.0,

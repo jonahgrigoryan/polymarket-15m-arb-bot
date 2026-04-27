@@ -17,15 +17,15 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m5/signal-risk-engine`
-- Short commit: `b7962b4`
-- Worktree status: M5 implementation and verification fixes are present but uncommitted.
+- Branch: `m6/paper-executor-pnl`
+- Short commit: `e6fa663`
+- Worktree status: M6 paper executor/P&L implementation fixes and status updates are present but uncommitted.
 
 ## Milestones
 
-- Last completed milestone: M5 - Signal And Risk Engine.
-- Active milestone: M6 - Paper Executor And P&L.
-- Next milestone: M6 - Paper Executor And P&L.
+- Last completed milestone: M6 - Paper Executor And P&L.
+- Active milestone: M7 - Replay Engine And Reports.
+- Next milestone: M7 - Replay Engine And Reports.
 
 ## M3 Scope Lock
 
@@ -87,11 +87,23 @@ Heartbeat intent for M3:
 
 ## Next Exit Gate
 
-M6 is complete only when:
+M7 is complete only when:
 
-- Maker/taker fill simulation, partial fills, fees, cancellations, and P&L are tested.
-- Every paper order has an audit trail.
-- No live order path exists.
+- Replay can reconstruct deterministic state and paper outcomes from recorded normalized events.
+- Replay outputs fills, P&L, latency, missed opportunities, and risk halt report inputs.
+- Identical replay input plus config produces identical outputs.
+
+## M6 Current State
+
+- `main.rs` still reports `paper_mode_status=stubbed_until_later_milestones` and `replay_status=stubbed_until_later_milestones`; this confirms M6 work has not been wired into runtime yet.
+- `src/paper_executor.rs` has been split into `src/paper_executor/mod.rs`, `src/paper_executor/lifecycle.rs`, and `src/paper_executor/pnl.rs`.
+- `PaperExecutor` consumes only risk-approved `PaperOrderIntent`s. A denied risk decision emits a paper audit rejection and creates no paper order.
+- Paper lifecycle support covers open, partial, filled, canceled, expired, and rejected states with explicit audit events.
+- Maker fills use conservative visible-queue assumptions from later trade ticks; taker fills consume visible executable book depth and per-market fee parameters.
+- `PaperPositionBook` tracks positions by market/token/asset, average price, realized P&L, unrealized marks, settlement marks, fees, and deterministic exposure snapshots.
+- Storage now has paper position and balance write APIs matching the existing Postgres M6 tables.
+- Position and risk context exposure remain in `state::snapshot` and `risk_engine` from M5 context.
+- Final start/end settlement artifact verification remains deferred to M7/reporting evidence, but M6 can trace P&L to explicit winning-token or split market outcomes.
 
 ## Recent Verification
 
@@ -117,6 +129,14 @@ M6 is complete only when:
 - M5 risk tests cover stale reference, stale book, geoblock, market loss, market/asset/total/correlated notional, order rate, daily drawdown, ineligible/asset-mismatched resolution source rejection, approval, and multi-reason rejection.
 - M5 discovery tests cover asset-matched Chainlink resolution rule eligibility and ineligible handling for mismatched or incomplete metadata.
 
+M6 verification status: PASS.
+- M6 local checks passed: `cargo fmt --check`, `cargo test --offline` (84 tests), and `cargo clippy --offline -- -D warnings`.
+- M6 lifecycle tests cover maker fills, taker fills with per-market fees, partial fill math, cancel, expire, reject, and the no-risk-approval/no-order invariant.
+- M6 P&L tests cover taker fee math, maker fee zero, position average price updates, realized P&L, unrealized P&L, deterministic replay of identical fills, settlement marking to winning/losing/split market outcomes, and storage-ready position snapshots.
+- M6 storage tests cover paper order, fill, position, balance, and risk-event write paths.
+- M6 safety scan found no source path for live order placement, signing, wallet, API key, or private-key handling. Matches were documentation/status text plus the live-order-disabled runtime flag.
+- No new runtime verification was started; `paper` and `replay` runtime stubs remain unchanged.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -124,10 +144,11 @@ M6 is complete only when:
 - Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
 - Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
+- Final start/end settlement artifact verification is still required before reporting can claim live post-market reconciliation, but it does not block the M6 executor/P&L implementation gate.
 
 ## Next Concrete Action
 
-Start M6 paper executor/P&L only after keeping `PaperOrderIntent` behind risk approval; do not add live order placement, signing, wallet, or key handling.
+Start M7 replay/reports. Keep settlement artifact verification as report evidence, and do not add live order placement, signing, wallet, or key handling.
 
 ## Update Checklist
 
