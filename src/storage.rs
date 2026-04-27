@@ -78,6 +78,8 @@ pub trait StorageBackend {
 
     fn insert_config_snapshot(&self, snapshot: ConfigSnapshot) -> StorageResult<()>;
 
+    fn read_config_snapshot(&self, run_id: &str) -> StorageResult<Option<ConfigSnapshot>>;
+
     fn insert_paper_order(&self, order: PaperOrder) -> StorageResult<()>;
 
     fn insert_paper_fill(&self, fill: PaperFill) -> StorageResult<()>;
@@ -179,6 +181,12 @@ impl StorageBackend for InMemoryStorage {
                 .config_snapshots
                 .insert(snapshot.run_id.clone(), snapshot);
             Ok(())
+        })
+    }
+
+    fn read_config_snapshot(&self, run_id: &str) -> StorageResult<Option<ConfigSnapshot>> {
+        self.with_state("read_config_snapshot", |state| {
+            Ok(state.config_snapshots.get(run_id).cloned())
         })
     }
 
@@ -485,6 +493,10 @@ mod tests {
         storage
             .insert_config_snapshot(snapshot)
             .expect("config snapshot writes");
+        assert!(storage
+            .read_config_snapshot("run-1")
+            .expect("config snapshot reads")
+            .is_some());
         storage.insert_paper_order(order).expect("order writes");
         storage.insert_paper_fill(fill).expect("fill writes");
         storage

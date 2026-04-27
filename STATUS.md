@@ -17,15 +17,15 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m6/paper-executor-pnl`
-- Short commit: `e6fa663`
-- Worktree status: M6 paper executor/P&L implementation fixes and status updates are present but uncommitted.
+- Branch: `m7/replay-reports`
+- Short commit: `5f4d166`
+- Worktree status: M7 replay/report/storage completion fixes are present but uncommitted.
 
 ## Milestones
 
-- Last completed milestone: M6 - Paper Executor And P&L.
-- Active milestone: M7 - Replay Engine And Reports.
-- Next milestone: M7 - Replay Engine And Reports.
+- Last completed milestone: M7 - Replay Engine And Reports.
+- Active milestone: M7 final handoff; M6 final settlement artifact verification remains PARTIAL.
+- Next milestone: M8 - Observability And Production-Like Runbook.
 
 ## M3 Scope Lock
 
@@ -85,13 +85,15 @@ Heartbeat intent for M3:
 | Coherent decision snapshots | PASS | `StateStore::decision_snapshot` returns one read-only view of market, book, reference, predictive, and explicit position state. |
 | Runtime scope lock | PASS | `paper` and `replay` runtime stubs remain unchanged; no strategy, paper execution, live order, signing, wallet, or private-key path was added. |
 
-## Next Exit Gate
+## M7 Acceptance Matrix
 
-M7 is complete only when:
-
-- Replay can reconstruct deterministic state and paper outcomes from recorded normalized events.
-- Replay outputs fills, P&L, latency, missed opportunities, and risk halt report inputs.
-- Identical replay input plus config produces identical outputs.
+| Gate item | Status | Evidence / decision |
+| --- | --- | --- |
+| Captured/synthetic runs replay deterministically | PASS | `ReplayEngine` consumes ordered `EventEnvelope`s from fixtures or `StorageBackend::read_run_events`; storage-backed config snapshot loading and in-memory storage replay tests pass. |
+| Report generation works offline | PASS | `reporting::ReplayReport` is built from replay-local records only and includes latency, feed-staleness, opportunity, paper audit, and per-market/per-asset P&L summaries. |
+| Determinism checks fail on intentional event drift | PASS | Replay tests remove an input event, mutate an ordering key, and compare generated paper events against recorded paper events. |
+| M4/M5/M6 logic is reused | PASS | Replay updates `StateStore`, evaluates `SignalEngine`/`RiskEngine`, opens/fills only through `PaperExecutor`, and updates `PaperPositionBook`. |
+| Runtime scope lock | PASS | `paper` and `replay` runtime stubs remain unchanged; M7 is library/offline wiring only. |
 
 ## M6 Current State
 
@@ -103,7 +105,7 @@ M7 is complete only when:
 - `PaperPositionBook` tracks positions by market/token/asset, average price, realized P&L, unrealized marks, settlement marks, fees, and deterministic exposure snapshots.
 - Storage now has paper position and balance write APIs matching the existing Postgres M6 tables.
 - Position and risk context exposure remain in `state::snapshot` and `risk_engine` from M5 context.
-- Final start/end settlement artifact verification remains deferred to M7/reporting evidence, but M6 can trace P&L to explicit winning-token or split market outcomes.
+- Final start/end settlement artifact verification remains deferred; M7 reports can carry this evidence when available, but no live final settlement artifact verification has been completed.
 
 ## Recent Verification
 
@@ -129,12 +131,19 @@ M7 is complete only when:
 - M5 risk tests cover stale reference, stale book, geoblock, market loss, market/asset/total/correlated notional, order rate, daily drawdown, ineligible/asset-mismatched resolution source rejection, approval, and multi-reason rejection.
 - M5 discovery tests cover asset-matched Chainlink resolution rule eligibility and ineligible handling for mismatched or incomplete metadata.
 
-M6 verification status: PASS.
+M6 executor/P&L implementation status: PASS. Final settlement artifact verification status: PARTIAL.
 - M6 local checks passed: `cargo fmt --check`, `cargo test --offline` (84 tests), and `cargo clippy --offline -- -D warnings`.
 - M6 lifecycle tests cover maker fills, taker fills with per-market fees, partial fill math, cancel, expire, reject, and the no-risk-approval/no-order invariant.
 - M6 P&L tests cover taker fee math, maker fee zero, position average price updates, realized P&L, unrealized P&L, deterministic replay of identical fills, settlement marking to winning/losing/split market outcomes, and storage-ready position snapshots.
 - M6 storage tests cover paper order, fill, position, balance, and risk-event write paths.
 - M6 safety scan found no source path for live order placement, signing, wallet, API key, or private-key handling. Matches were documentation/status text plus the live-order-disabled runtime flag.
+- No new runtime verification was started; `paper` and `replay` runtime stubs remain unchanged.
+
+M7 verification status: PASS.
+- M7 local checks passed: `cargo fmt --check`, `cargo test --offline` (96 tests), and `cargo clippy --offline -- -D warnings`.
+- M7 replay tests cover synthetic deterministic replay, storage-backed event loading in deterministic order, captured config snapshot loading, identical-input determinism, ordering-key drift failure, removed-event drift failure, and generated-vs-recorded paper-event comparison.
+- M7 reporting tests cover deterministic report fingerprints, fingerprint drift, event/signal/risk/paper/P&L counts, audit details, latency summary, feed-staleness windows, opportunity diagnostics, fee totals, and per-market/per-asset P&L grouping.
+- M7 safety scan found no new source path for live order placement, signing, wallet, API key, private-key handling, live feed, or network behavior in the replay/report diff. Full-tree network/feed hits are existing M3 read-only validation/feed-ingestion paths and documented endpoint config.
 - No new runtime verification was started; `paper` and `replay` runtime stubs remain unchanged.
 
 ## Blockers And Risks
@@ -144,11 +153,11 @@ M6 verification status: PASS.
 - Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
 - Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
-- Final start/end settlement artifact verification is still required before reporting can claim live post-market reconciliation, but it does not block the M6 executor/P&L implementation gate.
+- Final start/end settlement artifact verification is still required before M6/M7 reporting can claim live post-market reconciliation.
 
 ## Next Concrete Action
 
-Start M7 replay/reports. Keep settlement artifact verification as report evidence, and do not add live order placement, signing, wallet, or key handling.
+Proceed to M8 observability/runbook, or separately verify final start/end settlement artifacts if live post-market reconciliation evidence is needed before M8.
 
 ## Update Checklist
 
