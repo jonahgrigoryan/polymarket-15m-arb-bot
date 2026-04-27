@@ -5,13 +5,18 @@ edition = "2021"
 description = "Replay-first and paper-trading-first Polymarket 15m crypto arbitrage bot"
 
 [dependencies]
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+ring = "0.17"
+rustls-native-certs = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 postgres = { version = "0.19", features = ["with-serde_json-1"] }
 time = { version = "0.3", features = ["formatting", "parsing"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2.5"

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::domain::{
     Asset, Market, OrderBookLevel, OrderBookSnapshot, PaperFill, PaperOrder, ReferencePrice,
@@ -11,10 +12,12 @@ pub const MODULE: &str = "events";
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     MarketDiscovered,
+    MarketCreated,
     MarketUpdated,
     MarketResolved,
     BookSnapshot,
     BookDelta,
+    TickSizeChange,
     BestBidAsk,
     LastTrade,
     ReferenceTick,
@@ -31,10 +34,12 @@ impl EventType {
     pub fn as_str(&self) -> &'static str {
         match self {
             EventType::MarketDiscovered => "market_discovered",
+            EventType::MarketCreated => "market_created",
             EventType::MarketUpdated => "market_updated",
             EventType::MarketResolved => "market_resolved",
             EventType::BookSnapshot => "book_snapshot",
             EventType::BookDelta => "book_delta",
+            EventType::TickSizeChange => "tick_size_change",
             EventType::BestBidAsk => "best_bid_ask",
             EventType::LastTrade => "last_trade",
             EventType::ReferenceTick => "reference_tick",
@@ -105,6 +110,15 @@ pub enum NormalizedEvent {
     MarketDiscovered {
         market: Market,
     },
+    MarketCreated {
+        market_id: String,
+        condition_id: Option<String>,
+        slug: Option<String>,
+        token_ids: Vec<String>,
+        outcomes: Vec<String>,
+        source_ts: Option<i64>,
+        raw: Value,
+    },
     MarketUpdated {
         market: Market,
         changes: Vec<String>,
@@ -123,6 +137,13 @@ pub enum NormalizedEvent {
         bids: Vec<OrderBookLevel>,
         asks: Vec<OrderBookLevel>,
         hash: Option<String>,
+        source_ts: Option<i64>,
+    },
+    TickSizeChange {
+        market_id: String,
+        token_id: String,
+        old_tick_size: f64,
+        new_tick_size: f64,
         source_ts: Option<i64>,
     },
     BestBidAsk {
@@ -179,10 +200,12 @@ impl NormalizedEvent {
     pub fn event_type(&self) -> EventType {
         match self {
             NormalizedEvent::MarketDiscovered { .. } => EventType::MarketDiscovered,
+            NormalizedEvent::MarketCreated { .. } => EventType::MarketCreated,
             NormalizedEvent::MarketUpdated { .. } => EventType::MarketUpdated,
             NormalizedEvent::MarketResolved { .. } => EventType::MarketResolved,
             NormalizedEvent::BookSnapshot { .. } => EventType::BookSnapshot,
             NormalizedEvent::BookDelta { .. } => EventType::BookDelta,
+            NormalizedEvent::TickSizeChange { .. } => EventType::TickSizeChange,
             NormalizedEvent::BestBidAsk { .. } => EventType::BestBidAsk,
             NormalizedEvent::LastTrade { .. } => EventType::LastTrade,
             NormalizedEvent::ReferenceTick { .. } => EventType::ReferenceTick,
@@ -200,6 +223,8 @@ impl NormalizedEvent {
         match self {
             NormalizedEvent::MarketDiscovered { market }
             | NormalizedEvent::MarketUpdated { market, .. } => Some(market.market_id.clone()),
+            NormalizedEvent::MarketCreated { market_id, .. }
+            | NormalizedEvent::TickSizeChange { market_id, .. } => Some(market_id.clone()),
             NormalizedEvent::MarketResolved { market_id, .. }
             | NormalizedEvent::BookDelta { market_id, .. }
             | NormalizedEvent::BestBidAsk { market_id, .. }
@@ -233,8 +258,10 @@ impl NormalizedEvent {
         match self {
             NormalizedEvent::BookSnapshot { book } => book.source_ts,
             NormalizedEvent::BookDelta { source_ts, .. }
+            | NormalizedEvent::TickSizeChange { source_ts, .. }
             | NormalizedEvent::BestBidAsk { source_ts, .. }
-            | NormalizedEvent::LastTrade { source_ts, .. } => *source_ts,
+            | NormalizedEvent::LastTrade { source_ts, .. }
+            | NormalizedEvent::MarketCreated { source_ts, .. } => *source_ts,
             NormalizedEvent::ReferenceTick { price }
             | NormalizedEvent::PredictiveTick { price } => price.source_ts,
             _ => None,
@@ -370,6 +397,15 @@ mod tests {
             NormalizedEvent::MarketDiscovered {
                 market: market.clone(),
             },
+            NormalizedEvent::MarketCreated {
+                market_id: market.market_id.clone(),
+                condition_id: Some(market.condition_id.clone()),
+                slug: Some(market.slug.clone()),
+                token_ids: vec!["token-up".to_string(), "token-down".to_string()],
+                outcomes: vec!["Up".to_string(), "Down".to_string()],
+                source_ts: Some(1_777_000_000_009),
+                raw: serde_json::json!({"event_type": "new_market"}),
+            },
             NormalizedEvent::MarketUpdated {
                 market: market.clone(),
                 changes: vec!["fees".to_string()],
@@ -389,6 +425,13 @@ mod tests {
                 }],
                 asks: Vec::new(),
                 hash: Some("delta-hash".to_string()),
+                source_ts: Some(1_777_000_000_011),
+            },
+            NormalizedEvent::TickSizeChange {
+                market_id: market.market_id.clone(),
+                token_id: "token-up".to_string(),
+                old_tick_size: 0.01,
+                new_tick_size: 0.001,
                 source_ts: Some(1_777_000_000_011),
             },
             NormalizedEvent::BestBidAsk {

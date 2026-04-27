@@ -12,6 +12,13 @@ alwaysApply: true
 - Check `git status` before editing and preserve unrelated user changes.
 - If using branches, work on one milestone branch at a time and do not switch branches with uncommitted user work.
 
+## Handoff Continuity
+- `STATUS.md` is the project handoff file for current branch, last completed milestone, active milestone, next exit gate, recent verification, blockers/risks, and the next concrete action.
+- If `STATUS.md` exists, read it at the start of each milestone session and reconcile it with `git status`, `AGENTS.md`, `PRD.md`, `IMPLEMENTATION_PLAN.md`, and relevant `verification/*.md` evidence.
+- Update `STATUS.md` after each milestone, major milestone change, or material context change.
+- Before final milestone signoff, update `STATUS.md` with what changed, exact next action, verification status, and known risks or mitigations.
+- If `STATUS.md` is missing, stale, or inconsistent, explicitly report that at session start and rebuild it from the latest authoritative sources before continuing.
+
 ## Execution
 - For multi-step work, keep a short visible TODO/checklist and update it as items complete.
 - Make small, reviewable changes that directly support the active milestone or request.

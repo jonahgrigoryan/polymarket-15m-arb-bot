@@ -139,6 +139,47 @@ impl AppConfig {
             &self.feeds.coinbase_ws_url,
             &["wss://", "ws://"],
         );
+        require_positive_u64(
+            &mut errors,
+            "feeds.connect_timeout_ms",
+            self.feeds.connect_timeout_ms,
+        );
+        require_positive_u64(
+            &mut errors,
+            "feeds.read_timeout_ms",
+            self.feeds.read_timeout_ms,
+        );
+        require_positive_u64(
+            &mut errors,
+            "feeds.stale_after_ms",
+            self.feeds.stale_after_ms,
+        );
+        require_positive_u64(
+            &mut errors,
+            "feeds.reconnect_initial_backoff_ms",
+            self.feeds.reconnect_initial_backoff_ms,
+        );
+        require_positive_u64(
+            &mut errors,
+            "feeds.reconnect_max_backoff_ms",
+            self.feeds.reconnect_max_backoff_ms,
+        );
+        if self.feeds.reconnect_initial_backoff_ms > self.feeds.reconnect_max_backoff_ms {
+            errors.push(
+                "feeds.reconnect_initial_backoff_ms must be less than or equal to feeds.reconnect_max_backoff_ms"
+                    .to_string(),
+            );
+        }
+        require_positive_u16(
+            &mut errors,
+            "feeds.reconnect_max_attempts",
+            self.feeds.reconnect_max_attempts,
+        );
+        require_positive_u16(
+            &mut errors,
+            "feeds.feed_smoke_message_limit",
+            self.feeds.feed_smoke_message_limit,
+        );
         require_url(
             &mut errors,
             "storage.clickhouse_url",
@@ -270,6 +311,13 @@ pub struct FeedsConfig {
     pub resolution_source_url: String,
     pub binance_ws_url: String,
     pub coinbase_ws_url: String,
+    pub connect_timeout_ms: u64,
+    pub read_timeout_ms: u64,
+    pub stale_after_ms: u64,
+    pub reconnect_initial_backoff_ms: u64,
+    pub reconnect_max_backoff_ms: u64,
+    pub reconnect_max_attempts: u16,
+    pub feed_smoke_message_limit: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
