@@ -13,6 +13,47 @@ pub enum Asset {
     Sol,
 }
 
+impl Asset {
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Asset::Btc => "BTC",
+            Asset::Eth => "ETH",
+            Asset::Sol => "SOL",
+        }
+    }
+
+    pub fn chainlink_resolution_source(self) -> &'static str {
+        match self {
+            Asset::Btc => "https://data.chain.link/streams/btc-usd",
+            Asset::Eth => "https://data.chain.link/streams/eth-usd",
+            Asset::Sol => "https://data.chain.link/streams/sol-usd",
+        }
+    }
+
+    pub fn chainlink_symbol(self) -> &'static str {
+        match self {
+            Asset::Btc => "btc/usd",
+            Asset::Eth => "eth/usd",
+            Asset::Sol => "sol/usd",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Asset::Btc => "bitcoin",
+            Asset::Eth => "ethereum",
+            Asset::Sol => "solana",
+        }
+    }
+}
+
+pub fn is_asset_matched_chainlink_resolution_source(asset: Asset, source: &str) -> bool {
+    source
+        .trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(asset.chainlink_resolution_source())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarketLifecycleState {
@@ -96,16 +137,39 @@ pub enum OrderKind {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SignalDecision {
+    pub asset: Asset,
     pub market_id: String,
     pub token_id: String,
+    pub outcome: String,
     pub side: Side,
     pub order_kind: OrderKind,
     pub price: f64,
     pub size: f64,
+    pub notional: f64,
     pub fair_probability: f64,
     pub market_probability: f64,
     pub expected_value_bps: f64,
     pub reason: String,
+    pub required_inputs: Vec<String>,
+    pub created_ts: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct PaperOrderIntent {
+    pub asset: Asset,
+    pub market_id: String,
+    pub token_id: String,
+    pub outcome: String,
+    pub side: Side,
+    pub order_kind: OrderKind,
+    pub price: f64,
+    pub size: f64,
+    pub notional: f64,
+    pub fair_probability: f64,
+    pub market_probability: f64,
+    pub expected_value_bps: f64,
+    pub reason: String,
+    pub required_inputs: Vec<String>,
     pub created_ts: i64,
 }
 
@@ -167,6 +231,7 @@ pub enum RiskHaltReason {
     OrderRateExceeded,
     DailyDrawdown,
     StorageUnavailable,
+    IneligibleMarket,
     Unknown,
 }
 

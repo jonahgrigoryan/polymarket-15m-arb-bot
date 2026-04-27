@@ -17,14 +17,14 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m4/state-order-books`
-- Short commit: `fdcbaf5`
-- Worktree status: M4 implementation and verification updates are present but uncommitted; pre-existing `STATUS.md` handoff edits were preserved and updated.
+- Branch: `m5/signal-risk-engine`
+- Short commit: `b7962b4`
+- Worktree status: M5 implementation and verification fixes are present but uncommitted.
 
 ## Milestones
 
-- Last completed milestone: M4 - In-Memory State And Order Books.
-- Active milestone: M5 - Signal And Risk Engine.
+- Last completed milestone: M5 - Signal And Risk Engine.
+- Active milestone: M6 - Paper Executor And P&L.
 - Next milestone: M6 - Paper Executor And P&L.
 
 ## M3 Scope Lock
@@ -87,11 +87,11 @@ Heartbeat intent for M3:
 
 ## Next Exit Gate
 
-M5 is complete only when:
+M6 is complete only when:
 
-- Signal decisions include reasons and required inputs.
-- Risk engine can reject any intent with a persisted reason.
-- No paper order can be created without passing risk.
+- Maker/taker fill simulation, partial fills, fees, cancellations, and P&L are tested.
+- Every paper order has an audit trail.
+- No live order path exists.
 
 ## Recent Verification
 
@@ -111,17 +111,23 @@ M5 is complete only when:
 - M4 evidence file: `verification/2026-04-27-m4-api-verification.md`.
 - M4 local checks passed: `cargo fmt --check`, `cargo test --offline`, `cargo clippy --offline -- -D warnings`, and `cargo run --offline -- validate --local-only --config config/default.toml`.
 - M4 safety scan found no source path for live order placement, signing, wallet, API key, or private-key handling.
+- M5 evidence file: `verification/2026-04-27-m5-api-verification.md`.
+- M5 local checks passed: `cargo fmt --check`, `cargo test --offline` (69 tests), `cargo clippy --offline -- -D warnings`, and `cargo run --offline -- validate --local-only --config config/default.toml`.
+- M5 signal tests cover controlled fair probability, EV with maker/taker costs, raw fee formula handling, phase classification, candidates, missing/mismatched resolution source skips, ineligible-market skips, and explicit skip reasons.
+- M5 risk tests cover stale reference, stale book, geoblock, market loss, market/asset/total/correlated notional, order rate, daily drawdown, ineligible/asset-mismatched resolution source rejection, approval, and multi-reason rejection.
+- M5 discovery tests cover asset-matched Chainlink resolution rule eligibility and ineligible handling for mismatched or incomplete metadata.
 
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
-- M5 depends on API verification sections 7, 8, 11, and 12 before signal/risk correctness can be treated as complete.
-- Local Polymarket geoblock currently reports blocked `US/CA`; this is expected for compliance testing and must remain fail-closed for trading-capable modes.
+- M5 API verification sections 7, 8, 11, and 12 are complete for M5 signal/risk scope.
+- Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
+- Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
 
 ## Next Concrete Action
 
-Start M5 signal/risk implementation after confirming API verification sections 7, 8, 11, and 12.
+Start M6 paper executor/P&L only after keeping `PaperOrderIntent` behind risk approval; do not add live order placement, signing, wallet, or key handling.
 
 ## Update Checklist
 

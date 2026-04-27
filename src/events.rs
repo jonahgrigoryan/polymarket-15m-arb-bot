@@ -346,16 +346,20 @@ mod tests {
             recv_wall_ts: 1_777_000_000_003,
         };
         let decision = SignalDecision {
+            asset: Asset::Btc,
             market_id: market.market_id.clone(),
             token_id: "token-up".to_string(),
+            outcome: "Up".to_string(),
             side: Side::Buy,
             order_kind: OrderKind::Maker,
             price: 0.49,
             size: 10.0,
+            notional: 4.9,
             fair_probability: 0.53,
             market_probability: 0.50,
             expected_value_bps: 100.0,
             reason: "unit sample".to_string(),
+            required_inputs: vec!["unit sample input".to_string()],
             created_ts: 1_777_000_000_004,
         };
         let order = PaperOrder {

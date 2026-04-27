@@ -7,7 +7,10 @@ use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::domain::{Asset, FeeParameters, Market, MarketLifecycleState, OutcomeToken};
+use crate::domain::{
+    is_asset_matched_chainlink_resolution_source, Asset, FeeParameters, Market,
+    MarketLifecycleState, OutcomeToken,
+};
 use crate::events::{EventEnvelope, NormalizedEvent};
 use crate::storage::{StorageBackend, StorageResult};
 
@@ -353,6 +356,12 @@ fn map_gamma_market(
     {
         ineligibility_reasons.push("missing taker fee setting".to_string());
     }
+    if gamma.fees_enabled.is_none() {
+        ineligibility_reasons.push("missing fees enabled setting".to_string());
+    }
+    if gamma.fee_schedule.is_none() && clob_info.and_then(|info| info.fd.as_ref()).is_none() {
+        ineligibility_reasons.push("missing fee schedule".to_string());
+    }
 
     let outcomes = outcome_tokens(&gamma, clob_info);
     if outcomes.len() != 2 {
@@ -367,14 +376,21 @@ fn map_gamma_market(
         ineligibility_reasons.push("missing 15-minute up/down slug interval".to_string());
     }
 
-    if gamma
+    let resolution_source = gamma
         .resolution_source
         .as_deref()
         .unwrap_or_default()
-        .trim()
-        .is_empty()
-    {
+        .trim();
+    if resolution_source.is_empty() {
         ineligibility_reasons.push("missing resolution source".to_string());
+    } else if !is_asset_matched_chainlink_resolution_source(asset, resolution_source) {
+        ineligibility_reasons
+            .push("resolution source is not the asset-matched Chainlink stream".to_string());
+    }
+    if !resolution_rules_match_asset(asset, &gamma) {
+        ineligibility_reasons.push(
+            "resolution rules do not identify the asset-matched Chainlink stream".to_string(),
+        );
     }
     if gamma.enable_order_book == Some(false) {
         ineligibility_reasons.push("order book disabled".to_string());
@@ -474,22 +490,44 @@ fn outcome_tokens(gamma: &GammaMarket, clob_info: Option<&ClobMarketInfo>) -> Ve
 
 fn fee_parameters(gamma: &GammaMarket, clob_info: Option<&ClobMarketInfo>) -> FeeParameters {
     let mut raw_fee_config = gamma.fee_schedule.clone();
-    let maker_fee_bps = clob_info
-        .and_then(|info| value_to_f64(info.mbf.as_ref()))
-        .unwrap_or(0.0);
-    let taker_fee_bps = clob_info
-        .and_then(|info| value_to_f64(info.tbf.as_ref()))
-        .unwrap_or(0.0);
 
     if raw_fee_config.is_none() {
         raw_fee_config = clob_info.and_then(|info| info.fd.clone());
     }
 
+    let taker_fee_bps = raw_fee_config
+        .as_ref()
+        .and_then(|raw| fee_rate(raw).map(|rate| rate * 0.25 * 10_000.0))
+        .or_else(|| clob_info.and_then(|info| value_to_f64(info.tbf.as_ref())))
+        .unwrap_or(0.0);
+
     FeeParameters {
         fees_enabled: gamma.fees_enabled.unwrap_or(raw_fee_config.is_some()),
-        maker_fee_bps,
+        maker_fee_bps: 0.0,
         taker_fee_bps,
         raw_fee_config,
+    }
+}
+
+fn resolution_rules_match_asset(asset: Asset, gamma: &GammaMarket) -> bool {
+    let haystack = market_haystack(gamma);
+    haystack.contains("chainlink")
+        && haystack.contains("data stream")
+        && (haystack.contains(asset.chainlink_resolution_source())
+            || haystack.contains(asset.chainlink_symbol()))
+        && (haystack.contains(&asset.symbol().to_ascii_lowercase())
+            || haystack.contains(asset.display_name()))
+}
+
+fn fee_rate(raw_fee_config: &Value) -> Option<f64> {
+    let rate = raw_fee_config
+        .get("r")
+        .or_else(|| raw_fee_config.get("rate"))
+        .and_then(|value| value_to_f64(Some(value)))?;
+    if rate.is_finite() && rate >= 0.0 {
+        Some(rate)
+    } else {
+        None
     }
 }
 
@@ -676,8 +714,9 @@ mod tests {
             "id": "1",
             "slug": "btc-updown-15m-1777248000",
             "question": "Bitcoin Up or Down - April 26, 8:00PM-8:15PM ET",
+            "description": btc_description(),
             "conditionId": "condition-btc",
-            "resolutionSource": "Chainlink BTC stream",
+            "resolutionSource": Asset::Btc.chainlink_resolution_source(),
             "startDate": "2026-04-26T00:08:47.17342Z",
             "endDate": "2026-04-27T00:15:00Z",
             "active": true,
@@ -689,7 +728,7 @@ mod tests {
             "clobTokenIds": "[\"token-up\",\"token-down\"]",
             "outcomes": "[\"Up\",\"Down\"]",
             "feesEnabled": true,
-            "feeSchedule": {"rate": 0.02, "exponent": 2, "takerOnly": true}
+            "feeSchedule": {"rate": 0.072, "exponent": 1, "takerOnly": true}
         }))
         .expect("gamma fixture parses");
 
@@ -704,6 +743,8 @@ mod tests {
         assert_eq!(market.end_ts, 1_777_248_900_000);
         assert_eq!(market.outcomes.len(), 2);
         assert_eq!(market.outcomes[0].token_id, "token-up");
+        assert_eq!(market.fee_parameters.maker_fee_bps, 0.0);
+        assert_eq!(market.fee_parameters.taker_fee_bps, 180.0);
         assert!(market.ineligibility_reason.is_none());
     }
 
@@ -713,8 +754,9 @@ mod tests {
             "id": "2",
             "slug": "eth-updown-15m-1777248000",
             "question": "ETH Up or Down",
+            "description": eth_description(),
             "conditionId": "condition-eth",
-            "resolutionSource": "Chainlink ETH stream",
+            "resolutionSource": Asset::Eth.chainlink_resolution_source(),
             "startDate": "2026-04-26T00:08:31.193838Z",
             "endDate": "2026-04-27T00:15:00Z",
             "active": true,
@@ -733,7 +775,7 @@ mod tests {
             "mts": 0.01,
             "mbf": 0,
             "tbf": 0,
-            "fd": {"r": 0.02, "e": 2, "to": true}
+            "fd": {"r": 0.072, "e": 1, "to": true}
         }))
         .expect("clob fixture parses");
 
@@ -790,8 +832,9 @@ mod tests {
             "id": "5",
             "slug": "btc-updown-15m-1777248000",
             "question": "BTC Up or Down",
+            "description": btc_description(),
             "conditionId": "condition-btc",
-            "resolutionSource": "Chainlink BTC stream",
+            "resolutionSource": Asset::Btc.chainlink_resolution_source(),
             "startDate": "2026-04-26T00:08:47.17342Z",
             "endDate": "2026-04-27T00:15:00Z",
             "active": true,
@@ -820,14 +863,49 @@ mod tests {
     }
 
     #[test]
+    fn asset_mismatched_resolution_source_is_ineligible() {
+        let gamma: GammaMarket = serde_json::from_value(serde_json::json!({
+            "id": "6",
+            "slug": "btc-updown-15m-1777248000",
+            "question": "BTC Up or Down",
+            "description": eth_description(),
+            "conditionId": "condition-btc",
+            "resolutionSource": Asset::Eth.chainlink_resolution_source(),
+            "startDate": "2026-04-26T00:08:47.17342Z",
+            "endDate": "2026-04-27T00:15:00Z",
+            "active": true,
+            "closed": false,
+            "enableOrderBook": true,
+            "acceptingOrders": true,
+            "orderPriceMinTickSize": 0.01,
+            "orderMinSize": 5,
+            "clobTokenIds": ["token-up", "token-down"],
+            "outcomes": ["Up", "Down"],
+            "feesEnabled": true,
+            "feeSchedule": {"rate": 0.072, "exponent": 1, "takerOnly": true}
+        }))
+        .expect("gamma fixture parses");
+
+        let market = map_gamma_market(gamma, Some(&clob_fee_info()), None);
+
+        assert_eq!(market.lifecycle_state, MarketLifecycleState::Ineligible);
+        let reason = market.ineligibility_reason.as_deref().unwrap_or_default();
+        assert!(reason.contains("resolution source is not the asset-matched Chainlink stream"));
+        assert!(
+            reason.contains("resolution rules do not identify the asset-matched Chainlink stream")
+        );
+    }
+
+    #[test]
     fn persist_discovered_markets_writes_market_and_event() {
         let storage = InMemoryStorage::default();
         let gamma: GammaMarket = serde_json::from_value(serde_json::json!({
             "id": "4",
             "slug": "btc-updown-15m-1777248000",
             "question": "BTC Up or Down",
+            "description": btc_description(),
             "conditionId": "condition-btc",
-            "resolutionSource": "Chainlink BTC stream",
+            "resolutionSource": Asset::Btc.chainlink_resolution_source(),
             "startDate": "2026-04-26T00:08:47.17342Z",
             "endDate": "2026-04-27T00:15:00Z",
             "active": true,
@@ -859,8 +937,16 @@ mod tests {
             "mts": 0.01,
             "mbf": 0,
             "tbf": 0,
-            "fd": {"r": 0.02, "e": 2, "to": true}
+            "fd": {"r": 0.072, "e": 1, "to": true}
         }))
         .expect("clob fixture parses")
+    }
+
+    fn btc_description() -> &'static str {
+        "This market resolves using Chainlink BTC/USD data stream available at https://data.chain.link/streams/btc-usd. It is about Bitcoin price according to Chainlink, not other sources or spot markets."
+    }
+
+    fn eth_description() -> &'static str {
+        "This market resolves using Chainlink ETH/USD data stream available at https://data.chain.link/streams/eth-usd. It is about Ethereum price according to Chainlink, not other sources or spot markets."
     }
 }
