@@ -17,15 +17,15 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m3/feed-ingestion-normalization`
-- Short commit: `8de9085`
-- Worktree status: M3 implementation and verification fixes are present; `.cursor/rules/30-development-workflow.mdc`, `STATUS.md`, source/config changes, and `verification/2026-04-27-m3-api-verification.md` are uncommitted.
+- Branch: `m4/state-order-books`
+- Short commit: `fdcbaf5`
+- Worktree status: M4 implementation and verification updates are present but uncommitted; pre-existing `STATUS.md` handoff edits were preserved and updated.
 
 ## Milestones
 
-- Last completed milestone: M3 - Feed Ingestion And Normalization.
-- Active milestone: M4 - In-Memory State And Order Books.
-- Next milestone: M5 - Signal And Risk Engine.
+- Last completed milestone: M4 - In-Memory State And Order Books.
+- Active milestone: M5 - Signal And Risk Engine.
+- Next milestone: M6 - Paper Executor And P&L.
 
 ## M3 Scope Lock
 
@@ -75,14 +75,23 @@ Heartbeat intent for M3:
 - Respond to WebSocket protocol ping frames with protocol pong frames.
 - No heartbeat behavior change is required before M3 commit.
 
+## M4 Acceptance Matrix
+
+| Gate item | Status | Evidence / decision |
+| --- | --- | --- |
+| API sections 3, 5, 10 | PASS | See `verification/2026-04-27-m4-api-verification.md`. |
+| Deterministic book updates | PASS | `state::order_book` tests cover snapshot replacement, deltas, removals, and identical event sequences. |
+| Explicit stale state | PASS | `BookFreshness` and `ReferenceFreshness` expose missing/fresh/stale states. |
+| Coherent decision snapshots | PASS | `StateStore::decision_snapshot` returns one read-only view of market, book, reference, predictive, and explicit position state. |
+| Runtime scope lock | PASS | `paper` and `replay` runtime stubs remain unchanged; no strategy, paper execution, live order, signing, wallet, or private-key path was added. |
+
 ## Next Exit Gate
 
-M4 is complete only when:
+M5 is complete only when:
 
-- API verification sections 3, 5, and 10 pass.
-- Book updates are deterministic.
-- Stale state is explicit.
-- Decision snapshots are coherent.
+- Signal decisions include reasons and required inputs.
+- Risk engine can reject any intent with a persisted reason.
+- No paper order can be created without passing risk.
 
 ## Recent Verification
 
@@ -99,19 +108,20 @@ M4 is complete only when:
 - M3 feed smoke persisted 6 raw messages and emitted 6 normalized events.
 - M3 REST book snapshot recovery probe normalized 1 book snapshot.
 - M3 parser/recorder tests cover documented CLOB market WebSocket message types, REST book snapshots, Binance ticks, Coinbase ticks, generic resolution-source ticks, raw+normalized persistence, staleness, heartbeat filtering, and reconnect backoff.
+- M4 evidence file: `verification/2026-04-27-m4-api-verification.md`.
+- M4 local checks passed: `cargo fmt --check`, `cargo test --offline`, `cargo clippy --offline -- -D warnings`, and `cargo run --offline -- validate --local-only --config config/default.toml`.
+- M4 safety scan found no source path for live order placement, signing, wallet, API key, or private-key handling.
 
 ## Blockers And Risks
 
-- M3 API verification sections 4, 5, 9, and 10 are complete for M3 scope.
-- M4 must implement actual snapshot/delta reconciliation and state replacement using the M3-verified REST/WebSocket book shapes.
+- M4 API verification sections 3, 5, and 10 are complete for M4 scope.
+- M5 depends on API verification sections 7, 8, 11, and 12 before signal/risk correctness can be treated as complete.
 - Local Polymarket geoblock currently reports blocked `US/CA`; this is expected for compliance testing and must remain fail-closed for trading-capable modes.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
 
 ## Next Concrete Action
 
-Commit M3 after user approval, then start M4 on a new branch.
-
-M4 first action: implement deterministic order book state that can accept the M3-normalized REST `BookSnapshot` and WebSocket `BookDelta` events, then add tests for snapshot replacement, price-level removal, stale state, and coherent read-only decision snapshots.
+Start M5 signal/risk implementation after confirming API verification sections 7, 8, 11, and 12.
 
 ## Update Checklist
 
