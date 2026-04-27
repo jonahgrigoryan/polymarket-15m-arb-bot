@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::sync::Mutex;
 
+use postgres::{Client, NoTls};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -212,6 +213,143 @@ impl InMemoryStorage {
             .lock()
             .map_err(|_| StorageError::backend(operation, "in-memory storage lock poisoned"))?;
         action(&mut state)
+    }
+}
+
+pub struct PostgresMarketStore {
+    client: Client,
+}
+
+impl PostgresMarketStore {
+    pub fn connect(postgres_url: &str) -> StorageResult<Self> {
+        let mut client = Client::connect(postgres_url, NoTls)
+            .map_err(|source| StorageError::backend("postgres_connect", source.to_string()))?;
+        client
+            .batch_execute(include_str!(
+                "../migrations/postgres/0001_relational_state.sql"
+            ))
+            .map_err(|source| {
+                StorageError::backend("postgres_apply_migration", source.to_string())
+            })?;
+
+        Ok(Self { client })
+    }
+
+    pub fn upsert_markets(&mut self, markets: &[Market]) -> StorageResult<usize> {
+        for market in markets {
+            self.upsert_market(market)?;
+        }
+
+        Ok(markets.len())
+    }
+
+    pub fn count_markets_by_ids(&mut self, market_ids: &[String]) -> StorageResult<usize> {
+        let unique_ids = market_ids.iter().collect::<HashSet<_>>();
+        let mut found = 0usize;
+
+        for market_id in &unique_ids {
+            let row = self
+                .client
+                .query_one(
+                    "SELECT count(*) FROM markets WHERE market_id = $1",
+                    &[market_id],
+                )
+                .map_err(|source| {
+                    StorageError::backend("postgres_count_markets", source.to_string())
+                })?;
+            let count: i64 = row.get(0);
+            if count > 0 {
+                found += 1;
+            }
+        }
+
+        Ok(found)
+    }
+
+    fn upsert_market(&mut self, market: &Market) -> StorageResult<()> {
+        let payload = serde_json::to_value(market).map_err(|source| StorageError::Serialize {
+            operation: "serialize_market",
+            message: source.to_string(),
+        })?;
+        let asset = asset_symbol(market.asset);
+        let lifecycle_state = lifecycle_state_name(&market.lifecycle_state);
+
+        self.client
+            .execute(
+                "
+                INSERT INTO markets
+                    (
+                        market_id,
+                        slug,
+                        title,
+                        asset,
+                        condition_id,
+                        start_ts,
+                        end_ts,
+                        resolution_source,
+                        tick_size,
+                        min_order_size,
+                        lifecycle_state,
+                        ineligibility_reason,
+                        payload,
+                        updated_at
+                    )
+                VALUES
+                    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+                ON CONFLICT (market_id) DO UPDATE SET
+                    slug = EXCLUDED.slug,
+                    title = EXCLUDED.title,
+                    asset = EXCLUDED.asset,
+                    condition_id = EXCLUDED.condition_id,
+                    start_ts = EXCLUDED.start_ts,
+                    end_ts = EXCLUDED.end_ts,
+                    resolution_source = EXCLUDED.resolution_source,
+                    tick_size = EXCLUDED.tick_size,
+                    min_order_size = EXCLUDED.min_order_size,
+                    lifecycle_state = EXCLUDED.lifecycle_state,
+                    ineligibility_reason = EXCLUDED.ineligibility_reason,
+                    payload = EXCLUDED.payload,
+                    updated_at = now()
+                ",
+                &[
+                    &market.market_id,
+                    &market.slug,
+                    &market.title,
+                    &asset,
+                    &market.condition_id,
+                    &market.start_ts,
+                    &market.end_ts,
+                    &market.resolution_source,
+                    &market.tick_size,
+                    &market.min_order_size,
+                    &lifecycle_state,
+                    &market.ineligibility_reason,
+                    &payload,
+                ],
+            )
+            .map_err(|source| {
+                StorageError::backend("postgres_upsert_market", source.to_string())
+            })?;
+
+        Ok(())
+    }
+}
+
+fn asset_symbol(asset: crate::domain::Asset) -> &'static str {
+    match asset {
+        crate::domain::Asset::Btc => "BTC",
+        crate::domain::Asset::Eth => "ETH",
+        crate::domain::Asset::Sol => "SOL",
+    }
+}
+
+fn lifecycle_state_name(state: &crate::domain::MarketLifecycleState) -> &'static str {
+    match state {
+        crate::domain::MarketLifecycleState::Discovered => "discovered",
+        crate::domain::MarketLifecycleState::Active => "active",
+        crate::domain::MarketLifecycleState::Ineligible => "ineligible",
+        crate::domain::MarketLifecycleState::Resolved => "resolved",
+        crate::domain::MarketLifecycleState::Closed => "closed",
     }
 }
 

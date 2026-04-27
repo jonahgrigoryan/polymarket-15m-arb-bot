@@ -4,7 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use polymarket_15m_arb_bot::{config::AppConfig, module_names, safety};
+use polymarket_15m_arb_bot::{
+    compliance::{ComplianceClient, ComplianceError},
+    config::AppConfig,
+    domain::{Asset, MarketLifecycleState},
+    market_discovery::{emit_market_lifecycle_events, MarketDiscoveryClient},
+    module_names, safety,
+    storage::{InMemoryStorage, PostgresMarketStore, StorageError},
+};
 use tracing::field::{Field, Visit};
 use tracing::info;
 use tracing::{Event, Subscriber};
@@ -35,7 +42,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Validate local config and M0 safety invariants.
-    Validate,
+    Validate {
+        #[arg(long, help = "Skip M2 online geoblock and market discovery checks")]
+        local_only: bool,
+    },
     /// Load config for future paper mode. Strategy execution starts in later milestones.
     Paper,
     /// Load config for future replay mode. Replay execution starts in later milestones.
@@ -48,7 +58,7 @@ enum Commands {
 impl Commands {
     fn name(&self) -> &'static str {
         match self {
-            Commands::Validate => "validate",
+            Commands::Validate { .. } => "validate",
             Commands::Paper => "paper",
             Commands::Replay { .. } => "replay",
         }
@@ -83,7 +93,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     match cli.command {
-        Commands::Validate => {
+        Commands::Validate { local_only } => {
             println!("validation_status=ok");
             println!("run_id={run_id}");
             println!("mode=validate");
@@ -94,8 +104,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "live_order_placement_enabled={}",
                 safety::LIVE_ORDER_PLACEMENT_ENABLED
             );
+            if local_only {
+                println!("online_validation_status=skipped");
+            } else {
+                run_m2_online_validation(&config, &run_id).await?;
+            }
         }
         Commands::Paper => {
+            let geoblock = compliance_client(&config)?.check_geoblock().await?;
+            ComplianceError::fail_if_blocked(&geoblock)?;
             println!("validation_status=ok");
             println!("run_id={run_id}");
             println!("mode=paper");
@@ -124,6 +141,106 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+async fn run_m2_online_validation(
+    config: &AppConfig,
+    run_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let geoblock = compliance_client(config)?.check_geoblock().await?;
+    let masked_geoblock = geoblock.masked_for_logs();
+    println!("geoblock_blocked={}", masked_geoblock.blocked);
+    println!(
+        "geoblock_country={}",
+        masked_geoblock.country.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "geoblock_region={}",
+        masked_geoblock.region.as_deref().unwrap_or("unknown")
+    );
+
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    let ineligible_count = discovery_run
+        .markets
+        .iter()
+        .filter(|market| market.ineligibility_reason.is_some())
+        .count();
+    let market_ids = discovery_run
+        .markets
+        .iter()
+        .map(|market| market.market_id.clone())
+        .collect::<Vec<_>>();
+    let postgres_url = config.storage.postgres_url.clone();
+    let markets_for_postgres = discovery_run.markets.clone();
+    let market_ids_for_readback = market_ids.clone();
+    let (persisted_count, readback_count) =
+        tokio::task::spawn_blocking(move || -> Result<(usize, usize), StorageError> {
+            let mut postgres = PostgresMarketStore::connect(&postgres_url)?;
+            let persisted_count = postgres.upsert_markets(&markets_for_postgres)?;
+            let readback_count = postgres.count_markets_by_ids(&market_ids_for_readback)?;
+            Ok((persisted_count, readback_count))
+        })
+        .await??;
+    if readback_count != market_ids.len() {
+        return Err(StorageError::backend(
+            "postgres_market_readback",
+            format!(
+                "expected {} discovered markets in Postgres, read back {readback_count}",
+                market_ids.len()
+            ),
+        )
+        .into());
+    }
+
+    let lifecycle_event_storage = InMemoryStorage::default();
+    let event_count = emit_market_lifecycle_events(
+        &lifecycle_event_storage,
+        run_id,
+        unix_time_ms(),
+        monotonic_like_ns(),
+        &discovery_run.markets,
+    )?;
+
+    println!("market_discovery_status=ok");
+    println!("market_discovery_pages={}", discovery_run.pages_fetched);
+    println!("market_discovery_count={}", discovery_run.markets.len());
+    println!("market_discovery_ineligible_count={ineligible_count}");
+    println!("market_discovery_postgres_persisted_count={persisted_count}");
+    println!("market_discovery_postgres_readback_count={readback_count}");
+    println!("market_lifecycle_event_count={event_count}");
+    for market in &discovery_run.markets {
+        let outcomes = market
+            .outcomes
+            .iter()
+            .map(|outcome| outcome.outcome.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
+        println!(
+            "market_discovery_market=asset={},slug={},state={},start_ts={},end_ts={},outcomes={}",
+            asset_symbol(market.asset),
+            market.slug,
+            lifecycle_state_name(&market.lifecycle_state),
+            market.start_ts,
+            market.end_ts,
+            outcomes
+        );
+    }
+
+    Ok(())
+}
+
+fn compliance_client(config: &AppConfig) -> Result<ComplianceClient, Box<dyn std::error::Error>> {
+    Ok(ComplianceClient::new(
+        &config.polymarket.geoblock_url,
+        config.polymarket.request_timeout_ms,
+    )?)
 }
 
 fn init_tracing(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -258,6 +375,42 @@ fn escape_json(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn unix_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .ok()
+        .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or_default()
+}
+
+fn monotonic_like_ns() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .ok()
+        .and_then(|value| u64::try_from(value).ok())
+        .unwrap_or_default()
+}
+
+fn asset_symbol(asset: Asset) -> &'static str {
+    match asset {
+        Asset::Btc => "BTC",
+        Asset::Eth => "ETH",
+        Asset::Sol => "SOL",
+    }
+}
+
+fn lifecycle_state_name(state: &MarketLifecycleState) -> &'static str {
+    match state {
+        MarketLifecycleState::Discovered => "discovered",
+        MarketLifecycleState::Active => "active",
+        MarketLifecycleState::Ineligible => "ineligible",
+        MarketLifecycleState::Resolved => "resolved",
+        MarketLifecycleState::Closed => "closed",
+    }
 }
 
 fn generate_run_id() -> String {

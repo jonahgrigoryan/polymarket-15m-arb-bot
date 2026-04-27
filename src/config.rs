@@ -85,6 +85,42 @@ impl AppConfig {
             &self.polymarket.geoblock_url,
             &["https://", "http://"],
         );
+        require_positive_u64(
+            &mut errors,
+            "polymarket.request_timeout_ms",
+            self.polymarket.request_timeout_ms,
+        );
+        require_range_u16(
+            &mut errors,
+            "polymarket.market_discovery_page_limit",
+            self.polymarket.market_discovery_page_limit,
+            1,
+            1_000,
+        );
+        require_positive_u16(
+            &mut errors,
+            "polymarket.market_discovery_max_pages",
+            self.polymarket.market_discovery_max_pages,
+        );
+        require_positive_u64(
+            &mut errors,
+            "polymarket.market_discovery_poll_ms",
+            self.polymarket.market_discovery_poll_ms,
+        );
+        require_range_u16(
+            &mut errors,
+            "polymarket.gamma_markets_request_limit_per_10s",
+            self.polymarket.gamma_markets_request_limit_per_10s,
+            1,
+            300,
+        );
+        require_range_u16(
+            &mut errors,
+            "polymarket.clob_market_info_request_limit_per_10s",
+            self.polymarket.clob_market_info_request_limit_per_10s,
+            1,
+            9_000,
+        );
         require_url(
             &mut errors,
             "feeds.resolution_source_url",
@@ -221,6 +257,12 @@ pub struct PolymarketConfig {
     pub market_ws_url: String,
     pub gamma_markets_url: String,
     pub geoblock_url: String,
+    pub request_timeout_ms: u64,
+    pub market_discovery_page_limit: u16,
+    pub market_discovery_max_pages: u16,
+    pub market_discovery_poll_ms: u64,
+    pub gamma_markets_request_limit_per_10s: u16,
+    pub clob_market_info_request_limit_per_10s: u16,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -370,6 +412,20 @@ fn require_url(errors: &mut Vec<String>, name: &str, value: &str, schemes: &[&st
 fn require_positive_u64(errors: &mut Vec<String>, name: &str, value: u64) {
     if value == 0 {
         errors.push(format!("{name} must be greater than zero"));
+    }
+}
+
+fn require_positive_u16(errors: &mut Vec<String>, name: &str, value: u16) {
+    if value == 0 {
+        errors.push(format!("{name} must be greater than zero"));
+    }
+}
+
+fn require_range_u16(errors: &mut Vec<String>, name: &str, value: u16, min: u16, max: u16) {
+    if value < min || value > max {
+        errors.push(format!(
+            "{name} must be between {min} and {max}; got {value}"
+        ));
     }
 }
 
