@@ -8,8 +8,15 @@ use polymarket_15m_arb_bot::{
     compliance::{ComplianceClient, ComplianceError},
     config::AppConfig,
     domain::{Asset, MarketLifecycleState},
+    feed_ingestion::{
+        binance_combined_trade_url, coinbase_ticker_subscription, FeedConnectionConfig,
+        FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
+        PolymarketMarketSubscription, ReadOnlyWebSocketClient,
+    },
     market_discovery::{emit_market_lifecycle_events, MarketDiscoveryClient},
-    module_names, safety,
+    module_names,
+    normalization::{SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB},
+    safety,
     storage::{InMemoryStorage, PostgresMarketStore, StorageError},
 };
 use tracing::field::{Field, Visit};
@@ -45,6 +52,10 @@ enum Commands {
     Validate {
         #[arg(long, help = "Skip M2 online geoblock and market discovery checks")]
         local_only: bool,
+        #[arg(long, help = "Run M3 read-only feed WebSocket smoke checks")]
+        feed_smoke: bool,
+        #[arg(long, help = "Override feed smoke message limit")]
+        feed_message_limit: Option<usize>,
     },
     /// Load config for future paper mode. Strategy execution starts in later milestones.
     Paper,
@@ -93,7 +104,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     match cli.command {
-        Commands::Validate { local_only } => {
+        Commands::Validate {
+            local_only,
+            feed_smoke,
+            feed_message_limit,
+        } => {
             println!("validation_status=ok");
             println!("run_id={run_id}");
             println!("mode=validate");
@@ -108,6 +123,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("online_validation_status=skipped");
             } else {
                 run_m2_online_validation(&config, &run_id).await?;
+            }
+            if feed_smoke {
+                run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
             }
         }
         Commands::Paper => {
@@ -139,6 +157,137 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
+
+    Ok(())
+}
+
+async fn run_m3_feed_smoke(
+    config: &AppConfig,
+    run_id: &str,
+    feed_message_limit: Option<usize>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let message_limit =
+        feed_message_limit.unwrap_or(usize::from(config.feeds.feed_smoke_message_limit));
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    let Some(market) = discovery_run
+        .markets
+        .iter()
+        .find(|market| market.ineligibility_reason.is_none() && market.outcomes.len() == 2)
+    else {
+        return Err("feed smoke requires one eligible market with two outcome tokens".into());
+    };
+    let asset_ids = market
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.token_id.clone())
+        .collect::<Vec<_>>();
+    let polymarket_subscription = PolymarketMarketSubscription::new(asset_ids);
+    let client = ReadOnlyWebSocketClient;
+    let storage = InMemoryStorage::default();
+    let snapshot_client = PolymarketBookSnapshotClient::new(
+        &config.polymarket.clob_rest_url,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let snapshot_payload = snapshot_client
+        .fetch_book(&market.outcomes[0].token_id)
+        .await?;
+    let snapshot_recorder = FeedRecorder::new(&storage, run_id, SOURCE_POLYMARKET_CLOB);
+    let snapshot_recorded = snapshot_recorder.record_message(
+        snapshot_payload,
+        unix_time_ms(),
+        monotonic_like_ns(),
+        0,
+    )?;
+    if snapshot_recorded.normalized_event_count == 0 {
+        return Err("book snapshot recovery probe produced no normalized events".into());
+    }
+    println!(
+        "book_snapshot_recovery_status=ok,normalized_events={}",
+        snapshot_recorded.normalized_event_count
+    );
+
+    let probes = [
+        FeedConnectionConfig {
+            source: SOURCE_POLYMARKET_CLOB.to_string(),
+            ws_url: config.polymarket.market_ws_url.clone(),
+            subscribe_payload: Some(polymarket_subscription.to_payload()),
+            message_limit,
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+        FeedConnectionConfig {
+            source: SOURCE_BINANCE.to_string(),
+            ws_url: binance_combined_trade_url(&config.feeds.binance_ws_url),
+            subscribe_payload: None,
+            message_limit,
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+        FeedConnectionConfig {
+            source: SOURCE_COINBASE.to_string(),
+            ws_url: config.feeds.coinbase_ws_url.clone(),
+            subscribe_payload: Some(coinbase_ticker_subscription()),
+            message_limit: message_limit.max(3),
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+    ];
+
+    for probe in probes {
+        let result = client.connect_and_capture(&probe).await?;
+        let mut health = FeedHealthTracker::new(&probe.source, config.feeds.stale_after_ms);
+        health.mark_connected(unix_time_ms());
+        let recorder = FeedRecorder::new(&storage, run_id, probe.source.clone());
+        let mut normalized_count = 0usize;
+        let mut unknown_count = 0usize;
+        for (index, message) in result.received_text_messages.iter().enumerate() {
+            let recv_wall_ts = unix_time_ms();
+            let recorded = recorder.record_message(
+                message.as_str(),
+                recv_wall_ts,
+                monotonic_like_ns(),
+                1_000 + index as u64,
+            )?;
+            normalized_count += recorded.normalized_event_count;
+            if recorded.unknown_event_type.is_some() {
+                unknown_count += 1;
+            }
+            health.mark_message(recv_wall_ts, None);
+        }
+        let observed_health = health.observe(unix_time_ms());
+
+        println!(
+            "feed_smoke_source={},connected={},raw_messages={},normalized_events={},unknown_messages={},health={:?}",
+            probe.source,
+            result.connected,
+            result.received_text_messages.len(),
+            normalized_count,
+            unknown_count,
+            observed_health.status
+        );
+        if normalized_count == 0 {
+            return Err(format!(
+                "feed smoke source {} connected but produced no normalized events",
+                probe.source
+            )
+            .into());
+        }
+    }
+    println!(
+        "feed_smoke_persisted_raw_count={}",
+        storage.raw_message_count()?
+    );
+    println!(
+        "feed_smoke_persisted_normalized_count={}",
+        storage.normalized_event_count()?
+    );
 
     Ok(())
 }

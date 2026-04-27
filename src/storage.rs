@@ -203,6 +203,14 @@ impl StorageBackend for InMemoryStorage {
 }
 
 impl InMemoryStorage {
+    pub fn raw_message_count(&self) -> StorageResult<usize> {
+        self.with_state("raw_message_count", |state| Ok(state.raw_messages.len()))
+    }
+
+    pub fn normalized_event_count(&self) -> StorageResult<usize> {
+        self.with_state("normalized_event_count", |state| Ok(state.events.len()))
+    }
+
     fn with_state<T>(
         &self,
         operation: &'static str,

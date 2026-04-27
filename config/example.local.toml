@@ -24,6 +24,13 @@ clob_market_info_request_limit_per_10s = 50
 resolution_source_url = "https://data.chain.link/streams"
 binance_ws_url = "wss://stream.binance.com:9443/ws"
 coinbase_ws_url = "wss://ws-feed.exchange.coinbase.com"
+connect_timeout_ms = 8_000
+read_timeout_ms = 5_000
+stale_after_ms = 2_000
+reconnect_initial_backoff_ms = 250
+reconnect_max_backoff_ms = 5_000
+reconnect_max_attempts = 5
+feed_smoke_message_limit = 20
 
 [storage]
 clickhouse_url = "http://localhost:8123"
