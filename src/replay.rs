@@ -296,6 +296,7 @@ impl<'a> ReplayExecution<'a> {
             &ordered_events,
             stable_fingerprint(&ordered_events)?,
             stable_fingerprint(self.config)?,
+            self.config,
         );
 
         for envelope in &ordered_events {
@@ -620,7 +621,10 @@ fn replay_metadata(
     events: &[EventEnvelope],
     input_fingerprint: String,
     config_fingerprint: String,
+    config: &AppConfig,
 ) -> ReplayRunMetadata {
+    let is_pyth_proxy = config.reference_feed.is_pyth_proxy_enabled();
+    let is_chainlink = config.reference_feed.provider == "chainlink";
     ReplayRunMetadata {
         run_id: source_run_id.to_string(),
         replay_run_id: format!("{source_run_id}:offline-replay"),
@@ -628,6 +632,8 @@ fn replay_metadata(
         input_fingerprint: Some(input_fingerprint),
         config_fingerprint: Some(config_fingerprint),
         code_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        evidence_type: evidence_type(events, config),
+        live_market_evidence: live_market_evidence(events),
         started_wall_ts: events.first().map(|event| event.recv_wall_ts),
         completed_wall_ts: events.last().map(|event| event.recv_wall_ts),
         first_event_recv_wall_ts: None,
@@ -635,6 +641,42 @@ fn replay_metadata(
         first_event_source_ts: None,
         last_event_source_ts: None,
         source_timestamp_regressions: count_source_timestamp_regressions(events),
+        reference_feed_mode: Some(config.reference_feed.provider.clone()),
+        reference_provider: is_pyth_proxy.then(|| "pyth".to_string()),
+        matches_market_resolution_source: is_pyth_proxy.then_some(false),
+        live_readiness_evidence: is_chainlink,
+        settlement_reference_evidence: is_chainlink,
+    }
+}
+
+fn evidence_type(events: &[EventEnvelope], config: &AppConfig) -> Option<String> {
+    if events
+        .iter()
+        .any(|event| event.source == "deterministic_fixture")
+    {
+        Some("deterministic_fixture".to_string())
+    } else if config.reference_feed.is_pyth_proxy_enabled() {
+        Some("pyth_proxy_live_ingestion".to_string())
+    } else {
+        None
+    }
+}
+
+fn live_market_evidence(events: &[EventEnvelope]) -> Option<bool> {
+    if events
+        .iter()
+        .any(|event| event.source == "deterministic_fixture")
+    {
+        Some(false)
+    } else if events.iter().any(|event| {
+        matches!(
+            event.source.as_str(),
+            "polymarket_clob" | "binance" | "coinbase" | "pyth_proxy"
+        )
+    }) {
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -682,6 +724,7 @@ mod tests {
         ReferencePrice, Side,
     };
     use crate::events::EventType;
+    use crate::reference_feed::SOURCE_PYTH_PROXY;
     use crate::storage::{ConfigSnapshot, InMemoryStorage};
 
     const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
@@ -721,6 +764,82 @@ mod tests {
         assert_eq!(first.generated_fills.len(), 1);
         assert!(first.report.pnl.totals.fees_paid >= 0.0);
         assert!(!first.report.determinism_fingerprint().is_empty());
+    }
+
+    #[test]
+    fn pyth_proxy_reference_ticks_replay_deterministically_with_proxy_labels() {
+        let mut config = config();
+        config.reference_feed.provider = "pyth_proxy".to_string();
+        config.reference_feed.pyth_enabled = true;
+        let engine = ReplayEngine::new(config);
+        let events = pyth_proxy_synthetic_events();
+
+        let first = engine
+            .replay_events(RUN_ID, events.clone())
+            .expect("first proxy replay succeeds");
+        let second = engine
+            .replay_events(RUN_ID, events)
+            .expect("second proxy replay succeeds");
+        let check = compare_replay_results(&first, &second);
+
+        assert!(check.passed);
+        assert_eq!(
+            first
+                .report
+                .events
+                .counts_by_type
+                .get(EventType::ReferenceTick.as_str()),
+            Some(&1)
+        );
+        assert_eq!(
+            first.report.metadata.reference_feed_mode.as_deref(),
+            Some("pyth_proxy")
+        );
+        assert_eq!(
+            first.report.metadata.reference_provider.as_deref(),
+            Some("pyth")
+        );
+        assert_eq!(
+            first.report.metadata.matches_market_resolution_source,
+            Some(false)
+        );
+        assert!(!first.report.metadata.live_readiness_evidence);
+        assert!(!first.report.metadata.settlement_reference_evidence);
+        assert!(first.report.signals.emitted_order_intent_count > 0);
+        assert!(
+            first
+                .report
+                .signals
+                .skip_reason_counts
+                .get("missing_reference_price")
+                .copied()
+                .unwrap_or_default()
+                < first.report.signals.evaluated_count
+        );
+    }
+
+    #[test]
+    fn deterministic_fixture_source_labels_report_metadata() {
+        let engine = ReplayEngine::new(config());
+        let events = synthetic_events()
+            .into_iter()
+            .map(|mut event| {
+                event.source = "deterministic_fixture".to_string();
+                event
+            })
+            .collect::<Vec<_>>();
+
+        let result = engine
+            .replay_events(RUN_ID, events)
+            .expect("fixture replay succeeds");
+
+        assert_eq!(
+            result.report.metadata.evidence_type.as_deref(),
+            Some("deterministic_fixture")
+        );
+        assert_eq!(result.report.metadata.live_market_evidence, Some(false));
+        assert!(!result.report.metadata.live_readiness_evidence);
+        assert!(!result.report.metadata.settlement_reference_evidence);
     }
 
     #[test]
@@ -984,6 +1103,20 @@ mod tests {
         synthetic_events_for_run_and_asset(RUN_ID, Asset::Btc)
     }
 
+    fn pyth_proxy_synthetic_events() -> Vec<EventEnvelope> {
+        synthetic_events()
+            .into_iter()
+            .map(|mut envelope| {
+                if let NormalizedEvent::ReferenceTick { price } = &mut envelope.payload {
+                    price.provider = Some("pyth".to_string());
+                    price.matches_market_resolution_source = Some(false);
+                    envelope.source = SOURCE_PYTH_PROXY.to_string();
+                }
+                envelope
+            })
+            .collect()
+    }
+
     fn synthetic_events_for_run_and_asset(run_id: &str, asset: Asset) -> Vec<EventEnvelope> {
         let market_id = asset_market_id(asset);
         let up_token_id = asset_up_token_id(asset);
@@ -1220,6 +1353,9 @@ mod tests {
             asset,
             source: source.to_string(),
             price,
+            confidence: None,
+            provider: None,
+            matches_market_resolution_source: None,
             source_ts: Some(recv_wall_ts - 1),
             recv_wall_ts,
         }

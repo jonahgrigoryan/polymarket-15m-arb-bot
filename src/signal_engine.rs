@@ -1196,6 +1196,42 @@ mod tests {
     }
 
     #[test]
+    fn fresh_pyth_proxy_reference_tick_proceeds_past_missing_reference() {
+        let engine = SignalEngine::new(test_config());
+        let mut snapshot = decision_snapshot(START_TS + 120_000, vec![book(0.49, 0.51)], vec![]);
+        snapshot.reference_prices[0].provider = Some("pyth".to_string());
+        snapshot.reference_prices[0].matches_market_resolution_source = Some(false);
+
+        let evaluation = engine.evaluate(&snapshot);
+
+        assert!(evaluation.candidate.is_some());
+        assert!(!evaluation
+            .skip_reasons
+            .contains(&SignalSkipReason::MissingReferencePrice));
+        assert_eq!(
+            evaluation.fair_probability.reference_source,
+            Some(resolution_source())
+        );
+    }
+
+    #[test]
+    fn stale_pyth_proxy_reference_tick_fails_closed() {
+        let engine = SignalEngine::new(test_config());
+        let mut snapshot = decision_snapshot(START_TS + 120_000, vec![book(0.49, 0.51)], vec![]);
+        snapshot.reference_prices[0].provider = Some("pyth".to_string());
+        snapshot.reference_prices[0].matches_market_resolution_source = Some(false);
+        snapshot.reference_freshness[0].age_ms = Some(1_001);
+        snapshot.reference_freshness[0].is_stale = true;
+
+        let evaluation = engine.evaluate(&snapshot);
+
+        assert!(evaluation.candidate.is_none());
+        assert!(evaluation
+            .skip_reasons
+            .contains(&SignalSkipReason::StaleReferencePrice));
+    }
+
+    #[test]
     fn maker_and_taker_ev_include_fees_spread_slippage_and_buffers() {
         let config = SignalEngineConfig {
             min_edge_bps: 50.0,
@@ -1529,6 +1565,9 @@ mod tests {
                 asset: Asset::Btc,
                 source: resolution_source(),
                 price: 100.0,
+                confidence: None,
+                provider: None,
+                matches_market_resolution_source: None,
                 source_ts: Some(now_wall_ts - 100),
                 recv_wall_ts: now_wall_ts - 90,
             }],
@@ -1536,6 +1575,9 @@ mod tests {
                 asset: Asset::Btc,
                 source: "binance".to_string(),
                 price: 101.0,
+                confidence: None,
+                provider: None,
+                matches_market_resolution_source: None,
                 source_ts: Some(now_wall_ts - 50),
                 recv_wall_ts: now_wall_ts - 40,
             }],

@@ -1,3 +1,8 @@
+# Temporary M9 paper/replay validation config.
+# This opt-in config uses Pyth as a proxy reference feed only. It is not
+# settlement-source or live-readiness evidence for current Chainlink-resolved
+# Polymarket BTC/ETH/SOL 15m markets.
+
 [runtime]
 mode = "validate"
 log_level = "info"
@@ -30,8 +35,8 @@ reconnect_max_attempts = 5
 feed_smoke_message_limit = 20
 
 [reference_feed]
-provider = "none"
-pyth_enabled = false
+provider = "pyth_proxy"
+pyth_enabled = true
 pyth_hermes_url = "https://hermes.pyth.network"
 pyth_btc_usd_price_id = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
 pyth_eth_usd_price_id = "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"

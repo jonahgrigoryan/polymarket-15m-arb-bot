@@ -7,7 +7,10 @@ use clap::{Parser, Subcommand};
 use polymarket_15m_arb_bot::{
     compliance::{ComplianceClient, ComplianceError},
     config::AppConfig,
-    domain::{Asset, Market, MarketLifecycleState, PaperOrderStatus, RiskHaltReason},
+    domain::{
+        Asset, FeeParameters, Market, MarketLifecycleState, OrderBookLevel, OrderBookSnapshot,
+        OutcomeToken, PaperOrderStatus, ReferencePrice, RiskHaltReason, Side,
+    },
     events::{EventEnvelope, NormalizedEvent},
     feed_ingestion::{
         binance_combined_trade_url, coinbase_ticker_subscription, FeedConnectionConfig,
@@ -23,13 +26,17 @@ use polymarket_15m_arb_bot::{
     },
     module_names,
     normalization::{SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB},
-    replay::{compare_generated_to_recorded_paper_events, ReplayEngine, ReplayRunResult},
+    reference_feed::{PythHermesClient, SOURCE_PYTH_PROXY},
+    replay::{
+        compare_generated_to_recorded_paper_events, compare_replay_results, ReplayEngine,
+        ReplayRunResult,
+    },
     reporting::deterministic_report_json,
     safety,
     shutdown::{GracefulShutdownState, RuntimeMode},
     storage::{
         ConfigSnapshot, FileSessionStorage, InMemoryStorage, PaperBalanceSnapshot,
-        PostgresMarketStore, RiskEvent, StorageBackend, StorageError,
+        PostgresMarketStore, RawMessage, RiskEvent, StorageBackend, StorageError,
     },
 };
 use tokio::net::TcpListener;
@@ -77,6 +84,11 @@ enum Commands {
     Paper {
         #[arg(long, help = "Override generated paper run ID")]
         run_id: Option<String>,
+        #[arg(
+            long,
+            help = "Write an offline deterministic M9 paper lifecycle fixture session"
+        )]
+        deterministic_fixture: bool,
         #[arg(long, help = "Messages to capture per feed per cycle")]
         feed_message_limit: Option<usize>,
         #[arg(
@@ -173,11 +185,16 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Commands::Paper {
                 run_id: paper_run_id,
+                deterministic_fixture,
                 feed_message_limit,
                 cycles,
             } => {
                 let paper_run_id = paper_run_id.unwrap_or(run_id.clone());
-                run_paper_runtime(&config, &paper_run_id, feed_message_limit, cycles).await?;
+                if deterministic_fixture {
+                    run_deterministic_lifecycle_fixture(&config, &paper_run_id)?;
+                } else {
+                    run_paper_runtime(&config, &paper_run_id, feed_message_limit, cycles).await?;
+                }
             }
             Commands::Replay {
                 run_id: replay_run_id,
@@ -272,6 +289,15 @@ async fn run_paper_runtime(
     println!("mode=paper");
     println!("paper_mode_status=runtime_enabled");
     println!("paper_storage_backend=file_session");
+    let reference_provider = if config.reference_feed.is_pyth_proxy_enabled() {
+        "pyth"
+    } else {
+        "none"
+    };
+    println!("reference_feed_mode={}", config.reference_feed.provider);
+    println!("reference_provider={reference_provider}");
+    println!("settlement_reference_evidence=false");
+    println!("live_readiness_evidence=false");
     println!(
         "paper_session_dir={}",
         storage.session_dir(run_id)?.display()
@@ -453,6 +479,331 @@ async fn run_replay_runtime(
     Ok(())
 }
 
+fn run_deterministic_lifecycle_fixture(
+    config: &AppConfig,
+    run_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const FIXTURE_SOURCE: &str = "deterministic_fixture";
+    const FIXTURE_START_TS: i64 = 1_777_000_000_000;
+
+    let storage = FileSessionStorage::for_run(&config.replay.output_dir, run_id)?;
+    if storage.session_exists(run_id)? {
+        return Err(format!(
+            "deterministic fixture run_id={run_id} already exists under {}; choose a new run_id to avoid duplicate session writes",
+            config.replay.output_dir
+        )
+        .into());
+    }
+
+    storage.insert_config_snapshot(ConfigSnapshot::from_config(
+        run_id,
+        FIXTURE_START_TS,
+        config,
+    )?)?;
+
+    let events = deterministic_lifecycle_fixture_events(run_id, FIXTURE_SOURCE, FIXTURE_START_TS);
+    let mut markets_written = 0usize;
+    for event in &events {
+        if let NormalizedEvent::MarketDiscovered { market } = &event.payload {
+            storage.upsert_market(market.clone())?;
+            markets_written += 1;
+        }
+        storage.append_raw_message(RawMessage {
+            run_id: run_id.to_string(),
+            source: FIXTURE_SOURCE.to_string(),
+            recv_wall_ts: event.recv_wall_ts,
+            recv_mono_ns: event.recv_mono_ns,
+            ingest_seq: event.ingest_seq,
+            payload: serde_json::to_string(&event.payload)?,
+        })?;
+        storage.append_normalized_event(event.clone())?;
+    }
+
+    let generated = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+    if generated.generated_orders.is_empty() || generated.generated_fills.is_empty() {
+        return Err(format!(
+            "deterministic fixture did not produce required order/fill evidence: orders={} fills={}",
+            generated.generated_orders.len(),
+            generated.generated_fills.len()
+        )
+        .into());
+    }
+
+    let appended = append_recorded_paper_events_deterministic(
+        &storage,
+        run_id,
+        &generated,
+        FIXTURE_SOURCE,
+        FIXTURE_START_TS + 700_000,
+    )?;
+    let final_result = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+    let repeated_result = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+    let replay_check = compare_replay_results(&final_result, &repeated_result);
+    if !replay_check.passed {
+        return Err(
+            "deterministic fixture replay fingerprint changed across identical runs".into(),
+        );
+    }
+    let paper_check = compare_generated_to_recorded_paper_events(&final_result)?;
+    if !paper_check.passed {
+        return Err(format!(
+            "deterministic fixture generated/recorded paper event divergence for run_id={run_id}: {}",
+            paper_check
+                .divergence
+                .as_deref()
+                .unwrap_or("fingerprint mismatch")
+        )
+        .into());
+    }
+
+    persist_paper_outputs_at(
+        &storage,
+        run_id,
+        config,
+        &final_result,
+        FIXTURE_START_TS + 800_000,
+    )?;
+    let paper_report_path = write_runtime_artifacts(
+        &storage,
+        run_id,
+        "paper_report.json",
+        "paper_metrics.prom",
+        &final_result,
+        false,
+    )?;
+    let replay_report_path = write_runtime_artifacts(
+        &storage,
+        run_id,
+        "replay_report.json",
+        "replay_metrics.prom",
+        &final_result,
+        false,
+    )?;
+    storage.sync_session(run_id)?;
+
+    println!("validation_status=ok");
+    println!("run_id={run_id}");
+    println!("mode=paper");
+    println!("paper_mode_status=deterministic_fixture");
+    println!("evidence_type=deterministic_fixture");
+    println!("live_market_evidence=false");
+    println!("live_readiness_evidence=false");
+    println!("settlement_reference_evidence=false");
+    println!(
+        "paper_session_dir={}",
+        storage.session_dir(run_id)?.display()
+    );
+    println!("fixture_market_count={markets_written}");
+    println!("fixture_input_event_count={}", events.len());
+    println!("fixture_recorded_paper_event_count={appended}");
+    println!(
+        "paper_order_count={}",
+        final_result.report.paper.order_count
+    );
+    println!("paper_fill_count={}", final_result.report.paper.fill_count);
+    println!(
+        "paper_filled_notional={:.6}",
+        final_result.report.paper.total_filled_notional
+    );
+    println!(
+        "paper_fees_paid={:.6}",
+        final_result.report.paper.total_fees_paid
+    );
+    println!(
+        "paper_total_pnl={:.6}",
+        final_result.report.pnl.totals.total_pnl
+    );
+    println!("paper_event_fingerprint={}", paper_check.left_fingerprint);
+    println!(
+        "replay_determinism_fingerprint={}",
+        final_result.report.determinism_fingerprint()
+    );
+    println!("paper_event_match_status=ok");
+    println!("replay_status=deterministic");
+    println!("paper_report_path={}", paper_report_path.display());
+    println!("replay_report_path={}", replay_report_path.display());
+    println!(
+        "live_order_placement_enabled={}",
+        safety::LIVE_ORDER_PLACEMENT_ENABLED
+    );
+
+    Ok(())
+}
+
+fn deterministic_lifecycle_fixture_events(
+    run_id: &str,
+    source: &str,
+    start_ts: i64,
+) -> Vec<EventEnvelope> {
+    let market = deterministic_fixture_market(start_ts);
+    let up_token_id = market.outcomes[0].token_id.clone();
+    let down_token_id = market.outcomes[1].token_id.clone();
+    let market_id = market.market_id.clone();
+
+    vec![
+        deterministic_fixture_envelope(
+            run_id,
+            source,
+            start_ts,
+            1,
+            NormalizedEvent::MarketDiscovered { market },
+        ),
+        deterministic_fixture_envelope(
+            run_id,
+            source,
+            start_ts,
+            2,
+            NormalizedEvent::BookSnapshot {
+                book: deterministic_fixture_book(&market_id, &up_token_id, 0.50, 0.51, start_ts),
+            },
+        ),
+        deterministic_fixture_envelope(
+            run_id,
+            source,
+            start_ts,
+            3,
+            NormalizedEvent::BookSnapshot {
+                book: deterministic_fixture_book(&market_id, &down_token_id, 0.49, 0.51, start_ts),
+            },
+        ),
+        deterministic_fixture_envelope(
+            run_id,
+            source,
+            start_ts,
+            4,
+            NormalizedEvent::ReferenceTick {
+                price: deterministic_fixture_price(
+                    Asset::Btc,
+                    Asset::Btc.chainlink_resolution_source(),
+                    100.0,
+                    start_ts + 300_004,
+                ),
+            },
+        ),
+        deterministic_fixture_envelope(
+            run_id,
+            source,
+            start_ts,
+            5,
+            NormalizedEvent::PredictiveTick {
+                price: deterministic_fixture_price(
+                    Asset::Btc,
+                    SOURCE_BINANCE,
+                    101.0,
+                    start_ts + 300_005,
+                ),
+            },
+        ),
+        deterministic_fixture_envelope(
+            run_id,
+            source,
+            start_ts,
+            6,
+            NormalizedEvent::LastTrade {
+                market_id,
+                token_id: up_token_id,
+                side: Side::Buy,
+                price: 0.51,
+                size: 10.0,
+                fee_rate_bps: Some(200.0),
+                source_ts: Some(start_ts + 300_200),
+            },
+        ),
+    ]
+}
+
+fn deterministic_fixture_envelope(
+    run_id: &str,
+    source: &str,
+    start_ts: i64,
+    seq: u64,
+    payload: NormalizedEvent,
+) -> EventEnvelope {
+    EventEnvelope::new(
+        run_id,
+        format!("deterministic-fixture-{seq}"),
+        source,
+        start_ts + 300_000 + seq as i64,
+        seq,
+        seq,
+        payload,
+    )
+}
+
+fn deterministic_fixture_market(start_ts: i64) -> Market {
+    Market {
+        market_id: "deterministic-btc-taker-market".to_string(),
+        slug: "btc-up-down-15m-deterministic-fixture".to_string(),
+        title: "BTC Up or Down Deterministic Fixture".to_string(),
+        asset: Asset::Btc,
+        condition_id: "deterministic-btc-taker-market".to_string(),
+        outcomes: vec![
+            OutcomeToken {
+                token_id: "deterministic-btc-up-token".to_string(),
+                outcome: "Up".to_string(),
+            },
+            OutcomeToken {
+                token_id: "deterministic-btc-down-token".to_string(),
+                outcome: "Down".to_string(),
+            },
+        ],
+        start_ts,
+        end_ts: start_ts + 900_000,
+        resolution_source: Some(Asset::Btc.chainlink_resolution_source().to_string()),
+        tick_size: 0.01,
+        min_order_size: 5.0,
+        fee_parameters: FeeParameters {
+            fees_enabled: true,
+            maker_fee_bps: 0.0,
+            taker_fee_bps: 200.0,
+            raw_fee_config: None,
+        },
+        lifecycle_state: MarketLifecycleState::Active,
+        ineligibility_reason: None,
+    }
+}
+
+fn deterministic_fixture_book(
+    market_id: &str,
+    token_id: &str,
+    best_bid: f64,
+    best_ask: f64,
+    start_ts: i64,
+) -> OrderBookSnapshot {
+    OrderBookSnapshot {
+        market_id: market_id.to_string(),
+        token_id: token_id.to_string(),
+        bids: vec![OrderBookLevel {
+            price: best_bid,
+            size: 100.0,
+        }],
+        asks: vec![OrderBookLevel {
+            price: best_ask,
+            size: 100.0,
+        }],
+        hash: Some(format!("{token_id}-fixture-hash")),
+        source_ts: Some(start_ts + 299_000),
+    }
+}
+
+fn deterministic_fixture_price(
+    asset: Asset,
+    source: &str,
+    price: f64,
+    recv_wall_ts: i64,
+) -> ReferencePrice {
+    ReferencePrice {
+        asset,
+        source: source.to_string(),
+        price,
+        confidence: None,
+        provider: None,
+        matches_market_resolution_source: None,
+        source_ts: Some(recv_wall_ts - 1),
+        recv_wall_ts,
+    }
+}
+
 #[derive(Debug, Default)]
 struct PaperCaptureCounts {
     raw_messages: usize,
@@ -574,7 +925,67 @@ async fn capture_paper_cycle(
         }
     }
 
+    record_pyth_proxy_reference_ticks(config, run_id, storage, &mut ingest_seq, &mut counts)
+        .await?;
+
     Ok(counts)
+}
+
+async fn record_pyth_proxy_reference_ticks(
+    config: &AppConfig,
+    run_id: &str,
+    storage: &FileSessionStorage,
+    ingest_seq: &mut u64,
+    counts: &mut PaperCaptureCounts,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !config.reference_feed.is_pyth_proxy_enabled() {
+        return Ok(());
+    }
+
+    let recv_wall_ts = unix_time_ms();
+    let recv_mono_ns = monotonic_like_ns();
+    let client = PythHermesClient::new(
+        &config.reference_feed.pyth_hermes_url,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let batch = client
+        .fetch_latest(&config.reference_feed, recv_wall_ts)
+        .await?;
+
+    storage.append_raw_message(RawMessage {
+        run_id: run_id.to_string(),
+        source: SOURCE_PYTH_PROXY.to_string(),
+        recv_wall_ts,
+        recv_mono_ns,
+        ingest_seq: *ingest_seq,
+        payload: batch.raw_payload,
+    })?;
+    counts.raw_messages += 1;
+
+    let event_count = batch.events.len();
+    for (index, event) in batch.events.into_iter().enumerate() {
+        storage.append_normalized_event(EventEnvelope::new(
+            run_id,
+            format!("{SOURCE_PYTH_PROXY}-{}-{index}", *ingest_seq),
+            SOURCE_PYTH_PROXY,
+            recv_wall_ts,
+            recv_mono_ns + index as u64,
+            *ingest_seq + index as u64,
+            event,
+        ))?;
+        counts.normalized_events += 1;
+    }
+    *ingest_seq += 1 + event_count as u64;
+
+    println!(
+        "paper_reference_feed_source={SOURCE_PYTH_PROXY},provider=pyth,normalized_events={event_count},matches_market_resolution_source=false,settlement_reference_evidence=false"
+    );
+
+    if event_count == 0 {
+        return Err("pyth proxy reference feed produced no reference ticks".into());
+    }
+
+    Ok(())
 }
 
 fn select_paper_markets(markets: &[Market]) -> Result<Vec<Market>, Box<dyn std::error::Error>> {
@@ -637,11 +1048,52 @@ fn append_new_recorded_paper_events(
     Ok(appended)
 }
 
+fn append_recorded_paper_events_deterministic(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    result: &ReplayRunResult,
+    source: &str,
+    base_wall_ts: i64,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if !result.recorded_paper_events.is_empty() {
+        return Err(format!(
+            "deterministic fixture expected no pre-recorded paper events, found {}",
+            result.recorded_paper_events.len()
+        )
+        .into());
+    }
+
+    for (index, event) in result.generated_paper_events.iter().cloned().enumerate() {
+        let seq = 10_000 + index as u64;
+        storage.append_normalized_event(EventEnvelope::new(
+            run_id,
+            format!("deterministic-fixture-recorded-paper-{index}"),
+            source,
+            base_wall_ts + index as i64,
+            seq,
+            seq,
+            event,
+        ))?;
+    }
+
+    Ok(result.generated_paper_events.len())
+}
+
 fn persist_paper_outputs(
     storage: &FileSessionStorage,
     run_id: &str,
     config: &AppConfig,
     result: &ReplayRunResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    persist_paper_outputs_at(storage, run_id, config, result, unix_time_ms())
+}
+
+fn persist_paper_outputs_at(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    config: &AppConfig,
+    result: &ReplayRunResult,
+    updated_ts: i64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for order in &result.generated_orders {
         storage.insert_paper_order(order.clone())?;
@@ -681,7 +1133,7 @@ fn persist_paper_outputs(
         cash_balance: config.paper.starting_balance + result.report.pnl.totals.realized_pnl,
         realized_pnl: result.report.pnl.totals.realized_pnl,
         unrealized_pnl: result.report.pnl.totals.unrealized_pnl,
-        updated_ts: unix_time_ms(),
+        updated_ts,
     })?;
     Ok(())
 }

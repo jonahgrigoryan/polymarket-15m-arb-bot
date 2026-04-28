@@ -17,15 +17,15 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m9/multi-session-validation`
-- Short commit: `df28e3e`
-- Worktree status: M9 reference-feed access verification docs are present but uncommitted.
+- Branch: `m9/reference-feed-auth`
+- Short commit: `24aabb0`
+- Worktree status: temporary M9 Pyth proxy reference feed implementation, opt-in config, runtime evidence, and verification docs are present but uncommitted.
 
 ## Milestones
 
 - Last completed milestone: M8 - Observability And Production-Like Runbook.
-- Active milestone: M9 - Multi-Session Validation And Live-Readiness Review is PARTIAL because runtime capture/replay now works, but the real session produced no paper orders/fills due missing live Chainlink Data Streams reference ticks.
-- Next milestone: obtain authorized Chainlink Data Streams access or document that access is unavailable; only after explicit credential-handling scope approval should authenticated reference-source ingestion be implemented and BTC/ETH/SOL paper sessions rerun.
+- Active milestone: M9 - Multi-Session Validation And Live-Readiness Review is PARTIAL for final live-readiness/settlement-source validation because authorized Chainlink Data Streams access is still unavailable. M9 paper runtime/reference plumbing is PROXY-PASS with explicitly enabled Pyth proxy validation.
+- Next milestone: obtain authorized Chainlink Data Streams access or document that access is unavailable; only after explicit credential-handling scope approval should authenticated Chainlink reference-source ingestion be implemented and BTC/ETH/SOL paper sessions rerun.
 
 ## M3 Scope Lock
 
@@ -109,6 +109,10 @@ Heartbeat intent for M3:
 | Reports identify whether strategy performance survives fees and conservative fills | PARTIAL | Real runtime report had 6 signal evaluations, all skipped for `missing_reference_price`, so no paper orders/fills/fees were produced. Fixture tests still exercise fee/P&L math, but real strategy performance needs authorized Chainlink Data Streams reference ticks. |
 | Live-readiness blockers are listed before real orders | PASS | See `verification/2026-04-27-m9-live-readiness-findings.md`. |
 | Live trading remains disabled | PASS | `LIVE_ORDER_PLACEMENT_ENABLED=false`; safety scan found no live order, signing, wallet/key, API-key, real CLOB order-client, live-trading, external-write, or new live-feed path introduced by M9. |
+| Temporary Pyth proxy paper runtime mechanics | PROXY-PASS | Explicit opt-in runs `m9-pyth-proxy-smoke-20260428c` and `m9-pyth-proxy-self-verify-20260428a` persisted BTC/ETH/SOL proxy `ReferenceTick`s, proceeded beyond the all-`missing_reference_price` blocker, and replayed deterministically with `live_readiness_evidence=false` and `settlement_reference_evidence=false`. |
+| Deterministic paper lifecycle fixture | PASS | Offline run `m9-deterministic-paper-lifecycle-20260428a` used the real state/signal/risk/paper/replay path to produce 1 risk-approved taker order, 1 fill, position/balance/P&L artifacts, matching generated-vs-recorded paper events, and deterministic replay fingerprint `sha256:29412f5cae3d50b892f420ad3b3a2a9a27cd878e343ac5fe16d8dc2635aa6a6a`; labels remain `evidence_type=deterministic_fixture`, `live_market_evidence=false`, `live_readiness_evidence=false`, and `settlement_reference_evidence=false`. |
+| Natural live/proxy paper trades | NOT EXERCISED | Natural Pyth proxy run `m9-pyth-proxy-natural-20260428a` captured 220 raw messages, 352 normalized-event rows, and 30 proxy `reference_tick`s, then replayed deterministically with fingerprint `sha256:e87608380e016b801462d5b915abcb8950094d38a0a04a7998ccd1d50f6641da`; it produced 0 orders/fills because all 123 signal evaluations skipped (`missing_reference_price=12`, `stale_book=30`, `stale_reference_price=81`). |
+| Final M9 live-readiness / settlement-source validation | PARTIAL | Current sampled markets still cite Chainlink Data Streams. Pyth proxy and deterministic fixture evidence do not replace Chainlink-backed paper plus replay validation. |
 
 ## M6 Current State
 
@@ -200,6 +204,27 @@ M9 verification status: PARTIAL.
 - M9 safety scans found no source path for live order placement, signing, wallet/key handling, API-key handling, real CLOB order clients, or live trading. New runtime network behavior is read-only geoblock, market discovery, CLOB book snapshots/WebSocket capture, Binance/Coinbase WebSocket capture, and local file writes under `reports/sessions/<run_id>`.
 - M9 remains PARTIAL for trading evidence because the real runtime session did not receive verified resolution-source reference ticks and therefore correctly produced no paper orders/fills.
 - M9 reference-feed access recheck passed as a blocker diagnosis: current BTC/ETH/SOL markets point to Chainlink Data Streams, but real-time Data Streams REST/WebSocket access requires authenticated headers and was not anonymously accessible from this environment. See `verification/2026-04-28-reference-feed-access.md`.
+- M9 Pyth proxy reference validation file: `verification/2026-04-28-m9-pyth-proxy-reference.md`.
+- M9 deterministic paper lifecycle fixture evidence file: `verification/2026-04-28-m9-paper-lifecycle-fixture.md`.
+- Deterministic paper lifecycle fixture run: `m9-deterministic-paper-lifecycle-20260428a`.
+  - Command: `cargo run --offline -- paper --run-id m9-deterministic-paper-lifecycle-20260428a --deterministic-fixture`.
+  - Replay command: `cargo run --offline -- replay --run-id m9-deterministic-paper-lifecycle-20260428a`.
+  - Artifact shape: `config_snapshot.json`, `raw_messages.jsonl`, `normalized_events.jsonl`, `markets.jsonl`, `paper_orders.jsonl`, `paper_fills.jsonl`, `paper_positions.jsonl`, `paper_balances.jsonl`, `risk_events.jsonl`, `paper_report.json`, `replay_report.json`, and metrics files under `reports/sessions/m9-deterministic-paper-lifecycle-20260428a`.
+  - Counts: 6 fixture input events, 2 recorded paper events, 1 paper order, 1 paper fill, 1 paper position, 1 paper balance, 0 risk events.
+  - Filled notional / fees / total P&L: `5.100000` / `0.200000` / `-0.250000`.
+  - Paper event match fingerprint: `sha256:5100fdb817c179770ca91b5691cb36813c0333c7e712dc41b023ac7143a0cbfb`.
+  - Replay determinism fingerprint: `sha256:29412f5cae3d50b892f420ad3b3a2a9a27cd878e343ac5fe16d8dc2635aa6a6a`.
+  - Labels: `evidence_type=deterministic_fixture`, `live_market_evidence=false`, `live_readiness_evidence=false`, and `settlement_reference_evidence=false`.
+- Temporary Pyth proxy config: `config/pyth-proxy.example.toml`; default config remains `reference_feed.provider = "none"` and `pyth_enabled = false`.
+- Pyth proxy bounded run: `cargo run -- --config config/pyth-proxy.example.toml paper --run-id m9-pyth-proxy-smoke-20260428c --feed-message-limit 1 --cycles 1`.
+- Pyth proxy replay: `cargo run --offline -- --config config/pyth-proxy.example.toml replay --run-id m9-pyth-proxy-smoke-20260428c`.
+- Pyth proxy evidence: 12 raw messages, 21 total normalized-event rows (18 feed/reference rows plus 3 market-discovery lifecycle rows), 3 `reference_tick`s, 9 signal evaluations, 0 paper orders/fills, deterministic fingerprint `sha256:45b10220dcad3cdecf428f53a8d57cdc1b078583a30aade83df3484e471f4ba3`.
+- Pyth proxy self-verification run: `m9-pyth-proxy-self-verify-20260428a` captured 12 raw messages, 21 total normalized-event rows, 3 Pyth proxy `reference_tick`s, 0 paper orders, 0 fills, and replayed deterministically with fingerprint `sha256:f05385206b87f7a30986b34002060d2169a75e168d83cad8f8e005ee7a830b6a`.
+- Pyth proxy natural run: `m9-pyth-proxy-natural-20260428a` ran `--feed-message-limit 5 --cycles 10`, captured 220 raw messages, 352 normalized-event rows, 30 Pyth proxy `reference_tick`s, 0 paper orders, 0 fills, 0.000000 total P&L, and replayed deterministically with fingerprint `sha256:e87608380e016b801462d5b915abcb8950094d38a0a04a7998ccd1d50f6641da`.
+- Natural proxy trade interpretation: natural live/proxy paper trades are NOT EXERCISED for `m9-pyth-proxy-natural-20260428a`; signal skips were `missing_reference_price=12`, `stale_book=30`, and `stale_reference_price=81`, with no risk approvals/rejections because no paper intent reached the risk gate.
+- Proxy run interpretation: evaluation proceeded beyond missing reference after proxy ticks and then failed closed on `stale_book` under the current 1-second book freshness threshold. This validates reference plumbing/replay determinism, not strategy profitability.
+- Pyth proxy final checks passed: `cargo fmt --check`, `cargo test --offline` (113 tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- validate --local-only --config config/default.toml`, and `cargo run --offline -- validate --local-only --config config/pyth-proxy.example.toml`.
+- Latest M9 lifecycle/proxy verification passed: `cargo fmt --check`, `cargo test --offline` (114 tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- validate --local-only --config config/default.toml`, `cargo run --offline -- validate --local-only --config config/pyth-proxy.example.toml`, replay of `m9-deterministic-paper-lifecycle-20260428a`, replay of `m9-pyth-proxy-natural-20260428a`, `git diff --check`, and safety scans over `src`, `Cargo.toml`, and `config`.
 
 ## Blockers And Risks
 
@@ -208,7 +233,7 @@ M9 verification status: PARTIAL.
 - Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
 - Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
-- Authorized Chainlink Data Streams reference ingestion and final start/end settlement artifact verification are still required before M6/M7/M8/M9 reporting can claim live post-market reconciliation or real strategy performance.
+- Authorized Chainlink Data Streams reference ingestion and final start/end settlement artifact verification are still required before M6/M7/M8/M9 reporting can claim live post-market reconciliation, settlement-source validation, or real strategy performance.
 
 ## Next Concrete Action
 

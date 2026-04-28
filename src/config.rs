@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub assets: AssetsConfig,
     pub polymarket: PolymarketConfig,
     pub feeds: FeedsConfig,
+    #[serde(default)]
+    pub reference_feed: ReferenceFeedConfig,
     pub storage: StorageConfig,
     pub strategy: StrategyConfig,
     pub risk: RiskConfig,
@@ -180,6 +182,7 @@ impl AppConfig {
             "feeds.feed_smoke_message_limit",
             self.feeds.feed_smoke_message_limit,
         );
+        require_reference_feed_config(&mut errors, &self.reference_feed);
         require_url(
             &mut errors,
             "storage.clickhouse_url",
@@ -318,6 +321,40 @@ pub struct FeedsConfig {
     pub reconnect_max_backoff_ms: u64,
     pub reconnect_max_attempts: u16,
     pub feed_smoke_message_limit: u16,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReferenceFeedConfig {
+    pub provider: String,
+    pub pyth_enabled: bool,
+    pub pyth_hermes_url: String,
+    pub pyth_btc_usd_price_id: String,
+    pub pyth_eth_usd_price_id: String,
+    pub pyth_sol_usd_price_id: String,
+    pub max_staleness_ms: u64,
+}
+
+impl ReferenceFeedConfig {
+    pub fn is_pyth_proxy_enabled(&self) -> bool {
+        self.provider == "pyth_proxy" && self.pyth_enabled
+    }
+}
+
+impl Default for ReferenceFeedConfig {
+    fn default() -> Self {
+        Self {
+            provider: "none".to_string(),
+            pyth_enabled: false,
+            pyth_hermes_url: "https://hermes.pyth.network".to_string(),
+            pyth_btc_usd_price_id:
+                "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43".to_string(),
+            pyth_eth_usd_price_id:
+                "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace".to_string(),
+            pyth_sol_usd_price_id:
+                "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d".to_string(),
+            max_staleness_ms: 5_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -477,6 +514,64 @@ fn require_range_u16(errors: &mut Vec<String>, name: &str, value: u16, min: u16,
     }
 }
 
+fn require_reference_feed_config(errors: &mut Vec<String>, config: &ReferenceFeedConfig) {
+    match config.provider.as_str() {
+        "none" | "pyth_proxy" | "chainlink" => {}
+        provider => errors.push(format!(
+            "reference_feed.provider must be one of none, pyth_proxy, chainlink; got {provider}"
+        )),
+    }
+
+    if config.pyth_enabled && config.provider != "pyth_proxy" {
+        errors.push(
+            "reference_feed.pyth_enabled can be true only when provider is pyth_proxy".to_string(),
+        );
+    }
+    if config.provider == "pyth_proxy" && !config.pyth_enabled {
+        errors.push(
+            "reference_feed.provider=pyth_proxy requires reference_feed.pyth_enabled=true"
+                .to_string(),
+        );
+    }
+
+    require_url(
+        errors,
+        "reference_feed.pyth_hermes_url",
+        &config.pyth_hermes_url,
+        &["https://", "http://"],
+    );
+    require_price_id(
+        errors,
+        "reference_feed.pyth_btc_usd_price_id",
+        &config.pyth_btc_usd_price_id,
+    );
+    require_price_id(
+        errors,
+        "reference_feed.pyth_eth_usd_price_id",
+        &config.pyth_eth_usd_price_id,
+    );
+    require_price_id(
+        errors,
+        "reference_feed.pyth_sol_usd_price_id",
+        &config.pyth_sol_usd_price_id,
+    );
+    require_positive_u64(
+        errors,
+        "reference_feed.max_staleness_ms",
+        config.max_staleness_ms,
+    );
+}
+
+fn require_price_id(errors: &mut Vec<String>, name: &str, value: &str) {
+    let Some(stripped) = value.strip_prefix("0x") else {
+        errors.push(format!("{name} must start with 0x"));
+        return;
+    };
+    if stripped.len() != 64 || !stripped.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        errors.push(format!("{name} must be a 32-byte hex price id"));
+    }
+}
+
 fn require_positive_f64(errors: &mut Vec<String>, name: &str, value: f64) {
     if !value.is_finite() || value <= 0.0 {
         errors.push(format!("{name} must be a finite value greater than zero"));
@@ -493,6 +588,8 @@ mod tests {
     fn default_config_is_valid() {
         let config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
         config.validate().expect("default config validates");
+        assert_eq!(config.reference_feed.provider, "none");
+        assert!(!config.reference_feed.pyth_enabled);
     }
 
     #[test]
@@ -519,5 +616,33 @@ mod tests {
         assert!(error
             .to_string()
             .contains("polymarket.clob_rest_url must not be empty"));
+    }
+
+    #[test]
+    fn pyth_proxy_mode_requires_explicit_opt_in_and_default_ids() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.reference_feed.provider = "pyth_proxy".to_string();
+
+        let error = config
+            .validate()
+            .expect_err("pyth proxy without enabled flag fails");
+        assert!(error
+            .to_string()
+            .contains("provider=pyth_proxy requires reference_feed.pyth_enabled=true"));
+
+        config.reference_feed.pyth_enabled = true;
+        config.validate().expect("explicit pyth proxy validates");
+        assert_eq!(
+            config.reference_feed.pyth_btc_usd_price_id,
+            "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+        );
+        assert_eq!(
+            config.reference_feed.pyth_eth_usd_price_id,
+            "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
+        );
+        assert_eq!(
+            config.reference_feed.pyth_sol_usd_price_id,
+            "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+        );
     }
 }

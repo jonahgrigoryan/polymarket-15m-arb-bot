@@ -141,6 +141,10 @@ pub struct ReplayRunMetadata {
     pub input_fingerprint: Option<String>,
     pub config_fingerprint: Option<String>,
     pub code_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_market_evidence: Option<bool>,
     pub started_wall_ts: Option<i64>,
     pub completed_wall_ts: Option<i64>,
     pub first_event_recv_wall_ts: Option<i64>,
@@ -148,6 +152,16 @@ pub struct ReplayRunMetadata {
     pub first_event_source_ts: Option<i64>,
     pub last_event_source_ts: Option<i64>,
     pub source_timestamp_regressions: u64,
+    #[serde(default)]
+    pub reference_feed_mode: Option<String>,
+    #[serde(default)]
+    pub reference_provider: Option<String>,
+    #[serde(default)]
+    pub matches_market_resolution_source: Option<bool>,
+    #[serde(default)]
+    pub live_readiness_evidence: bool,
+    #[serde(default)]
+    pub settlement_reference_evidence: bool,
 }
 
 impl ReplayRunMetadata {
@@ -968,6 +982,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn report_metadata_can_label_pyth_proxy_as_not_live_readiness_evidence() {
+        let mut report = sample_report();
+        report.metadata.reference_feed_mode = Some("pyth_proxy".to_string());
+        report.metadata.reference_provider = Some("pyth".to_string());
+        report.metadata.matches_market_resolution_source = Some(false);
+        report.metadata.live_readiness_evidence = false;
+        report.metadata.settlement_reference_evidence = false;
+
+        assert_eq!(
+            report.metadata.reference_feed_mode.as_deref(),
+            Some("pyth_proxy")
+        );
+        assert_eq!(report.metadata.reference_provider.as_deref(), Some("pyth"));
+        assert_eq!(
+            report.metadata.matches_market_resolution_source,
+            Some(false)
+        );
+        assert!(!report.metadata.live_readiness_evidence);
+        assert!(!report.metadata.settlement_reference_evidence);
+    }
+
     fn sample_report() -> ReplayReport {
         build_replay_report(ReplayReportInput {
             metadata: ReplayRunMetadata {
@@ -977,6 +1013,8 @@ mod tests {
                 input_fingerprint: Some("sha256:input".to_string()),
                 config_fingerprint: Some("sha256:config".to_string()),
                 code_version: Some("unit-test".to_string()),
+                evidence_type: None,
+                live_market_evidence: None,
                 started_wall_ts: Some(1_777_000_000_000),
                 completed_wall_ts: Some(1_777_000_001_000),
                 first_event_recv_wall_ts: None,
@@ -984,6 +1022,11 @@ mod tests {
                 first_event_source_ts: None,
                 last_event_source_ts: None,
                 source_timestamp_regressions: 0,
+                reference_feed_mode: Some("none".to_string()),
+                reference_provider: None,
+                matches_market_resolution_source: None,
+                live_readiness_evidence: false,
+                settlement_reference_evidence: false,
             },
             feed_stale_after_ms: Some(5),
             events: sample_events(),
@@ -1039,6 +1082,9 @@ mod tests {
                         asset: Asset::Btc,
                         source: "chainlink".to_string(),
                         price: 65_000.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
                         source_ts: Some(1_777_000_000_009),
                         recv_wall_ts: 1_777_000_000_010,
                     },
