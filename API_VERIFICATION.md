@@ -6,13 +6,13 @@ This document defines what must be verified against Polymarket CLOB V2 before th
 
 The goal is to prevent coding against stale assumptions. Polymarket's CLOB V2 migration changes order fields, fee handling, collateral, market info, and SDK support. API behavior must be verified with official docs and read-only live checks before implementation decisions are locked.
 
-As of April 24, 2026, the V2 test endpoint is:
+Before the April 28, 2026 cutover, the V2 test endpoint was:
 
 ```text
 https://clob-v2.polymarket.com
 ```
 
-Polymarket docs state that after the April 28, 2026 cutover, V2 takes over:
+As of the April 28, 2026 post-cutover recheck, Polymarket docs and live read-only behavior identify the production CLOB endpoint as:
 
 ```text
 https://clob.polymarket.com
@@ -93,6 +93,14 @@ Blocks:
 
 - Market discovery can still use Gamma.
 - CLOB REST and signing behavior must wait if endpoint state is unclear.
+
+Post-cutover evidence, 2026-04-28:
+
+- Official docs checked: `https://docs.polymarket.com/api-reference/introduction` and `https://docs.polymarket.com/v2-migration`.
+- Docs state the CLOB API base URL is `https://clob.polymarket.com`; the V2 migration page says `https://clob-v2.polymarket.com` was for pre-cutover testing and V2 takes over `https://clob.polymarket.com` after the April 28 go-live.
+- `curl -sS -D - https://clob.polymarket.com/ok -o /tmp/polymarket-clob-ok.txt` returned `HTTP/2 200` and body `"OK"`.
+- `curl -sS -D - https://clob-v2.polymarket.com/ok -o /tmp/polymarket-clob-v2-ok.txt` returned `HTTP/2 301` with `location: https://clob.polymarket.com/ok`.
+- Result: PASS. `config/polymarket-rtds-chainlink.example.toml` now uses `https://clob.polymarket.com`.
 
 ### 2. Market Discovery Endpoint
 
@@ -599,9 +607,18 @@ Polymarket RTDS Chainlink addendum, 2026-04-28:
 - Polymarket's official RTDS docs identify `wss://ws-live-data.polymarket.com` and an unauthenticated `crypto_prices_chainlink` stream for `btc/usd`, `eth/usd`, and `sol/usd`.
 - The bot now treats `polymarket_rtds_chainlink` as the first read-only reference provider for M9 paper/replay testing. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - RTDS reference ticks are persisted with provider/source metadata `polymarket_rtds_chainlink`, while `ReferencePrice.source` remains the asset-matched Chainlink Data Streams URL required by existing market-resolution gates.
-- Bounded run `m9-rtds-chainlink-smoke-20260428b` persisted 12 BTC/ETH/SOL RTDS Chainlink `ReferenceTick`s, proceeded beyond the all-`missing_reference_price` blocker, and replayed deterministically with fingerprint `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575`.
+- Bounded run `m9-rtds-chainlink-smoke-20260428b` persisted 12 BTC/ETH/SOL RTDS Chainlink `ReferenceTick`s, proceeded beyond the all-`missing_reference_price` blocker, and replayed deterministically. Current replay fingerprint after the runtime ordering compatibility fix is `sha256:8a4dce14a349b92dcf10dfb7dbce1f079f667b2fe91689fb6e93d0fa91f3e0df`.
 - RTDS-backed reference ingestion is settlement-source plumbing evidence, but final M9 live-readiness remains PARTIAL until Chainlink-source paper sessions produce/validate natural risk-reviewed paper behavior and final start/end settlement artifacts are verified.
 - See `verification/2026-04-28-m9-polymarket-rtds-chainlink-reference.md`.
+
+Natural RTDS paper validation addendum, 2026-04-28:
+
+- Longer bounded runs `m9-rtds-natural-20260428d` and `m9-rtds-natural-20260428e` used unchanged signal/risk gates with `config/polymarket-rtds-chainlink.example.toml`.
+- Runtime ordering was fixed so post-RTDS read-only CLOB book snapshots are evaluated against the discovered Gamma market even when CLOB messages use condition IDs.
+- `m9-rtds-natural-20260428d`: 168 raw messages, 205 normalized rows, 48 RTDS ticks, 0 orders, 0 fills, 0.0 P&L, replay fingerprint `sha256:20bba0230ba09694c567f1503c5e044b4ef9a361be563d403e4b20fd8b25b228`.
+- `m9-rtds-natural-20260428e`: 126 raw messages, 156 normalized rows, 36 RTDS ticks, 0 orders, 0 fills, 0.0 P&L, replay fingerprint `sha256:746d6a18a0d6607d3738fd9a38e8efc919d0d1ab588635ddb03fe52ecf5c0dd4`.
+- Natural RTDS-backed paper trades remain NOT EXERCISED because no order intent reached risk approval. Post-fix skip reasons include unchanged EV gate failures (`edge_below_minimum`) plus natural freshness skips.
+- See `verification/2026-04-28-m9-rtds-natural-paper-validation.md`.
 
 ### 12. Server Time And Timestamp Handling
 

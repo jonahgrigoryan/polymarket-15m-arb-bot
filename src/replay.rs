@@ -419,9 +419,13 @@ impl<'a> ReplayExecution<'a> {
         match &envelope.payload {
             NormalizedEvent::MarketDiscovered { market }
             | NormalizedEvent::MarketUpdated { market, .. } => vec![market.market_id.clone()],
-            NormalizedEvent::BookSnapshot { book } => vec![book.market_id.clone()],
+            NormalizedEvent::BookSnapshot { book } => {
+                self.market_ids_for_market_or_condition_id(&book.market_id)
+            }
             NormalizedEvent::BookDelta { market_id, .. }
-            | NormalizedEvent::BestBidAsk { market_id, .. } => vec![market_id.clone()],
+            | NormalizedEvent::BestBidAsk { market_id, .. } => {
+                self.market_ids_for_market_or_condition_id(market_id)
+            }
             NormalizedEvent::ReferenceTick { price }
             | NormalizedEvent::PredictiveTick { price } => self.market_ids_for_asset(price.asset),
             NormalizedEvent::TickSizeChange { .. }
@@ -443,6 +447,20 @@ impl<'a> ReplayExecution<'a> {
             .filter(|market| market.asset == asset)
             .map(|market| market.market_id.clone())
             .collect()
+    }
+
+    fn market_ids_for_market_or_condition_id(&self, market_id: &str) -> Vec<String> {
+        let matches = self
+            .markets
+            .values()
+            .filter(|market| market.market_id == market_id || market.condition_id == market_id)
+            .map(|market| market.market_id.clone())
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            vec![market_id.to_string()]
+        } else {
+            matches
+        }
     }
 
     fn evaluate_market(&mut self, market_id: &str, now_wall_ts: i64) -> ReplayResult<()> {
@@ -872,6 +890,87 @@ mod tests {
         assert!(first.report.metadata.settlement_reference_evidence);
         assert!(!first.report.metadata.live_readiness_evidence);
         assert!(first.report.signals.emitted_order_intent_count > 0);
+    }
+
+    #[test]
+    fn fresh_book_after_reference_tick_evaluates_without_stale_book_skip() {
+        let asset = Asset::Btc;
+        let up_token_id = asset_up_token_id(asset);
+        let down_token_id = asset_down_token_id(asset);
+        let decision_ts = START_TS + 320_000;
+        let events = vec![
+            timed_envelope(
+                1,
+                START_TS + 300_000,
+                NormalizedEvent::MarketDiscovered {
+                    market: market_for_asset(asset),
+                },
+            ),
+            timed_envelope(
+                2,
+                START_TS + 300_001,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &up_token_id, 0.49, 0.51),
+                },
+            ),
+            timed_envelope(
+                3,
+                START_TS + 300_002,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &down_token_id, 0.49, 0.51),
+                },
+            ),
+            timed_envelope(
+                4,
+                decision_ts - 2,
+                NormalizedEvent::PredictiveTick {
+                    price: reference_for_asset(asset, "binance", 100.0, decision_ts - 2),
+                },
+            ),
+            timed_envelope(
+                5,
+                decision_ts - 1,
+                NormalizedEvent::ReferenceTick {
+                    price: reference_for_asset(
+                        asset,
+                        asset.chainlink_resolution_source(),
+                        100.0,
+                        decision_ts - 1,
+                    ),
+                },
+            ),
+            timed_envelope(
+                6,
+                decision_ts,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &up_token_id, 0.49, 0.51),
+                },
+            ),
+            timed_envelope(
+                7,
+                decision_ts + 1,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &down_token_id, 0.49, 0.51),
+                },
+            ),
+        ];
+
+        let result = ReplayEngine::new(config())
+            .replay_events(RUN_ID, events)
+            .expect("fresh post-reference book replay succeeds");
+        let final_signal = result
+            .report
+            .signals
+            .decisions
+            .last()
+            .expect("final signal was evaluated");
+
+        assert!(!final_signal
+            .skip_reasons
+            .iter()
+            .any(|reason| reason == "stale_book"));
+        assert_eq!(final_signal.skip_reasons, vec!["edge_below_minimum"]);
+        assert_eq!(result.report.paper.order_count, 0);
     }
 
     #[test]
@@ -1337,6 +1436,18 @@ mod tests {
         )
     }
 
+    fn timed_envelope(seq: u64, recv_wall_ts: i64, payload: NormalizedEvent) -> EventEnvelope {
+        EventEnvelope::new(
+            RUN_ID,
+            format!("event-{seq}"),
+            "synthetic-fixture",
+            recv_wall_ts,
+            seq,
+            seq,
+            payload,
+        )
+    }
+
     fn recorded_paper_envelope(
         run_id: &str,
         index: usize,
@@ -1411,6 +1522,17 @@ mod tests {
             hash: Some(format!("{token_id}-hash")),
             source_ts: Some(START_TS + 299_000),
         }
+    }
+
+    fn condition_book_for_asset(
+        asset: Asset,
+        token_id: &str,
+        best_bid: f64,
+        best_ask: f64,
+    ) -> OrderBookSnapshot {
+        let mut book = book_for_asset(asset, token_id, best_bid, best_ask);
+        book.market_id = format!("condition-{}", asset.symbol().to_ascii_lowercase());
+        book
     }
 
     fn reference_for_asset(

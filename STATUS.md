@@ -17,15 +17,15 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m9/rtds-chainlink-reference`
-- Short commit: `4b8c527`
-- Worktree status: M9 Polymarket RTDS Chainlink reference provider implementation, opt-in config, runtime evidence, and verification docs are present but uncommitted.
+- Branch: `m9/rtds-natural-paper-validation`
+- Short commit: `465151e`
+- Worktree status: dirty with scoped M9 natural RTDS validation code/docs/report updates; preserve existing user/doc changes.
 
 ## Milestones
 
 - Last completed milestone: M8 - Observability And Production-Like Runbook.
 - Active milestone: M9 - Multi-Session Validation And Live-Readiness Review is PARTIAL for final live-readiness/settlement-source validation. M9 paper runtime/reference plumbing now has PASS evidence through Polymarket RTDS Chainlink, PROXY-PASS evidence through explicitly enabled Pyth proxy validation, and deterministic fixture PASS evidence.
-- Next milestone: run additional Polymarket RTDS Chainlink-backed paper sessions and verify final start/end settlement artifacts. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
+- Next milestone: verify final start/end settlement artifacts and continue natural RTDS Chainlink-backed paper observation until risk-reviewed paper behavior occurs without weakening gates. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 
 ## M3 Scope Lock
 
@@ -112,8 +112,8 @@ Heartbeat intent for M3:
 | Temporary Pyth proxy paper runtime mechanics | PROXY-PASS | Explicit opt-in runs `m9-pyth-proxy-smoke-20260428c` and `m9-pyth-proxy-self-verify-20260428a` persisted BTC/ETH/SOL proxy `ReferenceTick`s, proceeded beyond the all-`missing_reference_price` blocker, and replayed deterministically with `live_readiness_evidence=false` and `settlement_reference_evidence=false`. |
 | Deterministic paper lifecycle fixture | PASS | Offline run `m9-deterministic-paper-lifecycle-20260428a` used the real state/signal/risk/paper/replay path to produce 1 risk-approved taker order, 1 fill, position/balance/P&L artifacts, matching generated-vs-recorded paper events, and deterministic replay fingerprint `sha256:29412f5cae3d50b892f420ad3b3a2a9a27cd878e343ac5fe16d8dc2635aa6a6a`; labels remain `evidence_type=deterministic_fixture`, `live_market_evidence=false`, `live_readiness_evidence=false`, and `settlement_reference_evidence=false`. |
 | Natural live/proxy paper trades | NOT EXERCISED | Natural Pyth proxy run `m9-pyth-proxy-natural-20260428a` captured 220 raw messages, 352 normalized-event rows, and 30 proxy `reference_tick`s, then replayed deterministically with fingerprint `sha256:e87608380e016b801462d5b915abcb8950094d38a0a04a7998ccd1d50f6641da`; it produced 0 orders/fills because all 123 signal evaluations skipped (`missing_reference_price=12`, `stale_book=30`, `stale_reference_price=81`). |
-| Polymarket RTDS Chainlink reference ingestion | PASS | Explicit opt-in run `m9-rtds-chainlink-smoke-20260428b` persisted 12 BTC/ETH/SOL RTDS Chainlink `ReferenceTick`s, replayed deterministically with fingerprint `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575`, and carried `reference_provider=polymarket_rtds_chainlink`, `matches_market_resolution_source=true`, `settlement_reference_evidence=true`, `live_readiness_evidence=false`. |
-| Natural RTDS-backed paper trades | NOT EXERCISED | `m9-rtds-chainlink-smoke-20260428b` produced 0 orders/fills because signals skipped `missing_reference_price=12` before reference ticks and `stale_book=12` after reference ticks; unchanged signal/risk gates were not bypassed. |
+| Polymarket RTDS Chainlink reference ingestion | PASS | RTDS sessions persisted BTC/ETH/SOL Chainlink `ReferenceTick`s without credentials. Latest completed natural runs `m9-rtds-natural-20260428d` and `m9-rtds-natural-20260428e` persisted 48 and 36 RTDS ticks respectively, with `reference_provider=polymarket_rtds_chainlink`, `matches_market_resolution_source=true`, `settlement_reference_evidence=true`, `live_readiness_evidence=false`. |
+| Natural RTDS-backed paper trades | NOT EXERCISED | Longer unchanged-gate runs reached natural EV evaluation but produced 0 order intents/fills. `m9-rtds-natural-20260428d`: 168 raw, 205 normalized, 48 RTDS ticks, 0 orders/fills, replay `sha256:20bba0230ba09694c567f1503c5e044b4ef9a361be563d403e4b20fd8b25b228`, skips `edge_below_minimum=12`, `edge_below_minimum+stale_book=12`, `missing_reference_price=24`, `stale_book=48`, `stale_reference_price=103`. `m9-rtds-natural-20260428e`: 126 raw, 156 normalized, 36 RTDS ticks, 0 orders/fills, replay `sha256:746d6a18a0d6607d3738fd9a38e8efc919d0d1ab588635ddb03fe52ecf5c0dd4`, skips `edge_below_minimum=9`, `edge_below_minimum+stale_book=9`, `missing_reference_price=40`, `stale_book=36`, `stale_reference_price=58`. |
 | Final M9 live-readiness / settlement-source validation | PARTIAL | Polymarket RTDS Chainlink now provides read-only reference ticks for current Chainlink-resolved markets, but natural paper trades and final start/end settlement artifacts are not yet verified. Pyth proxy and deterministic fixture evidence do not provide final live-readiness. |
 
 ## M6 Current State
@@ -229,10 +229,19 @@ M9 verification status: PARTIAL.
 - Latest M9 lifecycle/proxy verification passed: `cargo fmt --check`, `cargo test --offline` (114 tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- validate --local-only --config config/default.toml`, `cargo run --offline -- validate --local-only --config config/pyth-proxy.example.toml`, replay of `m9-deterministic-paper-lifecycle-20260428a`, replay of `m9-pyth-proxy-natural-20260428a`, `git diff --check`, and safety scans over `src`, `Cargo.toml`, and `config`.
 - Polymarket RTDS Chainlink evidence file: `verification/2026-04-28-m9-polymarket-rtds-chainlink-reference.md`.
 - Polymarket RTDS Chainlink config: `config/polymarket-rtds-chainlink.example.toml`; default config remains `reference_feed.provider = "none"` and does not enable RTDS.
-- Polymarket RTDS Chainlink bounded run: `m9-rtds-chainlink-smoke-20260428b` ran `--feed-message-limit 5 --cycles 1`, captured 36 raw messages, 40 normalized-event rows, 12 RTDS Chainlink `reference_tick`s across BTC/ETH/SOL, 0 paper orders, 0 fills, 0.000000 total P&L, and replayed deterministically with fingerprint `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575`.
+- Polymarket RTDS Chainlink bounded run: `m9-rtds-chainlink-smoke-20260428b` ran `--feed-message-limit 5 --cycles 1`, captured 36 raw messages, 40 normalized-event rows, 12 RTDS Chainlink `reference_tick`s across BTC/ETH/SOL, 0 paper orders, 0 fills, 0.000000 total P&L, and replayed deterministically. Original smoke replay fingerprint was `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575`; current replay after runtime ordering compatibility fix is `sha256:8a4dce14a349b92dcf10dfb7dbce1f079f667b2fe91689fb6e93d0fa91f3e0df`.
 - RTDS report labels: `evidence_type=polymarket_rtds_chainlink_live_ingestion`, `live_market_evidence=true`, `reference_feed_mode=polymarket_rtds_chainlink`, `reference_provider=polymarket_rtds_chainlink`, `matches_market_resolution_source=true`, `settlement_reference_evidence=true`, `live_readiness_evidence=false`.
 - Natural RTDS trade interpretation: natural RTDS-backed paper trades are NOT EXERCISED for `m9-rtds-chainlink-smoke-20260428b`; signal skips were `missing_reference_price=12` and `stale_book=12`, with no risk approvals/rejections because no paper intent reached the risk gate.
 - Latest M9 RTDS verification passed: `cargo fmt --check`, `cargo test --offline` (120 tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo run --offline -- --config config/polymarket-rtds-chainlink.example.toml validate --local-only`, `cargo run --offline -- --config config/pyth-proxy.example.toml validate --local-only`, replay of `m9-rtds-chainlink-smoke-20260428b`, `git diff --check`, and safety scan over `src`, `Cargo.toml`, and `config`.
+- Natural RTDS paper validation file: `verification/2026-04-28-m9-rtds-natural-paper-validation.md`.
+- CLOB endpoint post-cutover check: official docs now identify `https://clob.polymarket.com` as the production CLOB endpoint; live `/ok` returned `HTTP/2 200` from `https://clob.polymarket.com/ok`, while `https://clob-v2.polymarket.com/ok` returned `HTTP/2 301` to `https://clob.polymarket.com/ok`. `config/polymarket-rtds-chainlink.example.toml` now uses `https://clob.polymarket.com`.
+- Runtime ordering fixes for natural RTDS paper validation: after each asset's RTDS reference batch, paper capture refreshes that asset's read-only CLOB `/book` snapshots; replay maps condition-ID CLOB book updates back to discovered Gamma market IDs before evaluating. These changes keep signal/risk thresholds unchanged and do not force orders.
+- Longer completed natural RTDS sessions:
+  - `m9-rtds-natural-20260428d`: `--feed-message-limit 5 --cycles 4`, 168 raw messages, 205 normalized rows, 48 RTDS ticks, 0 orders, 0 fills, 0.0 P&L, replay fingerprint `sha256:20bba0230ba09694c567f1503c5e044b4ef9a361be563d403e4b20fd8b25b228`.
+  - `m9-rtds-natural-20260428e`: `--feed-message-limit 5 --cycles 3`, 126 raw messages, 156 normalized rows, 36 RTDS ticks, 0 orders, 0 fills, 0.0 P&L, replay fingerprint `sha256:746d6a18a0d6607d3738fd9a38e8efc919d0d1ab588635ddb03fe52ecf5c0dd4`.
+- Natural RTDS result: NOT EXERCISED for paper trades. Post-fix sessions reached unchanged EV skip reasons (`edge_below_minimum`) where inputs overlapped, but no signal emitted an order intent and no risk approval/rejection occurred.
+- Replay-all-stored-sessions check passed twice with identical fingerprints (`determinism_diff_status=0`) across 14 stored sessions. Older paper/replay reports may differ in regenerated signal diagnostics under the fixed condition-ID evaluation path, but paper order count, fill count, and total P&L match; newest post-fix reports `m9-rtds-natural-20260428d` and `m9-rtds-natural-20260428e` are byte-identical between paper and replay.
+- Latest natural RTDS verification passed: `cargo test --offline` (122 tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo run --offline -- --config config/polymarket-rtds-chainlink.example.toml validate --local-only`, `git diff --check`, replay-all-stored-sessions twice, and focused safety scans.
 
 ## Blockers And Risks
 
@@ -240,13 +249,13 @@ M9 verification status: PARTIAL.
 - M5 API verification sections 7, 8, 11, and 12 are complete for M5 signal/risk scope.
 - Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
 - Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
-- CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
+- CLOB V2 post-cutover endpoint was rechecked on 2026-04-28; use `https://clob.polymarket.com` for CLOB REST unless official docs/live read-only checks change again.
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - Final start/end settlement artifact verification and natural risk-reviewed paper behavior are still required before M6/M7/M8/M9 reporting can claim live post-market reconciliation, final live-readiness, or real strategy performance.
 
 ## Next Concrete Action
 
-Run longer Polymarket RTDS Chainlink-backed paper sessions without weakening default signal/risk gates, replay them deterministically, and collect final start/end settlement artifacts for resolved BTC/ETH/SOL markets. Only pursue sponsored/direct Chainlink credentials if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
+Collect final start/end settlement artifacts for resolved BTC/ETH/SOL markets and continue observing natural RTDS Chainlink-backed paper sessions until unchanged gates naturally produce risk-reviewed paper orders/fills. Only pursue sponsored/direct Chainlink credentials if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 
 ## Update Checklist
 
