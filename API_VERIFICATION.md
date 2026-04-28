@@ -575,6 +575,17 @@ Blocks:
 - Signal correctness.
 - Post-market P&L verification.
 
+M9 access recheck, 2026-04-28:
+
+- Current captured BTC/ETH/SOL markets point to the asset-matched Chainlink Data Streams pages:
+  - BTC: `https://data.chain.link/streams/btc-usd`
+  - ETH: `https://data.chain.link/streams/eth-usd`
+  - SOL: `https://data.chain.link/streams/sol-usd`
+- The Chainlink pages identify these as reference-price Data Streams, but the public pages are delayed informational pages.
+- Chainlink's real-time Data Streams REST and WebSocket APIs require authenticated access headers.
+- Unauthenticated REST probe against the BTC feed ID returned missing `Headers.UserId`, `Headers.Timestamp`, and `Headers.HmacSignature`.
+- Decision: API section 11 remains PASS for identifying the market resolution source and distinguishing it from predictive CEX feeds, but live reference-backed M9 paper strategy validation remains PARTIAL until authorized Data Streams access exists and authenticated ingestion is explicitly scoped.
+
 ### 12. Server Time And Timestamp Handling
 
 Purpose: ensure latency and V2 timestamp assumptions are correct.

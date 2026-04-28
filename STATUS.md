@@ -1,6 +1,6 @@
 # Project Status Handoff
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
 
 ## Purpose
 
@@ -18,14 +18,14 @@ Authoritative sources remain:
 ## Current Branch
 
 - Branch: `m9/multi-session-validation`
-- Short commit: `610de7f`
-- Worktree status: M9 runtime paper/replay replacement, storage-backed fixture validation, and live findings changes are present but uncommitted.
+- Short commit: `df28e3e`
+- Worktree status: M9 reference-feed access verification docs are present but uncommitted.
 
 ## Milestones
 
 - Last completed milestone: M8 - Observability And Production-Like Runbook.
-- Active milestone: M9 - Multi-Session Validation And Live-Readiness Review is PARTIAL because runtime capture/replay now works, but the real session produced no paper orders/fills due missing verified resolution-source reference ticks.
-- Next milestone: verify and wire the real resolution/reference source required by Polymarket rules, then rerun BTC/ETH/SOL paper sessions and replay determinism with actual paper decisions.
+- Active milestone: M9 - Multi-Session Validation And Live-Readiness Review is PARTIAL because runtime capture/replay now works, but the real session produced no paper orders/fills due missing live Chainlink Data Streams reference ticks.
+- Next milestone: obtain authorized Chainlink Data Streams access or document that access is unavailable; only after explicit credential-handling scope approval should authenticated reference-source ingestion be implemented and BTC/ETH/SOL paper sessions rerun.
 
 ## M3 Scope Lock
 
@@ -106,7 +106,7 @@ Heartbeat intent for M3:
 | --- | --- | --- |
 | At least one full captured paper session per BTC/ETH/SOL can be replayed | PASS for capture/replay mechanics | Live bounded run `m9-runtime-smoke-20260427b` captured BTC/ETH/SOL markets, raw feed messages, normalized events, config snapshot, balance/P&L artifacts, reports, and metrics under `reports/sessions/m9-runtime-smoke-20260427b`; `replay --run-id m9-runtime-smoke-20260427b` replayed deterministically. |
 | Replay determinism passes for selected sessions | PASS | Runtime replay fingerprint matched paper report fingerprint: `sha256:f1446dc2b3a6bb4862df7cfd9c9cd6b5629655ff5869dc1ee227153d4b5b7d60`. Storage-backed fixture drift tests still cover recorded-paper divergence. |
-| Reports identify whether strategy performance survives fees and conservative fills | PARTIAL | Real runtime report had 6 signal evaluations, all skipped for `missing_reference_price`, so no paper orders/fills/fees were produced. Fixture tests still exercise fee/P&L math, but real strategy performance needs verified resolution-source reference ticks. |
+| Reports identify whether strategy performance survives fees and conservative fills | PARTIAL | Real runtime report had 6 signal evaluations, all skipped for `missing_reference_price`, so no paper orders/fills/fees were produced. Fixture tests still exercise fee/P&L math, but real strategy performance needs authorized Chainlink Data Streams reference ticks. |
 | Live-readiness blockers are listed before real orders | PASS | See `verification/2026-04-27-m9-live-readiness-findings.md`. |
 | Live trading remains disabled | PASS | `LIVE_ORDER_PLACEMENT_ENABLED=false`; safety scan found no live order, signing, wallet/key, API-key, real CLOB order-client, live-trading, external-write, or new live-feed path introduced by M9. |
 
@@ -199,6 +199,7 @@ M9 verification status: PARTIAL.
 - Dependency/live-readiness audit found no Polymarket SDK, no signing/wallet/key/API-key dependency path, no live order path, and no `.post`/`.put`/`.delete` order endpoint path in source.
 - M9 safety scans found no source path for live order placement, signing, wallet/key handling, API-key handling, real CLOB order clients, or live trading. New runtime network behavior is read-only geoblock, market discovery, CLOB book snapshots/WebSocket capture, Binance/Coinbase WebSocket capture, and local file writes under `reports/sessions/<run_id>`.
 - M9 remains PARTIAL for trading evidence because the real runtime session did not receive verified resolution-source reference ticks and therefore correctly produced no paper orders/fills.
+- M9 reference-feed access recheck passed as a blocker diagnosis: current BTC/ETH/SOL markets point to Chainlink Data Streams, but real-time Data Streams REST/WebSocket access requires authenticated headers and was not anonymously accessible from this environment. See `verification/2026-04-28-reference-feed-access.md`.
 
 ## Blockers And Risks
 
@@ -207,11 +208,11 @@ M9 verification status: PARTIAL.
 - Final start/end settlement artifact verification remains deferred for paper P&L/reporting; this no longer blocks M5 because ambiguous or asset-mismatched resolution rules are ineligible at discovery, signal, and risk gates.
 - Polymarket geoblock is host/session-specific; prior M2 evidence observed blocked `US/CA`, while the current read-only M5 recheck observed unblocked `MX/CHP`. Trading-capable modes must remain fail-closed on blocked, malformed, or unreachable geoblock checks.
 - CLOB V2 cutover timing is time-sensitive; recheck endpoint assumptions if work continues after the April 28, 2026 cutover window.
-- Verified resolution-source reference ingestion and final start/end settlement artifact verification are still required before M6/M7/M8/M9 reporting can claim live post-market reconciliation or real strategy performance.
+- Authorized Chainlink Data Streams reference ingestion and final start/end settlement artifact verification are still required before M6/M7/M8/M9 reporting can claim live post-market reconciliation or real strategy performance.
 
 ## Next Concrete Action
 
-Verify and wire the real Polymarket/Chainlink resolution-source reference feed so signal evaluation can produce or reject paper candidates using the same source Polymarket settlement rules cite; then rerun captured BTC/ETH/SOL paper sessions and replay determinism.
+Obtain authorized Chainlink Data Streams access for the BTC/USD, ETH/USD, and SOL/USD reference streams, or document that access is unavailable. After a separate credential-handling scope is approved, implement authenticated read-only Data Streams ingestion, rerun BTC/ETH/SOL paper sessions, and replay determinism.
 
 ## Update Checklist
 

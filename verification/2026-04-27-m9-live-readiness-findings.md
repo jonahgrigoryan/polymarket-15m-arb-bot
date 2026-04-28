@@ -126,12 +126,25 @@ These fixtures prove deterministic replay and paper accounting, but they are not
 
 Real orders remain blocked by design until a separate live-beta PRD and explicit release gate exist.
 
+### Reference Feed Access Recheck
+
+Follow-up verification on 2026-04-28 confirmed that the missing live reference price is an external access blocker, not a remaining runtime stub.
+
+- Current captured BTC/ETH/SOL markets cite Chainlink Data Streams pages as their resolution source.
+- The corresponding Chainlink streams are BTC/USD, ETH/USD, and SOL/USD reference-price Data Streams.
+- Chainlink's real-time Data Streams REST and WebSocket APIs require authenticated access headers.
+- An unauthenticated REST probe against the BTC feed ID returned missing `Headers.UserId`, `Headers.Timestamp`, and `Headers.HmacSignature`.
+- The public `data.chain.link` pages are delayed informational pages and must not be used as the paper strategy's settlement-reference feed.
+
+See `verification/2026-04-28-reference-feed-access.md`.
+
 Required blockers before any real-order phase:
 
 - Separate live-beta PRD and explicit user approval.
 - Legal/access review for deployment jurisdiction and operator.
 - Deployment-host geoblock verification; trading-capable modes must fail closed on blocked, malformed, or unreachable geoblock checks.
-- Verified Polymarket/Chainlink resolution-source reference feed for the exact market rules.
+- Authorized Chainlink Data Streams access for the Polymarket BTC/ETH/SOL resolution-source reference streams.
+- Explicitly approved credential-handling scope before any authenticated Data Streams ingestion is implemented.
 - Real BTC, ETH, and SOL paper sessions where reference ticks allow signal/risk decisions to create or reject paper intents.
 - Offline replay of those real sessions with generated-vs-recorded paper-event determinism.
 - Final start/end settlement artifact verification for paper P&L/reporting reconciliation.
