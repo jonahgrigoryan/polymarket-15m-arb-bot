@@ -326,6 +326,7 @@ pub struct FeedsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReferenceFeedConfig {
     pub provider: String,
+    pub polymarket_rtds_url: String,
     pub pyth_enabled: bool,
     pub pyth_hermes_url: String,
     pub pyth_btc_usd_price_id: String,
@@ -338,12 +339,17 @@ impl ReferenceFeedConfig {
     pub fn is_pyth_proxy_enabled(&self) -> bool {
         self.provider == "pyth_proxy" && self.pyth_enabled
     }
+
+    pub fn is_polymarket_rtds_chainlink_enabled(&self) -> bool {
+        self.provider == "polymarket_rtds_chainlink"
+    }
 }
 
 impl Default for ReferenceFeedConfig {
     fn default() -> Self {
         Self {
             provider: "none".to_string(),
+            polymarket_rtds_url: "wss://ws-live-data.polymarket.com".to_string(),
             pyth_enabled: false,
             pyth_hermes_url: "https://hermes.pyth.network".to_string(),
             pyth_btc_usd_price_id:
@@ -516,9 +522,9 @@ fn require_range_u16(errors: &mut Vec<String>, name: &str, value: u16, min: u16,
 
 fn require_reference_feed_config(errors: &mut Vec<String>, config: &ReferenceFeedConfig) {
     match config.provider.as_str() {
-        "none" | "pyth_proxy" | "chainlink" => {}
+        "none" | "pyth_proxy" | "chainlink" | "polymarket_rtds_chainlink" => {}
         provider => errors.push(format!(
-            "reference_feed.provider must be one of none, pyth_proxy, chainlink; got {provider}"
+            "reference_feed.provider must be one of none, pyth_proxy, chainlink, polymarket_rtds_chainlink; got {provider}"
         )),
     }
 
@@ -534,6 +540,12 @@ fn require_reference_feed_config(errors: &mut Vec<String>, config: &ReferenceFee
         );
     }
 
+    require_url(
+        errors,
+        "reference_feed.polymarket_rtds_url",
+        &config.polymarket_rtds_url,
+        &["wss://", "ws://"],
+    );
     require_url(
         errors,
         "reference_feed.pyth_hermes_url",
@@ -590,6 +602,10 @@ mod tests {
         config.validate().expect("default config validates");
         assert_eq!(config.reference_feed.provider, "none");
         assert!(!config.reference_feed.pyth_enabled);
+        assert_eq!(
+            config.reference_feed.polymarket_rtds_url,
+            "wss://ws-live-data.polymarket.com"
+        );
     }
 
     #[test]
@@ -643,6 +659,21 @@ mod tests {
         assert_eq!(
             config.reference_feed.pyth_sol_usd_price_id,
             "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+        );
+    }
+
+    #[test]
+    fn polymarket_rtds_chainlink_mode_uses_documented_url_without_credentials() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.reference_feed.provider = "polymarket_rtds_chainlink".to_string();
+
+        config
+            .validate()
+            .expect("polymarket rtds chainlink validates");
+        assert!(config.reference_feed.is_polymarket_rtds_chainlink_enabled());
+        assert_eq!(
+            config.reference_feed.polymarket_rtds_url,
+            "wss://ws-live-data.polymarket.com"
         );
     }
 }

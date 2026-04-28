@@ -36,6 +36,7 @@ feed_smoke_message_limit = 20
 
 [reference_feed]
 provider = "pyth_proxy"
+polymarket_rtds_url = "wss://ws-live-data.polymarket.com"
 pyth_enabled = true
 pyth_hermes_url = "https://hermes.pyth.network"
 pyth_btc_usd_price_id = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"

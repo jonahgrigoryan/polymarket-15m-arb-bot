@@ -26,7 +26,11 @@ use polymarket_15m_arb_bot::{
     },
     module_names,
     normalization::{SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB},
-    reference_feed::{PythHermesClient, SOURCE_PYTH_PROXY},
+    reference_feed::{
+        parse_polymarket_rtds_chainlink_message,
+        polymarket_rtds_chainlink_subscription_payload_for_asset, PythHermesClient,
+        PROVIDER_POLYMARKET_RTDS_CHAINLINK, SOURCE_POLYMARKET_RTDS_CHAINLINK, SOURCE_PYTH_PROXY,
+    },
     replay::{
         compare_generated_to_recorded_paper_events, compare_replay_results, ReplayEngine,
         ReplayRunResult,
@@ -289,14 +293,19 @@ async fn run_paper_runtime(
     println!("mode=paper");
     println!("paper_mode_status=runtime_enabled");
     println!("paper_storage_backend=file_session");
-    let reference_provider = if config.reference_feed.is_pyth_proxy_enabled() {
+    let reference_provider = if config.reference_feed.is_polymarket_rtds_chainlink_enabled() {
+        PROVIDER_POLYMARKET_RTDS_CHAINLINK
+    } else if config.reference_feed.is_pyth_proxy_enabled() {
         "pyth"
     } else {
         "none"
     };
+    let settlement_reference_evidence =
+        config.reference_feed.is_polymarket_rtds_chainlink_enabled()
+            || config.reference_feed.provider == "chainlink";
     println!("reference_feed_mode={}", config.reference_feed.provider);
     println!("reference_provider={reference_provider}");
-    println!("settlement_reference_evidence=false");
+    println!("settlement_reference_evidence={settlement_reference_evidence}");
     println!("live_readiness_evidence=false");
     println!(
         "paper_session_dir={}",
@@ -925,10 +934,40 @@ async fn capture_paper_cycle(
         }
     }
 
-    record_pyth_proxy_reference_ticks(config, run_id, storage, &mut ingest_seq, &mut counts)
-        .await?;
+    record_reference_ticks(
+        config,
+        run_id,
+        storage,
+        &mut ingest_seq,
+        &mut counts,
+        message_limit,
+    )
+    .await?;
 
     Ok(counts)
+}
+
+async fn record_reference_ticks(
+    config: &AppConfig,
+    run_id: &str,
+    storage: &FileSessionStorage,
+    ingest_seq: &mut u64,
+    counts: &mut PaperCaptureCounts,
+    message_limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if config.reference_feed.is_polymarket_rtds_chainlink_enabled() {
+        record_polymarket_rtds_chainlink_reference_ticks(
+            config,
+            run_id,
+            storage,
+            ingest_seq,
+            counts,
+            message_limit,
+        )
+        .await
+    } else {
+        record_pyth_proxy_reference_ticks(config, run_id, storage, ingest_seq, counts).await
+    }
 }
 
 async fn record_pyth_proxy_reference_ticks(
@@ -983,6 +1022,92 @@ async fn record_pyth_proxy_reference_ticks(
 
     if event_count == 0 {
         return Err("pyth proxy reference feed produced no reference ticks".into());
+    }
+
+    Ok(())
+}
+
+async fn record_polymarket_rtds_chainlink_reference_ticks(
+    config: &AppConfig,
+    run_id: &str,
+    storage: &FileSessionStorage,
+    ingest_seq: &mut u64,
+    counts: &mut PaperCaptureCounts,
+    message_limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut event_count = 0usize;
+    let mut assets = Vec::<Asset>::new();
+    let client = ReadOnlyWebSocketClient;
+
+    for subscribed_asset in [Asset::Btc, Asset::Eth, Asset::Sol] {
+        let probe = FeedConnectionConfig {
+            source: SOURCE_POLYMARKET_RTDS_CHAINLINK.to_string(),
+            ws_url: config.reference_feed.polymarket_rtds_url.clone(),
+            subscribe_payload: Some(polymarket_rtds_chainlink_subscription_payload_for_asset(
+                subscribed_asset,
+            )),
+            message_limit: message_limit.max(1),
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        };
+        let result = client.connect_and_capture(&probe).await?;
+
+        for message in result.received_text_messages {
+            let recv_wall_ts = unix_time_ms();
+            let recv_mono_ns = monotonic_like_ns();
+            storage.append_raw_message(RawMessage {
+                run_id: run_id.to_string(),
+                source: SOURCE_POLYMARKET_RTDS_CHAINLINK.to_string(),
+                recv_wall_ts,
+                recv_mono_ns,
+                ingest_seq: *ingest_seq,
+                payload: message.clone(),
+            })?;
+            counts.raw_messages += 1;
+
+            let events = parse_polymarket_rtds_chainlink_message(
+                &message,
+                recv_wall_ts,
+                config.reference_feed.max_staleness_ms,
+            )?;
+            let message_event_count = events.len();
+            for (index, event) in events.into_iter().enumerate() {
+                if let Some(asset) = event.asset() {
+                    if !assets.contains(&asset) {
+                        assets.push(asset);
+                    }
+                }
+                storage.append_normalized_event(EventEnvelope::new(
+                    run_id,
+                    format!("{SOURCE_POLYMARKET_RTDS_CHAINLINK}-{}-{index}", *ingest_seq),
+                    SOURCE_POLYMARKET_RTDS_CHAINLINK,
+                    recv_wall_ts,
+                    recv_mono_ns + index as u64,
+                    *ingest_seq + index as u64,
+                    event,
+                ))?;
+                counts.normalized_events += 1;
+                event_count += 1;
+            }
+            *ingest_seq += 1 + message_event_count as u64;
+        }
+    }
+
+    let asset_list = assets
+        .iter()
+        .map(|asset| asset.symbol())
+        .collect::<Vec<_>>()
+        .join("|");
+    println!(
+        "paper_reference_feed_source={SOURCE_POLYMARKET_RTDS_CHAINLINK},provider={PROVIDER_POLYMARKET_RTDS_CHAINLINK},normalized_events={event_count},assets={asset_list},matches_market_resolution_source=true,settlement_reference_evidence=true,live_readiness_evidence=false"
+    );
+
+    if assets.len() != 3 {
+        return Err(format!(
+            "Polymarket RTDS Chainlink reference feed produced {} of 3 required BTC/ETH/SOL ticks",
+            assets.len()
+        )
+        .into());
     }
 
     Ok(())

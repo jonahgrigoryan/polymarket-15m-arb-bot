@@ -1,9 +1,10 @@
-# Copy this file to a local ignored config path when you need machine-specific
-# settings. Do not put private keys or live-trading credentials in this MVP.
+# M9 paper/replay validation config for Polymarket RTDS Chainlink crypto prices.
+# This uses Polymarket's unauthenticated read-only RTDS stream and does not add
+# live order placement, signing, wallet, API-key, or direct Chainlink credentials.
 
 [runtime]
 mode = "validate"
-log_level = "debug"
+log_level = "info"
 
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
@@ -33,7 +34,7 @@ reconnect_max_attempts = 5
 feed_smoke_message_limit = 20
 
 [reference_feed]
-provider = "none"
+provider = "polymarket_rtds_chainlink"
 polymarket_rtds_url = "wss://ws-live-data.polymarket.com"
 pyth_enabled = false
 pyth_hermes_url = "https://hermes.pyth.network"

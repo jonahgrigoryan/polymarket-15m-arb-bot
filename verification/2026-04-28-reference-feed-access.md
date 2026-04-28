@@ -59,19 +59,37 @@ This confirms that the real Data Streams API is not anonymously accessible from 
 
 ## Decision
 
-M9 remains PARTIAL.
+M9 remains PARTIAL for final live-readiness, but the first implementation path changes after the Polymarket RTDS recheck below.
 
-The blocker is external access to Chainlink Data Streams credentials/subscription, not an in-repo runtime stub. The current fail-closed `missing_reference_price` behavior is correct because using Binance, Coinbase, or the delayed public Chainlink webpage as the settlement/reference price would not match the market's stated resolution source.
+The earlier direct Chainlink API blocker was external access to Data Streams credentials/subscription, not an in-repo runtime stub. The current fail-closed `missing_reference_price` behavior is correct when no verified settlement/reference feed is present because using Binance, Coinbase, or the delayed public Chainlink webpage as the settlement/reference price would not match the market's stated resolution source.
 
 Do not synthesize `ReferenceTick` events from predictive CEX feeds or delayed informational pages for M9 gate evidence.
 
+## Polymarket RTDS Addendum
+
+Polymarket's official RTDS docs identify an unauthenticated websocket endpoint and crypto Chainlink price stream:
+
+- Endpoint: `wss://ws-live-data.polymarket.com`
+- Topic: `crypto_prices_chainlink`
+- Symbols: `btc/usd`, `eth/usd`, `sol/usd`
+- Documented payload fields include `symbol`, `timestamp`, and `value`.
+
+This changes the first implementation path:
+
+1. Use Polymarket RTDS Chainlink as the first read-only reference provider for current M9 paper/replay validation.
+2. Persist RTDS `crypto_prices_chainlink` messages as `ReferenceTick`s tagged with `provider = "polymarket_rtds_chainlink"`.
+3. Keep `ReferencePrice.source` equal to each market's asset-matched Chainlink Data Streams URL so existing resolution-source gates remain intact.
+4. Treat direct authenticated Chainlink Data Streams access as a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
+
+The direct Chainlink API authentication finding above remains useful for the fallback path, but it is no longer the first path to try for the current workspace bot.
+
 ## Next Action
 
-To unblock real reference-backed paper sessions:
+To unblock final live-readiness evidence:
 
-1. Obtain authorized Chainlink Data Streams access for the BTC/USD, ETH/USD, and SOL/USD reference streams, or document that access is unavailable for this project.
-2. Add a separate, explicitly approved credential-handling scope before implementing authenticated Data Streams REST/WebSocket ingestion.
-3. Decode v3 Data Streams reports into `ReferenceTick` events with source values matching each market's `resolution_source`.
-4. Rerun BTC/ETH/SOL paper sessions, replay them, and verify deterministic paper events and P&L.
+1. Use the new `polymarket_rtds_chainlink` provider for read-only BTC/ETH/SOL paper sessions.
+2. Replay the stored sessions and verify deterministic paper/report output.
+3. Verify final start/end settlement artifacts for resolved 15-minute markets.
+4. Only pursue sponsored/direct Chainlink API credentials if RTDS proves unavailable, delayed, insufficiently precise, or not accepted for settlement-source evidence.
 
 Live trading remains disabled.

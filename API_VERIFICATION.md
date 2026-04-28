@@ -594,6 +594,15 @@ Temporary Pyth proxy note, 2026-04-28:
 - Pyth proxy reports must carry `live_readiness_evidence=false` and `settlement_reference_evidence=false`.
 - See `verification/2026-04-28-m9-pyth-proxy-reference.md`.
 
+Polymarket RTDS Chainlink addendum, 2026-04-28:
+
+- Polymarket's official RTDS docs identify `wss://ws-live-data.polymarket.com` and an unauthenticated `crypto_prices_chainlink` stream for `btc/usd`, `eth/usd`, and `sol/usd`.
+- The bot now treats `polymarket_rtds_chainlink` as the first read-only reference provider for M9 paper/replay testing. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
+- RTDS reference ticks are persisted with provider/source metadata `polymarket_rtds_chainlink`, while `ReferencePrice.source` remains the asset-matched Chainlink Data Streams URL required by existing market-resolution gates.
+- Bounded run `m9-rtds-chainlink-smoke-20260428b` persisted 12 BTC/ETH/SOL RTDS Chainlink `ReferenceTick`s, proceeded beyond the all-`missing_reference_price` blocker, and replayed deterministically with fingerprint `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575`.
+- RTDS-backed reference ingestion is settlement-source plumbing evidence, but final M9 live-readiness remains PARTIAL until Chainlink-source paper sessions produce/validate natural risk-reviewed paper behavior and final start/end settlement artifacts are verified.
+- See `verification/2026-04-28-m9-polymarket-rtds-chainlink-reference.md`.
+
 ### 12. Server Time And Timestamp Handling
 
 Purpose: ensure latency and V2 timestamp assumptions are correct.
