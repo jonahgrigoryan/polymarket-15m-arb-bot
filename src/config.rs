@@ -326,6 +326,7 @@ pub struct FeedsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReferenceFeedConfig {
     pub provider: String,
+    #[serde(default = "default_polymarket_rtds_url")]
     pub polymarket_rtds_url: String,
     pub pyth_enabled: bool,
     pub pyth_hermes_url: String,
@@ -345,11 +346,15 @@ impl ReferenceFeedConfig {
     }
 }
 
+fn default_polymarket_rtds_url() -> String {
+    "wss://ws-live-data.polymarket.com".to_string()
+}
+
 impl Default for ReferenceFeedConfig {
     fn default() -> Self {
         Self {
             provider: "none".to_string(),
-            polymarket_rtds_url: "wss://ws-live-data.polymarket.com".to_string(),
+            polymarket_rtds_url: default_polymarket_rtds_url(),
             pyth_enabled: false,
             pyth_hermes_url: "https://hermes.pyth.network".to_string(),
             pyth_btc_usd_price_id:
@@ -606,6 +611,23 @@ mod tests {
             config.reference_feed.polymarket_rtds_url,
             "wss://ws-live-data.polymarket.com"
         );
+    }
+
+    #[test]
+    fn missing_rtds_url_defaults_for_older_reference_feed_snapshots() {
+        let legacy_config = VALID_CONFIG
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("polymarket_rtds_url"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let config: AppConfig = toml::from_str(&legacy_config).expect("legacy config parses");
+
+        assert_eq!(
+            config.reference_feed.polymarket_rtds_url,
+            "wss://ws-live-data.polymarket.com"
+        );
+        config.validate().expect("legacy config validates");
     }
 
     #[test]

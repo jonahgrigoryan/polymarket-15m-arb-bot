@@ -35,8 +35,8 @@ p15m_risk_halts_total{reason="unknown"} 0
 # HELP p15m_signal_decisions_total Signal decisions by market and action.
 # TYPE p15m_signal_decisions_total counter
 p15m_signal_decisions_total{action="emitted_order_intent",market_id="all"} 0
-p15m_signal_decisions_total{action="evaluated",market_id="all"} 9
-p15m_signal_decisions_total{action="skipped",market_id="all"} 9
+p15m_signal_decisions_total{action="evaluated",market_id="all"} 21
+p15m_signal_decisions_total{action="skipped",market_id="all"} 21
 # HELP p15m_storage_write_failures_total Storage write failure count by operation.
 # TYPE p15m_storage_write_failures_total counter
 p15m_storage_write_failures_total{operation="none"} 0

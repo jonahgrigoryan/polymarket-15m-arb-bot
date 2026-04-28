@@ -28,15 +28,15 @@ p15m_reference_staleness_ms{asset="ETH",source="resolution_source"} 0
 p15m_reference_staleness_ms{asset="SOL",source="resolution_source"} 0
 # HELP p15m_replay_determinism_failures_total Replay determinism failure count by replay run.
 # TYPE p15m_replay_determinism_failures_total counter
-p15m_replay_determinism_failures_total{replay_run_id="m9-pyth-proxy-natural-20260428a:offline-replay"} 0
+p15m_replay_determinism_failures_total{replay_run_id="m9-rtds-natural-20260428d:offline-replay"} 0
 # HELP p15m_risk_halts_total Risk halt count by reason.
 # TYPE p15m_risk_halts_total counter
 p15m_risk_halts_total{reason="unknown"} 0
 # HELP p15m_signal_decisions_total Signal decisions by market and action.
 # TYPE p15m_signal_decisions_total counter
 p15m_signal_decisions_total{action="emitted_order_intent",market_id="all"} 0
-p15m_signal_decisions_total{action="evaluated",market_id="all"} 335
-p15m_signal_decisions_total{action="skipped",market_id="all"} 335
+p15m_signal_decisions_total{action="evaluated",market_id="all"} 199
+p15m_signal_decisions_total{action="skipped",market_id="all"} 199
 # HELP p15m_storage_write_failures_total Storage write failure count by operation.
 # TYPE p15m_storage_write_failures_total counter
 p15m_storage_write_failures_total{operation="none"} 0

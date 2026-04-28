@@ -834,28 +834,15 @@ async fn capture_paper_cycle(
         config.polymarket.request_timeout_ms,
     )?;
 
-    for market in markets {
-        for outcome in &market.outcomes {
-            let payload = snapshot_client.fetch_book(&outcome.token_id).await?;
-            let recorder = FeedRecorder::new(storage, run_id, SOURCE_POLYMARKET_CLOB);
-            let recorded = recorder.record_message(
-                payload,
-                unix_time_ms(),
-                monotonic_like_ns(),
-                ingest_seq,
-            )?;
-            ingest_seq += 1;
-            counts.raw_messages += 1;
-            counts.normalized_events += recorded.normalized_event_count;
-            if recorded.normalized_event_count == 0 {
-                return Err(format!(
-                    "paper book snapshot for token_id={} produced no normalized event",
-                    outcome.token_id
-                )
-                .into());
-            }
-        }
-    }
+    record_book_snapshots_for_markets(
+        storage,
+        run_id,
+        &snapshot_client,
+        markets,
+        &mut ingest_seq,
+        &mut counts,
+    )
+    .await?;
 
     let asset_ids = markets
         .iter()
@@ -938,6 +925,7 @@ async fn capture_paper_cycle(
         config,
         run_id,
         storage,
+        markets,
         &mut ingest_seq,
         &mut counts,
         message_limit,
@@ -951,6 +939,7 @@ async fn record_reference_ticks(
     config: &AppConfig,
     run_id: &str,
     storage: &FileSessionStorage,
+    markets: &[Market],
     ingest_seq: &mut u64,
     counts: &mut PaperCaptureCounts,
     message_limit: usize,
@@ -960,6 +949,7 @@ async fn record_reference_ticks(
             config,
             run_id,
             storage,
+            markets,
             ingest_seq,
             counts,
             message_limit,
@@ -1031,6 +1021,7 @@ async fn record_polymarket_rtds_chainlink_reference_ticks(
     config: &AppConfig,
     run_id: &str,
     storage: &FileSessionStorage,
+    markets: &[Market],
     ingest_seq: &mut u64,
     counts: &mut PaperCaptureCounts,
     message_limit: usize,
@@ -1038,8 +1029,13 @@ async fn record_polymarket_rtds_chainlink_reference_ticks(
     let mut event_count = 0usize;
     let mut assets = Vec::<Asset>::new();
     let client = ReadOnlyWebSocketClient;
+    let snapshot_client = PolymarketBookSnapshotClient::new(
+        &config.polymarket.clob_rest_url,
+        config.polymarket.request_timeout_ms,
+    )?;
 
     for subscribed_asset in [Asset::Btc, Asset::Eth, Asset::Sol] {
+        let mut asset_event_count = 0usize;
         let probe = FeedConnectionConfig {
             source: SOURCE_POLYMARKET_RTDS_CHAINLINK.to_string(),
             ws_url: config.reference_feed.polymarket_rtds_url.clone(),
@@ -1088,8 +1084,26 @@ async fn record_polymarket_rtds_chainlink_reference_ticks(
                 ))?;
                 counts.normalized_events += 1;
                 event_count += 1;
+                asset_event_count += 1;
             }
             *ingest_seq += 1 + message_event_count as u64;
+        }
+
+        if asset_event_count > 0 {
+            let asset_markets = markets
+                .iter()
+                .filter(|market| market.asset == subscribed_asset)
+                .cloned()
+                .collect::<Vec<_>>();
+            record_book_snapshots_for_markets(
+                storage,
+                run_id,
+                &snapshot_client,
+                &asset_markets,
+                ingest_seq,
+                counts,
+            )
+            .await?;
         }
     }
 
@@ -1108,6 +1122,40 @@ async fn record_polymarket_rtds_chainlink_reference_ticks(
             assets.len()
         )
         .into());
+    }
+
+    Ok(())
+}
+
+async fn record_book_snapshots_for_markets(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    snapshot_client: &PolymarketBookSnapshotClient,
+    markets: &[Market],
+    ingest_seq: &mut u64,
+    counts: &mut PaperCaptureCounts,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let recorder = FeedRecorder::new(storage, run_id, SOURCE_POLYMARKET_CLOB);
+    for market in markets {
+        for outcome in &market.outcomes {
+            let payload = snapshot_client.fetch_book(&outcome.token_id).await?;
+            let recorded = recorder.record_message(
+                payload,
+                unix_time_ms(),
+                monotonic_like_ns(),
+                *ingest_seq,
+            )?;
+            *ingest_seq += 1;
+            counts.raw_messages += 1;
+            counts.normalized_events += recorded.normalized_event_count;
+            if recorded.normalized_event_count == 0 {
+                return Err(format!(
+                    "paper book snapshot for token_id={} produced no normalized event",
+                    outcome.token_id
+                )
+                .into());
+            }
+        }
     }
 
     Ok(())

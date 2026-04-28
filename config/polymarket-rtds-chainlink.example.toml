@@ -10,7 +10,7 @@ log_level = "info"
 symbols = ["BTC", "ETH", "SOL"]
 
 [polymarket]
-clob_rest_url = "https://clob-v2.polymarket.com"
+clob_rest_url = "https://clob.polymarket.com"
 market_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 gamma_markets_url = "https://gamma-api.polymarket.com/markets/keyset"
 geoblock_url = "https://polymarket.com/api/geoblock"

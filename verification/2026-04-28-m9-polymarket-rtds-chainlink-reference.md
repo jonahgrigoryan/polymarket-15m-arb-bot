@@ -71,7 +71,7 @@ Result:
 | Paper orders/fills | 0 / 0 |
 | Fees paid / total P&L | `0.000000` / `0.000000` |
 | Replay status | deterministic |
-| Replay/report fingerprint | `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575` |
+| Replay/report fingerprint | Original smoke replay: `sha256:2523c96dfd1f80901e2c402a6b454f66201c6c8232f3377f09e15b334b0ed575`; current replay after runtime ordering compatibility fix: `sha256:8a4dce14a349b92dcf10dfb7dbce1f079f667b2fe91689fb6e93d0fa91f3e0df` |
 
 Replay metadata:
 
