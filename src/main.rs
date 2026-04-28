@@ -1,25 +1,36 @@
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use polymarket_15m_arb_bot::{
     compliance::{ComplianceClient, ComplianceError},
     config::AppConfig,
-    domain::{Asset, MarketLifecycleState},
+    domain::{Asset, Market, MarketLifecycleState, PaperOrderStatus, RiskHaltReason},
+    events::{EventEnvelope, NormalizedEvent},
     feed_ingestion::{
         binance_combined_trade_url, coinbase_ticker_subscription, FeedConnectionConfig,
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
-    market_discovery::{emit_market_lifecycle_events, MarketDiscoveryClient},
-    metrics::{m8_smoke_metrics_snapshot, required_m8_metric_families, serve_prometheus_once},
+    market_discovery::{
+        emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
+    },
+    metrics::{
+        m8_smoke_metrics_snapshot, required_m8_metric_families, serve_prometheus_once,
+        MetricsSnapshot,
+    },
     module_names,
     normalization::{SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB},
+    replay::{compare_generated_to_recorded_paper_events, ReplayEngine, ReplayRunResult},
+    reporting::deterministic_report_json,
     safety,
     shutdown::{GracefulShutdownState, RuntimeMode},
-    storage::{InMemoryStorage, PostgresMarketStore, StorageError},
+    storage::{
+        ConfigSnapshot, FileSessionStorage, InMemoryStorage, PaperBalanceSnapshot,
+        PostgresMarketStore, RiskEvent, StorageBackend, StorageError,
+    },
 };
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
@@ -62,11 +73,22 @@ enum Commands {
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
-    /// Load config for future paper mode. Strategy execution starts in later milestones.
-    Paper,
-    /// Load config for future replay mode. Replay execution starts in later milestones.
+    /// Run read-only paper trading against captured market/reference feeds.
+    Paper {
+        #[arg(long, help = "Override generated paper run ID")]
+        run_id: Option<String>,
+        #[arg(long, help = "Messages to capture per feed per cycle")]
+        feed_message_limit: Option<usize>,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Paper capture cycles; set 0 to run until Ctrl-C"
+        )]
+        cycles: u64,
+    },
+    /// Replay a stored paper session offline and fail on paper-event divergence.
     Replay {
-        #[arg(long, help = "Run ID to replay in later milestones")]
+        #[arg(long, help = "Stored paper run ID to replay")]
         run_id: Option<String>,
     },
 }
@@ -75,7 +97,7 @@ impl Commands {
     fn name(&self) -> &'static str {
         match self {
             Commands::Validate { .. } => "validate",
-            Commands::Paper => "paper",
+            Commands::Paper { .. } => "paper",
             Commands::Replay { .. } => "replay",
         }
     }
@@ -83,7 +105,7 @@ impl Commands {
     fn runtime_mode(&self) -> RuntimeMode {
         match self {
             Commands::Validate { .. } => RuntimeMode::Validate,
-            Commands::Paper => RuntimeMode::Paper,
+            Commands::Paper { .. } => RuntimeMode::Paper,
             Commands::Replay { .. } => RuntimeMode::Replay,
         }
     }
@@ -149,33 +171,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     run_m8_metrics_smoke(&config, &run_id, mode).await?;
                 }
             }
-            Commands::Paper => {
-                let geoblock = compliance_client(&config)?.check_geoblock().await?;
-                ComplianceError::fail_if_blocked(&geoblock)?;
-                println!("validation_status=ok");
-                println!("run_id={run_id}");
-                println!("mode=paper");
-                println!("paper_mode_status=stubbed_until_later_milestones");
-                println!(
-                    "live_order_placement_enabled={}",
-                    safety::LIVE_ORDER_PLACEMENT_ENABLED
-                );
+            Commands::Paper {
+                run_id: paper_run_id,
+                feed_message_limit,
+                cycles,
+            } => {
+                let paper_run_id = paper_run_id.unwrap_or(run_id.clone());
+                run_paper_runtime(&config, &paper_run_id, feed_message_limit, cycles).await?;
             }
             Commands::Replay {
                 run_id: replay_run_id,
             } => {
-                println!("validation_status=ok");
-                println!("run_id={run_id}");
-                println!("mode=replay");
-                println!(
-                    "target_replay_run_id={}",
-                    replay_run_id.unwrap_or_else(|| "not_provided".to_string())
-                );
-                println!("replay_status=stubbed_until_later_milestones");
-                println!(
-                    "live_order_placement_enabled={}",
-                    safety::LIVE_ORDER_PLACEMENT_ENABLED
-                );
+                let replay_run_id =
+                    replay_run_id.ok_or("replay requires --run-id <stored paper run_id>")?;
+                run_replay_runtime(&config, &run_id, &replay_run_id).await?;
             }
         }
 
@@ -214,6 +223,559 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     command_result?;
     Ok(())
+}
+
+async fn run_paper_runtime(
+    config: &AppConfig,
+    run_id: &str,
+    feed_message_limit: Option<usize>,
+    cycles: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let message_limit =
+        feed_message_limit.unwrap_or(usize::from(config.feeds.feed_smoke_message_limit));
+    if message_limit == 0 {
+        return Err("paper --feed-message-limit must be greater than zero".into());
+    }
+
+    let storage = FileSessionStorage::for_run(&config.replay.output_dir, run_id)?;
+    if storage.session_exists(run_id)? {
+        return Err(format!(
+            "paper run_id={run_id} already exists under {}; choose a new run_id to avoid duplicate session writes",
+            config.replay.output_dir
+        )
+        .into());
+    }
+
+    let geoblock = compliance_client(config)?.check_geoblock().await?;
+    ComplianceError::fail_if_blocked(&geoblock)?;
+    storage.insert_config_snapshot(ConfigSnapshot::from_config(run_id, unix_time_ms(), config)?)?;
+
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    let markets = select_paper_markets(&discovery_run.markets)?;
+    let lifecycle_event_count = persist_discovered_markets(
+        &storage,
+        run_id,
+        unix_time_ms(),
+        monotonic_like_ns(),
+        &markets,
+    )?;
+
+    println!("validation_status=ok");
+    println!("run_id={run_id}");
+    println!("mode=paper");
+    println!("paper_mode_status=runtime_enabled");
+    println!("paper_storage_backend=file_session");
+    println!(
+        "paper_session_dir={}",
+        storage.session_dir(run_id)?.display()
+    );
+    println!("market_discovery_pages={}", discovery_run.pages_fetched);
+    println!("paper_selected_market_count={}", markets.len());
+    println!("paper_market_lifecycle_event_count={lifecycle_event_count}");
+    println!(
+        "live_order_placement_enabled={}",
+        safety::LIVE_ORDER_PLACEMENT_ENABLED
+    );
+
+    let max_cycles = if cycles == 0 { None } else { Some(cycles) };
+    let mut completed_cycles = 0_u64;
+    loop {
+        if max_cycles.is_some_and(|limit| completed_cycles >= limit) {
+            break;
+        }
+
+        let cycle_result = tokio::select! {
+            result = capture_paper_cycle(
+                config,
+                run_id,
+                &storage,
+                &markets,
+                completed_cycles,
+                message_limit,
+            ) => Some(result),
+            signal = shutdown_signal(), if max_cycles.is_none() => {
+                signal?;
+                None
+            }
+        };
+
+        let Some(cycle_counts) = cycle_result else {
+            println!("paper_shutdown_signal=received");
+            break;
+        };
+        let cycle_counts = cycle_counts?;
+        completed_cycles += 1;
+
+        let cycle_replay = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+        let new_paper_events = append_new_recorded_paper_events(&storage, run_id, &cycle_replay)?;
+        info!(
+            %run_id,
+            mode = "paper",
+            event_type = "paper_cycle_complete",
+            source = "paper_runtime",
+            paper_cycle = completed_cycles,
+            raw_messages = cycle_counts.raw_messages,
+            normalized_events = cycle_counts.normalized_events,
+            new_paper_events,
+            "paper cycle complete"
+        );
+        println!(
+            "paper_cycle_complete={},raw_messages={},normalized_events={},new_paper_events={}",
+            completed_cycles,
+            cycle_counts.raw_messages,
+            cycle_counts.normalized_events,
+            new_paper_events
+        );
+
+        if max_cycles.is_none() {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(config.polymarket.market_discovery_poll_ms)) => {}
+                signal = shutdown_signal() => {
+                    signal?;
+                    println!("paper_shutdown_signal=received");
+                    break;
+                }
+            }
+        }
+    }
+
+    let final_result = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+    let final_check = compare_generated_to_recorded_paper_events(&final_result)?;
+    if !final_check.passed {
+        return Err(format!(
+            "paper session generated/recorded paper event divergence for run_id={run_id}: {}",
+            final_check
+                .divergence
+                .as_deref()
+                .unwrap_or("fingerprint mismatch")
+        )
+        .into());
+    }
+
+    persist_paper_outputs(&storage, run_id, config, &final_result)?;
+    let report_path = write_runtime_artifacts(
+        &storage,
+        run_id,
+        "paper_report.json",
+        "paper_metrics.prom",
+        &final_result,
+        false,
+    )?;
+    storage.sync_session(run_id)?;
+
+    println!("paper_runtime_status=ok");
+    println!("paper_completed_cycles={completed_cycles}");
+    println!(
+        "paper_determinism_fingerprint={}",
+        final_result.report.determinism_fingerprint()
+    );
+    println!("paper_report_path={}", report_path.display());
+    println!(
+        "paper_order_count={}",
+        final_result.report.paper.order_count
+    );
+    println!("paper_fill_count={}", final_result.report.paper.fill_count);
+    println!(
+        "paper_total_pnl={:.6}",
+        final_result.report.pnl.totals.total_pnl
+    );
+
+    Ok(())
+}
+
+async fn run_replay_runtime(
+    config: &AppConfig,
+    replay_command_run_id: &str,
+    target_run_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let storage = FileSessionStorage::new(&config.replay.output_dir);
+    let result = ReplayEngine::replay_from_storage_snapshot(&storage, target_run_id)?;
+    let check = compare_generated_to_recorded_paper_events(&result)?;
+    if !check.passed {
+        let _ = write_runtime_artifacts(
+            &storage,
+            target_run_id,
+            "replay_report_diverged.json",
+            "replay_metrics_diverged.prom",
+            &result,
+            true,
+        );
+        return Err(format!(
+            "replay divergence for run_id={target_run_id}: {}",
+            check
+                .divergence
+                .as_deref()
+                .unwrap_or("fingerprint mismatch")
+        )
+        .into());
+    }
+
+    let report_path = write_runtime_artifacts(
+        &storage,
+        target_run_id,
+        "replay_report.json",
+        "replay_metrics.prom",
+        &result,
+        false,
+    )?;
+    storage.sync_session(target_run_id)?;
+
+    println!("validation_status=ok");
+    println!("run_id={replay_command_run_id}");
+    println!("mode=replay");
+    println!("target_replay_run_id={target_run_id}");
+    println!("replay_status=deterministic");
+    println!(
+        "replay_generated_paper_event_count={}",
+        result.generated_paper_events.len()
+    );
+    println!(
+        "replay_recorded_paper_event_count={}",
+        result.recorded_paper_events.len()
+    );
+    println!("replay_report_path={}", report_path.display());
+    println!(
+        "replay_determinism_fingerprint={}",
+        result.report.determinism_fingerprint()
+    );
+    println!(
+        "live_order_placement_enabled={}",
+        safety::LIVE_ORDER_PLACEMENT_ENABLED
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct PaperCaptureCounts {
+    raw_messages: usize,
+    normalized_events: usize,
+}
+
+async fn capture_paper_cycle(
+    config: &AppConfig,
+    run_id: &str,
+    storage: &FileSessionStorage,
+    markets: &[Market],
+    cycle_index: u64,
+    message_limit: usize,
+) -> Result<PaperCaptureCounts, Box<dyn std::error::Error>> {
+    let mut counts = PaperCaptureCounts::default();
+    let mut ingest_seq = 1_000_000_u64.saturating_mul(cycle_index + 1);
+    let snapshot_client = PolymarketBookSnapshotClient::new(
+        &config.polymarket.clob_rest_url,
+        config.polymarket.request_timeout_ms,
+    )?;
+
+    for market in markets {
+        for outcome in &market.outcomes {
+            let payload = snapshot_client.fetch_book(&outcome.token_id).await?;
+            let recorder = FeedRecorder::new(storage, run_id, SOURCE_POLYMARKET_CLOB);
+            let recorded = recorder.record_message(
+                payload,
+                unix_time_ms(),
+                monotonic_like_ns(),
+                ingest_seq,
+            )?;
+            ingest_seq += 1;
+            counts.raw_messages += 1;
+            counts.normalized_events += recorded.normalized_event_count;
+            if recorded.normalized_event_count == 0 {
+                return Err(format!(
+                    "paper book snapshot for token_id={} produced no normalized event",
+                    outcome.token_id
+                )
+                .into());
+            }
+        }
+    }
+
+    let asset_ids = markets
+        .iter()
+        .flat_map(|market| {
+            market
+                .outcomes
+                .iter()
+                .map(|outcome| outcome.token_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let polymarket_subscription = PolymarketMarketSubscription::new(asset_ids);
+    let probes = [
+        FeedConnectionConfig {
+            source: SOURCE_POLYMARKET_CLOB.to_string(),
+            ws_url: config.polymarket.market_ws_url.clone(),
+            subscribe_payload: Some(polymarket_subscription.to_payload()),
+            message_limit,
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+        FeedConnectionConfig {
+            source: SOURCE_BINANCE.to_string(),
+            ws_url: binance_combined_trade_url(&config.feeds.binance_ws_url),
+            subscribe_payload: None,
+            message_limit,
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+        FeedConnectionConfig {
+            source: SOURCE_COINBASE.to_string(),
+            ws_url: config.feeds.coinbase_ws_url.clone(),
+            subscribe_payload: Some(coinbase_ticker_subscription()),
+            message_limit: message_limit.max(3),
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+    ];
+    let client = ReadOnlyWebSocketClient;
+
+    for probe in probes {
+        let result = client.connect_and_capture(&probe).await?;
+        let mut health = FeedHealthTracker::new(&probe.source, config.feeds.stale_after_ms);
+        health.mark_connected(unix_time_ms());
+        let recorder = FeedRecorder::new(storage, run_id, probe.source.clone());
+        let mut normalized_count = 0usize;
+        let mut unknown_count = 0usize;
+        for message in result.received_text_messages {
+            let recv_wall_ts = unix_time_ms();
+            let recorded =
+                recorder.record_message(message, recv_wall_ts, monotonic_like_ns(), ingest_seq)?;
+            ingest_seq += 1;
+            counts.raw_messages += 1;
+            counts.normalized_events += recorded.normalized_event_count;
+            normalized_count += recorded.normalized_event_count;
+            if recorded.unknown_event_type.is_some() {
+                unknown_count += 1;
+            }
+            health.mark_message(recv_wall_ts, None);
+        }
+        let observed_health = health.observe(unix_time_ms());
+
+        println!(
+            "paper_feed_source={},connected={},normalized_events={},unknown_messages={},health={:?}",
+            probe.source,
+            result.connected,
+            normalized_count,
+            unknown_count,
+            observed_health.status
+        );
+        if normalized_count == 0 {
+            return Err(format!(
+                "paper feed source {} connected but produced no normalized events",
+                probe.source
+            )
+            .into());
+        }
+    }
+
+    Ok(counts)
+}
+
+fn select_paper_markets(markets: &[Market]) -> Result<Vec<Market>, Box<dyn std::error::Error>> {
+    let mut selected = Vec::new();
+    for asset in [Asset::Btc, Asset::Eth, Asset::Sol] {
+        let Some(market) = markets.iter().find(|market| {
+            market.asset == asset
+                && market.ineligibility_reason.is_none()
+                && market.outcomes.len() == 2
+                && market.lifecycle_state == MarketLifecycleState::Active
+        }) else {
+            return Err(format!(
+                "paper runtime requires one eligible active {} 15m market",
+                asset.symbol()
+            )
+            .into());
+        };
+        selected.push(market.clone());
+    }
+    Ok(selected)
+}
+
+fn append_new_recorded_paper_events(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    result: &ReplayRunResult,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let recorded_count = result.recorded_paper_events.len();
+    if recorded_count > result.generated_paper_events.len()
+        || result.generated_paper_events[..recorded_count] != result.recorded_paper_events
+    {
+        return Err(format!(
+            "recorded paper events diverged before append: generated_count={} recorded_count={recorded_count}",
+            result.generated_paper_events.len()
+        )
+        .into());
+    }
+
+    let mut appended = 0usize;
+    for (offset, event) in result
+        .generated_paper_events
+        .iter()
+        .skip(recorded_count)
+        .cloned()
+        .enumerate()
+    {
+        let index = recorded_count + offset;
+        storage.append_normalized_event(EventEnvelope::new(
+            run_id,
+            format!("paper-runtime-recorded-{index}"),
+            "paper_runtime",
+            unix_time_ms(),
+            monotonic_like_ns() + index as u64,
+            9_000_000 + index as u64,
+            event,
+        ))?;
+        appended += 1;
+    }
+
+    Ok(appended)
+}
+
+fn persist_paper_outputs(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    config: &AppConfig,
+    result: &ReplayRunResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for order in &result.generated_orders {
+        storage.insert_paper_order(order.clone())?;
+    }
+    if result.generated_orders.is_empty() {
+        storage.write_session_artifact(run_id, "paper_orders.jsonl", b"")?;
+    }
+    for fill in &result.generated_fills {
+        storage.insert_paper_fill(fill.clone())?;
+    }
+    if result.generated_fills.is_empty() {
+        storage.write_session_artifact(run_id, "paper_fills.jsonl", b"")?;
+    }
+    for position in &result.position_snapshots {
+        storage.upsert_paper_position(position.clone())?;
+    }
+    if result.position_snapshots.is_empty() {
+        storage.write_session_artifact(run_id, "paper_positions.jsonl", b"")?;
+    }
+    let mut risk_event_count = 0usize;
+    for (index, event) in result.generated_events.iter().enumerate() {
+        if let NormalizedEvent::RiskHalt { risk_state, .. } = event {
+            storage.insert_risk_event(RiskEvent {
+                run_id: run_id.to_string(),
+                event_id: format!("risk-runtime-{index}"),
+                risk_state: risk_state.clone(),
+            })?;
+            risk_event_count += 1;
+        }
+    }
+    if risk_event_count == 0 {
+        storage.write_session_artifact(run_id, "risk_events.jsonl", b"")?;
+    }
+    storage.upsert_paper_balance(PaperBalanceSnapshot {
+        run_id: run_id.to_string(),
+        starting_balance: config.paper.starting_balance,
+        cash_balance: config.paper.starting_balance + result.report.pnl.totals.realized_pnl,
+        realized_pnl: result.report.pnl.totals.realized_pnl,
+        unrealized_pnl: result.report.pnl.totals.unrealized_pnl,
+        updated_ts: unix_time_ms(),
+    })?;
+    Ok(())
+}
+
+fn write_runtime_artifacts(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    report_file: &str,
+    metrics_file: &str,
+    result: &ReplayRunResult,
+    determinism_failed: bool,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let report_path = storage.write_session_artifact(
+        run_id,
+        report_file,
+        &deterministic_report_json(&result.report),
+    )?;
+    let metrics = metrics_from_replay_result(result, determinism_failed).render_prometheus();
+    storage.write_session_artifact(run_id, metrics_file, metrics.as_bytes())?;
+    Ok(report_path)
+}
+
+fn metrics_from_replay_result(
+    result: &ReplayRunResult,
+    determinism_failed: bool,
+) -> MetricsSnapshot {
+    let mut snapshot = MetricsSnapshot::new();
+    for source in [SOURCE_POLYMARKET_CLOB, SOURCE_BINANCE, SOURCE_COINBASE] {
+        snapshot.record_feed_message_rate(source, 0.0);
+        snapshot.record_feed_latency_ms(source, 0.0);
+        snapshot.record_websocket_reconnects(source, 0);
+    }
+    snapshot.record_book_staleness_ms("session", "all", 0.0);
+    for asset in [Asset::Btc, Asset::Eth, Asset::Sol] {
+        snapshot.record_reference_staleness_ms(asset, "resolution_source", 0.0);
+    }
+    snapshot.record_signal_decision("all", "evaluated", result.report.signals.evaluated_count);
+    snapshot.record_signal_decision("all", "skipped", result.report.signals.skipped_count);
+    snapshot.record_signal_decision(
+        "all",
+        "emitted_order_intent",
+        result.report.signals.emitted_order_intent_count,
+    );
+
+    let mut saw_halt = false;
+    for decision in &result.report.risk.decisions {
+        for reason in &decision.halt_reasons {
+            saw_halt = true;
+            snapshot.record_risk_halt(reason.clone(), 1);
+        }
+    }
+    if !saw_halt {
+        snapshot.record_risk_halt(RiskHaltReason::Unknown, 0);
+    }
+
+    if result.generated_orders.is_empty() {
+        snapshot.record_paper_order(PaperOrderStatus::Created, 0);
+    } else {
+        for order in &result.generated_orders {
+            snapshot.record_paper_order(order.status, 1);
+        }
+    }
+    if result.generated_fills.is_empty() {
+        snapshot.record_paper_fill("none", 0);
+    } else {
+        for fill in &result.generated_fills {
+            snapshot.record_paper_fill(&fill.market_id, 1);
+        }
+    }
+    if result.position_snapshots.is_empty() {
+        snapshot.record_paper_pnl("none", Asset::Btc, "realized", 0.0);
+        snapshot.record_paper_pnl("none", Asset::Btc, "unrealized", 0.0);
+    } else {
+        for position in &result.position_snapshots {
+            snapshot.record_paper_pnl(
+                &position.market_id,
+                position.asset,
+                "realized",
+                position.realized_pnl,
+            );
+            snapshot.record_paper_pnl(
+                &position.market_id,
+                position.asset,
+                "unrealized",
+                position.unrealized_pnl,
+            );
+        }
+    }
+    snapshot.record_storage_write_failure("none", 0);
+    snapshot.record_replay_determinism_failure(
+        &result.report.metadata.replay_run_id,
+        u64::from(determinism_failed),
+    );
+    snapshot
 }
 
 async fn run_m8_metrics_smoke(
@@ -623,6 +1185,22 @@ fn escape_json(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() -> std::io::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => signal,
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() -> std::io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 fn unix_time_ms() -> i64 {

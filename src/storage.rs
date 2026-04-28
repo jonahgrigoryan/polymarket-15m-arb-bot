@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use postgres::{Client, NoTls};
@@ -91,6 +94,269 @@ pub trait StorageBackend {
     fn insert_risk_event(&self, event: RiskEvent) -> StorageResult<()>;
 
     fn read_run_events(&self, run_id: &str) -> StorageResult<Vec<EventEnvelope>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct FileSessionStorage {
+    root: PathBuf,
+    active_run_id: Option<String>,
+}
+
+impl FileSessionStorage {
+    pub fn new(output_dir: impl AsRef<Path>) -> Self {
+        Self {
+            root: output_dir.as_ref().join("sessions"),
+            active_run_id: None,
+        }
+    }
+
+    pub fn for_run(output_dir: impl AsRef<Path>, run_id: impl Into<String>) -> StorageResult<Self> {
+        let run_id = run_id.into();
+        validate_path_segment(&run_id, "run_id")?;
+        Ok(Self {
+            root: output_dir.as_ref().join("sessions"),
+            active_run_id: Some(run_id),
+        })
+    }
+
+    pub fn session_dir(&self, run_id: &str) -> StorageResult<PathBuf> {
+        Ok(self.root.join(validate_path_segment(run_id, "run_id")?))
+    }
+
+    pub fn session_exists(&self, run_id: &str) -> StorageResult<bool> {
+        Ok(self.session_dir(run_id)?.exists())
+    }
+
+    pub fn write_session_artifact(
+        &self,
+        run_id: &str,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> StorageResult<PathBuf> {
+        let file_name = validate_path_segment(file_name, "file_name")?;
+        let path = self.session_dir(run_id)?.join(file_name);
+        ensure_parent_dir(&path, "write_session_artifact")?;
+        fs::write(&path, bytes).map_err(|source| {
+            StorageError::backend("write_session_artifact", source.to_string())
+        })?;
+        Ok(path)
+    }
+
+    pub fn sync_session(&self, run_id: &str) -> StorageResult<()> {
+        let session_dir = self.session_dir(run_id)?;
+        if !session_dir.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(&session_dir)
+            .map_err(|source| StorageError::backend("sync_session", source.to_string()))?
+        {
+            let entry = entry
+                .map_err(|source| StorageError::backend("sync_session", source.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|source| StorageError::backend("sync_session", source.to_string()))?;
+            if file_type.is_file() {
+                File::open(entry.path())
+                    .and_then(|file| file.sync_all())
+                    .map_err(|source| StorageError::backend("sync_session", source.to_string()))?;
+            }
+        }
+
+        if let Ok(file) = File::open(&session_dir) {
+            file.sync_all()
+                .map_err(|source| StorageError::backend("sync_session", source.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn append_json_line<T: Serialize>(
+        &self,
+        run_id: &str,
+        file_name: &'static str,
+        value: &T,
+        operation: &'static str,
+    ) -> StorageResult<()> {
+        let path = self.session_dir(run_id)?.join(file_name);
+        ensure_parent_dir(&path, operation)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|source| StorageError::backend(operation, source.to_string()))?;
+        serde_json::to_writer(&mut file, value).map_err(|source| StorageError::Serialize {
+            operation,
+            message: source.to_string(),
+        })?;
+        file.write_all(b"\n")
+            .and_then(|_| file.flush())
+            .map_err(|source| StorageError::backend(operation, source.to_string()))?;
+        Ok(())
+    }
+
+    fn active_run_id(&self, operation: &'static str) -> StorageResult<&str> {
+        self.active_run_id.as_deref().ok_or_else(|| {
+            StorageError::backend(operation, "file session storage is not scoped to a run_id")
+        })
+    }
+
+    fn read_json_lines<T: for<'de> Deserialize<'de>>(
+        &self,
+        run_id: &str,
+        file_name: &'static str,
+        operation: &'static str,
+    ) -> StorageResult<Vec<T>> {
+        let path = self.session_dir(run_id)?.join(file_name);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let file = File::open(path)
+            .map_err(|source| StorageError::backend(operation, source.to_string()))?;
+        let reader = BufReader::new(file);
+        let mut values = Vec::new();
+        for line in reader.lines() {
+            let line =
+                line.map_err(|source| StorageError::backend(operation, source.to_string()))?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value = serde_json::from_str(&line).map_err(|source| StorageError::Serialize {
+                operation,
+                message: source.to_string(),
+            })?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+}
+
+impl StorageBackend for FileSessionStorage {
+    fn append_raw_message(&self, message: RawMessage) -> StorageResult<()> {
+        self.append_json_line(
+            &message.run_id.clone(),
+            "raw_messages.jsonl",
+            &message,
+            "append_raw_message",
+        )
+    }
+
+    fn append_normalized_event(&self, event: EventEnvelope) -> StorageResult<()> {
+        self.append_json_line(
+            &event.run_id.clone(),
+            "normalized_events.jsonl",
+            &event,
+            "append_normalized_event",
+        )
+    }
+
+    fn upsert_market(&self, market: Market) -> StorageResult<()> {
+        let run_id = self.active_run_id("upsert_market")?;
+        self.append_json_line(run_id, "markets.jsonl", &market, "upsert_market")
+    }
+
+    fn insert_config_snapshot(&self, snapshot: ConfigSnapshot) -> StorageResult<()> {
+        let path = self
+            .session_dir(&snapshot.run_id)?
+            .join("config_snapshot.json");
+        ensure_parent_dir(&path, "insert_config_snapshot")?;
+        let bytes =
+            serde_json::to_vec_pretty(&snapshot).map_err(|source| StorageError::Serialize {
+                operation: "insert_config_snapshot",
+                message: source.to_string(),
+            })?;
+        fs::write(path, bytes)
+            .map_err(|source| StorageError::backend("insert_config_snapshot", source.to_string()))
+    }
+
+    fn read_config_snapshot(&self, run_id: &str) -> StorageResult<Option<ConfigSnapshot>> {
+        let path = self.session_dir(run_id)?.join("config_snapshot.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(path)
+            .map_err(|source| StorageError::backend("read_config_snapshot", source.to_string()))?;
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|source| StorageError::Serialize {
+                operation: "read_config_snapshot",
+                message: source.to_string(),
+            })
+    }
+
+    fn insert_paper_order(&self, order: PaperOrder) -> StorageResult<()> {
+        let run_id = self.active_run_id("insert_paper_order")?;
+        self.append_json_line(run_id, "paper_orders.jsonl", &order, "insert_paper_order")
+    }
+
+    fn insert_paper_fill(&self, fill: PaperFill) -> StorageResult<()> {
+        let run_id = self.active_run_id("insert_paper_fill")?;
+        self.append_json_line(run_id, "paper_fills.jsonl", &fill, "insert_paper_fill")
+    }
+
+    fn upsert_paper_position(&self, position: PositionSnapshot) -> StorageResult<()> {
+        let run_id = self.active_run_id("upsert_paper_position")?;
+        self.append_json_line(
+            run_id,
+            "paper_positions.jsonl",
+            &position,
+            "upsert_paper_position",
+        )
+    }
+
+    fn upsert_paper_balance(&self, balance: PaperBalanceSnapshot) -> StorageResult<()> {
+        self.append_json_line(
+            &balance.run_id.clone(),
+            "paper_balances.jsonl",
+            &balance,
+            "upsert_paper_balance",
+        )
+    }
+
+    fn insert_risk_event(&self, event: RiskEvent) -> StorageResult<()> {
+        self.append_json_line(
+            &event.run_id.clone(),
+            "risk_events.jsonl",
+            &event,
+            "insert_risk_event",
+        )
+    }
+
+    fn read_run_events(&self, run_id: &str) -> StorageResult<Vec<EventEnvelope>> {
+        let mut events = self
+            .read_json_lines::<EventEnvelope>(run_id, "normalized_events.jsonl", "read_run_events")?
+            .into_iter()
+            .filter(|event| event.run_id == run_id)
+            .collect::<Vec<_>>();
+        events.sort_by(|left, right| left.replay_ordering_key().cmp(&right.replay_ordering_key()));
+        Ok(events)
+    }
+}
+
+fn validate_path_segment<'a>(value: &'a str, name: &'static str) -> StorageResult<&'a str> {
+    let value = value.trim();
+    let valid = !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        });
+    if valid {
+        Ok(value)
+    } else {
+        Err(StorageError::backend(
+            "validate_path_segment",
+            format!("{name} must be a safe path segment; got {value:?}"),
+        ))
+    }
+}
+
+fn ensure_parent_dir(path: &Path, operation: &'static str) -> StorageResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        StorageError::backend(operation, format!("path has no parent: {}", path.display()))
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|source| StorageError::backend(operation, source.to_string()))
 }
 
 #[derive(Debug)]
@@ -522,6 +788,104 @@ mod tests {
     }
 
     #[test]
+    fn file_session_storage_persists_session_records_for_replay() {
+        let temp_dir = unique_temp_dir("file-session-storage");
+        let storage =
+            FileSessionStorage::for_run(&temp_dir, "run-1").expect("file storage scopes to run");
+        let market = sample_market();
+        let order = sample_order();
+        let fill = sample_fill();
+        let position = sample_position();
+        let balance = sample_balance();
+        let config: AppConfig = toml::from_str(DEFAULT_CONFIG).expect("default config parses");
+        let snapshot =
+            ConfigSnapshot::from_config("run-1", 1_777_000_000_001, &config).expect("snapshot");
+        let later_event = EventEnvelope::new(
+            "run-1",
+            "event-2",
+            "unit-test",
+            1_777_000_000_002,
+            20,
+            2,
+            NormalizedEvent::ReplayCheckpoint {
+                replay_run_id: "checkpoint".to_string(),
+                event_count: 2,
+                checkpoint_ts: 1_777_000_000_002,
+            },
+        );
+        let earlier_event = EventEnvelope::new(
+            "run-1",
+            "event-1",
+            "unit-test",
+            1_777_000_000_001,
+            10,
+            1,
+            NormalizedEvent::MarketDiscovered {
+                market: market.clone(),
+            },
+        );
+
+        storage
+            .insert_config_snapshot(snapshot)
+            .expect("config snapshot writes");
+        storage
+            .append_raw_message(RawMessage {
+                run_id: "run-1".to_string(),
+                source: "unit-test".to_string(),
+                recv_wall_ts: 1_777_000_000_000,
+                recv_mono_ns: 1,
+                ingest_seq: 1,
+                payload: "{}".to_string(),
+            })
+            .expect("raw message writes");
+        storage.upsert_market(market).expect("market writes");
+        storage
+            .append_normalized_event(later_event.clone())
+            .expect("later event writes");
+        storage
+            .append_normalized_event(earlier_event.clone())
+            .expect("earlier event writes");
+        storage.insert_paper_order(order).expect("order writes");
+        storage.insert_paper_fill(fill).expect("fill writes");
+        storage
+            .upsert_paper_position(position)
+            .expect("position writes");
+        storage
+            .upsert_paper_balance(balance)
+            .expect("balance writes");
+        storage
+            .insert_risk_event(RiskEvent {
+                run_id: "run-1".to_string(),
+                event_id: "risk-1".to_string(),
+                risk_state: RiskState {
+                    halted: false,
+                    active_halts: Vec::new(),
+                    reason: None,
+                    updated_ts: 1_777_000_000_000,
+                },
+            })
+            .expect("risk event writes");
+        let artifact = storage
+            .write_session_artifact("run-1", "paper_report.json", b"{}")
+            .expect("artifact writes");
+        storage.sync_session("run-1").expect("session syncs");
+
+        let reader = FileSessionStorage::new(&temp_dir);
+        assert!(reader
+            .read_config_snapshot("run-1")
+            .expect("config snapshot reads")
+            .is_some());
+        assert_eq!(
+            reader.read_run_events("run-1").expect("events read"),
+            vec![earlier_event, later_event]
+        );
+        assert!(artifact.exists());
+        assert!(FileSessionStorage::for_run(&temp_dir, "../bad").is_err());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
     fn storage_error_exposes_operation_name() {
         let error = StorageError::backend("append_normalized_event", "database unavailable");
 
@@ -624,5 +988,13 @@ mod tests {
             unrealized_pnl: 0.05,
             updated_ts: 1_777_000_000_002,
         }
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock is after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{}-{now_ns}", std::process::id()))
     }
 }
