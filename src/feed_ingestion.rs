@@ -428,6 +428,9 @@ fn websocket_accept(key: &str) -> String {
 }
 
 fn is_text_heartbeat(payload: &str) -> bool {
+    if payload.trim().is_empty() {
+        return true;
+    }
     matches!(
         payload.trim().to_ascii_uppercase().as_str(),
         "PING" | "PONG"
@@ -1005,6 +1008,7 @@ mod tests {
     fn text_heartbeat_messages_are_not_feed_payloads() {
         assert!(is_text_heartbeat("PONG"));
         assert!(is_text_heartbeat(" ping "));
+        assert!(is_text_heartbeat(" "));
         assert!(!is_text_heartbeat(r#"{"event_type":"book"}"#));
     }
 }

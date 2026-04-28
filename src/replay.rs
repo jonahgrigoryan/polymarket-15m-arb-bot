@@ -624,6 +624,7 @@ fn replay_metadata(
     config: &AppConfig,
 ) -> ReplayRunMetadata {
     let is_pyth_proxy = config.reference_feed.is_pyth_proxy_enabled();
+    let is_polymarket_rtds_chainlink = config.reference_feed.is_polymarket_rtds_chainlink_enabled();
     let is_chainlink = config.reference_feed.provider == "chainlink";
     ReplayRunMetadata {
         run_id: source_run_id.to_string(),
@@ -642,10 +643,24 @@ fn replay_metadata(
         last_event_source_ts: None,
         source_timestamp_regressions: count_source_timestamp_regressions(events),
         reference_feed_mode: Some(config.reference_feed.provider.clone()),
-        reference_provider: is_pyth_proxy.then(|| "pyth".to_string()),
-        matches_market_resolution_source: is_pyth_proxy.then_some(false),
+        reference_provider: if is_pyth_proxy {
+            Some("pyth".to_string())
+        } else if is_polymarket_rtds_chainlink {
+            Some("polymarket_rtds_chainlink".to_string())
+        } else if is_chainlink {
+            Some("chainlink".to_string())
+        } else {
+            None
+        },
+        matches_market_resolution_source: if is_pyth_proxy {
+            Some(false)
+        } else if is_polymarket_rtds_chainlink || is_chainlink {
+            Some(true)
+        } else {
+            None
+        },
         live_readiness_evidence: is_chainlink,
-        settlement_reference_evidence: is_chainlink,
+        settlement_reference_evidence: is_chainlink || is_polymarket_rtds_chainlink,
     }
 }
 
@@ -657,6 +672,8 @@ fn evidence_type(events: &[EventEnvelope], config: &AppConfig) -> Option<String>
         Some("deterministic_fixture".to_string())
     } else if config.reference_feed.is_pyth_proxy_enabled() {
         Some("pyth_proxy_live_ingestion".to_string())
+    } else if config.reference_feed.is_polymarket_rtds_chainlink_enabled() {
+        Some("polymarket_rtds_chainlink_live_ingestion".to_string())
     } else {
         None
     }
@@ -671,7 +688,7 @@ fn live_market_evidence(events: &[EventEnvelope]) -> Option<bool> {
     } else if events.iter().any(|event| {
         matches!(
             event.source.as_str(),
-            "polymarket_clob" | "binance" | "coinbase" | "pyth_proxy"
+            "polymarket_clob" | "binance" | "coinbase" | "pyth_proxy" | "polymarket_rtds_chainlink"
         )
     }) {
         Some(true)
@@ -724,7 +741,9 @@ mod tests {
         ReferencePrice, Side,
     };
     use crate::events::EventType;
-    use crate::reference_feed::SOURCE_PYTH_PROXY;
+    use crate::reference_feed::{
+        PROVIDER_POLYMARKET_RTDS_CHAINLINK, SOURCE_POLYMARKET_RTDS_CHAINLINK, SOURCE_PYTH_PROXY,
+    };
     use crate::storage::{ConfigSnapshot, InMemoryStorage};
 
     const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
@@ -816,6 +835,43 @@ mod tests {
                 .unwrap_or_default()
                 < first.report.signals.evaluated_count
         );
+    }
+
+    #[test]
+    fn polymarket_rtds_chainlink_reference_ticks_replay_with_settlement_source_labels() {
+        let mut config = config();
+        config.reference_feed.provider = "polymarket_rtds_chainlink".to_string();
+        let engine = ReplayEngine::new(config);
+        let events = polymarket_rtds_chainlink_synthetic_events();
+
+        let first = engine
+            .replay_events(RUN_ID, events.clone())
+            .expect("first RTDS Chainlink replay succeeds");
+        let second = engine
+            .replay_events(RUN_ID, events)
+            .expect("second RTDS Chainlink replay succeeds");
+        let check = compare_replay_results(&first, &second);
+
+        assert!(check.passed);
+        assert_eq!(
+            first.report.metadata.evidence_type.as_deref(),
+            Some("polymarket_rtds_chainlink_live_ingestion")
+        );
+        assert_eq!(
+            first.report.metadata.reference_feed_mode.as_deref(),
+            Some("polymarket_rtds_chainlink")
+        );
+        assert_eq!(
+            first.report.metadata.reference_provider.as_deref(),
+            Some(PROVIDER_POLYMARKET_RTDS_CHAINLINK)
+        );
+        assert_eq!(
+            first.report.metadata.matches_market_resolution_source,
+            Some(true)
+        );
+        assert!(first.report.metadata.settlement_reference_evidence);
+        assert!(!first.report.metadata.live_readiness_evidence);
+        assert!(first.report.signals.emitted_order_intent_count > 0);
     }
 
     #[test]
@@ -1111,6 +1167,20 @@ mod tests {
                     price.provider = Some("pyth".to_string());
                     price.matches_market_resolution_source = Some(false);
                     envelope.source = SOURCE_PYTH_PROXY.to_string();
+                }
+                envelope
+            })
+            .collect()
+    }
+
+    fn polymarket_rtds_chainlink_synthetic_events() -> Vec<EventEnvelope> {
+        synthetic_events()
+            .into_iter()
+            .map(|mut envelope| {
+                if let NormalizedEvent::ReferenceTick { price } = &mut envelope.payload {
+                    price.provider = Some(PROVIDER_POLYMARKET_RTDS_CHAINLINK.to_string());
+                    price.matches_market_resolution_source = Some(true);
+                    envelope.source = SOURCE_POLYMARKET_RTDS_CHAINLINK.to_string();
                 }
                 envelope
             })
