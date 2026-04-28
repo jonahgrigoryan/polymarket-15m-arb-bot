@@ -7,6 +7,7 @@ pub mod market_discovery;
 pub mod metrics;
 pub mod normalization;
 pub mod paper_executor;
+pub mod reference_feed;
 pub mod replay;
 pub mod reporting;
 pub mod risk_engine;
@@ -27,6 +28,7 @@ pub fn module_names() -> Vec<&'static str> {
         metrics::MODULE,
         normalization::MODULE,
         paper_executor::MODULE,
+        reference_feed::MODULE,
         replay::MODULE,
         reporting::MODULE,
         risk_engine::MODULE,

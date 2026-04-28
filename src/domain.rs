@@ -117,6 +117,12 @@ pub struct ReferencePrice {
     pub asset: Asset,
     pub source: String,
     pub price: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matches_market_resolution_source: Option<bool>,
     pub source_ts: Option<i64>,
     pub recv_wall_ts: i64,
 }

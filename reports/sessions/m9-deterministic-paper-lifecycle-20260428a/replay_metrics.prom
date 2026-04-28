@@ -1,0 +1,47 @@
+# HELP p15m_book_staleness_ms Order book staleness by market and token in milliseconds.
+# TYPE p15m_book_staleness_ms gauge
+p15m_book_staleness_ms{market_id="session",token_id="all"} 0
+# HELP p15m_feed_latency_ms Feed message latency by source in milliseconds.
+# TYPE p15m_feed_latency_ms gauge
+p15m_feed_latency_ms{source="binance"} 0
+p15m_feed_latency_ms{source="coinbase"} 0
+p15m_feed_latency_ms{source="polymarket_clob"} 0
+# HELP p15m_feed_message_rate_per_second Feed message rate by source.
+# TYPE p15m_feed_message_rate_per_second gauge
+p15m_feed_message_rate_per_second{source="binance"} 0
+p15m_feed_message_rate_per_second{source="coinbase"} 0
+p15m_feed_message_rate_per_second{source="polymarket_clob"} 0
+# HELP p15m_paper_fills_total Paper fill count by market.
+# TYPE p15m_paper_fills_total counter
+p15m_paper_fills_total{market_id="deterministic-btc-taker-market"} 1
+# HELP p15m_paper_orders_total Paper order count by status.
+# TYPE p15m_paper_orders_total counter
+p15m_paper_orders_total{status="filled"} 1
+# HELP p15m_paper_pnl Paper P&L by market, asset, and kind.
+# TYPE p15m_paper_pnl gauge
+p15m_paper_pnl{asset="BTC",kind="realized",market_id="deterministic-btc-taker-market"} -0.2
+p15m_paper_pnl{asset="BTC",kind="unrealized",market_id="deterministic-btc-taker-market"} -0.050000000000000044
+# HELP p15m_reference_staleness_ms Reference feed staleness by asset and source in milliseconds.
+# TYPE p15m_reference_staleness_ms gauge
+p15m_reference_staleness_ms{asset="BTC",source="resolution_source"} 0
+p15m_reference_staleness_ms{asset="ETH",source="resolution_source"} 0
+p15m_reference_staleness_ms{asset="SOL",source="resolution_source"} 0
+# HELP p15m_replay_determinism_failures_total Replay determinism failure count by replay run.
+# TYPE p15m_replay_determinism_failures_total counter
+p15m_replay_determinism_failures_total{replay_run_id="m9-deterministic-paper-lifecycle-20260428a:offline-replay"} 0
+# HELP p15m_risk_halts_total Risk halt count by reason.
+# TYPE p15m_risk_halts_total counter
+p15m_risk_halts_total{reason="unknown"} 0
+# HELP p15m_signal_decisions_total Signal decisions by market and action.
+# TYPE p15m_signal_decisions_total counter
+p15m_signal_decisions_total{action="emitted_order_intent",market_id="all"} 1
+p15m_signal_decisions_total{action="evaluated",market_id="all"} 5
+p15m_signal_decisions_total{action="skipped",market_id="all"} 4
+# HELP p15m_storage_write_failures_total Storage write failure count by operation.
+# TYPE p15m_storage_write_failures_total counter
+p15m_storage_write_failures_total{operation="none"} 0
+# HELP p15m_websocket_reconnects_total Read-only WebSocket reconnect count by source.
+# TYPE p15m_websocket_reconnects_total counter
+p15m_websocket_reconnects_total{source="binance"} 0
+p15m_websocket_reconnects_total{source="coinbase"} 0
+p15m_websocket_reconnects_total{source="polymarket_clob"} 0

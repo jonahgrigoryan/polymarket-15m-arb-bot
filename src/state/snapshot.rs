@@ -254,7 +254,11 @@ impl StateStore {
             .get(market_id)
             .cloned()
             .or_else(|| market.as_ref().map(|market| market.lifecycle_state.clone()))?;
-        let token_books = sorted_token_books(self.order_books.market_snapshots(market_id));
+        let token_books = sorted_token_books(market_token_books(
+            &self.order_books,
+            market_id,
+            market.as_ref().map(|market| market.condition_id.as_str()),
+        ));
         let book_freshness = token_books
             .iter()
             .map(|book| {
@@ -327,6 +331,27 @@ fn sorted_token_books(mut books: Vec<TokenBookSnapshot>) -> Vec<TokenBookSnapsho
     books
 }
 
+fn market_token_books(
+    order_books: &OrderBookState,
+    market_id: &str,
+    condition_id: Option<&str>,
+) -> Vec<TokenBookSnapshot> {
+    let mut token_books = order_books.market_snapshots(market_id);
+    if let Some(condition_id) = condition_id {
+        if condition_id != market_id {
+            for book in order_books.market_snapshots(condition_id) {
+                let duplicate = token_books.iter().any(|existing| {
+                    existing.market_id == book.market_id && existing.token_id == book.token_id
+                });
+                if !duplicate {
+                    token_books.push(book);
+                }
+            }
+        }
+    }
+    token_books
+}
+
 fn sorted_prices_for_asset(
     prices: &HashMap<AssetPriceKey, ReferencePrice>,
     asset: Asset,
@@ -373,6 +398,9 @@ mod tests {
                         asset: Asset::Btc,
                         source: "resolution".to_string(),
                         price: 65_000.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
                         source_ts: Some(995),
                         recv_wall_ts: 1_000,
                     },
@@ -427,6 +455,51 @@ mod tests {
         assert_eq!(snapshot.last_recv_wall_ts, Some(1_000));
         assert!(!store.is_book_stale(&market.market_id, "token-up", 1_400, 500));
         assert!(store.is_book_stale(&market.market_id, "token-up", 1_501, 500));
+    }
+
+    #[test]
+    fn decision_snapshot_can_use_condition_id_books_for_gamma_market() {
+        let mut store = StateStore::new();
+        let market = sample_market();
+        store
+            .apply_event(&envelope(
+                1,
+                1_000,
+                NormalizedEvent::MarketDiscovered {
+                    market: market.clone(),
+                },
+            ))
+            .expect("market applies");
+        store
+            .apply_event(&envelope(
+                2,
+                1_000,
+                NormalizedEvent::BookSnapshot {
+                    book: OrderBookSnapshot {
+                        market_id: market.condition_id.clone(),
+                        token_id: "token-up".to_string(),
+                        bids: vec![OrderBookLevel {
+                            price: 0.49,
+                            size: 100.0,
+                        }],
+                        asks: vec![OrderBookLevel {
+                            price: 0.51,
+                            size: 100.0,
+                        }],
+                        hash: Some("condition-book-hash".to_string()),
+                        source_ts: Some(990),
+                    },
+                },
+            ))
+            .expect("condition-id book applies");
+
+        let snapshot = store
+            .decision_snapshot(&market.market_id, 1_250, 500, 500)
+            .expect("decision snapshot exists");
+
+        assert_eq!(snapshot.token_books.len(), 1);
+        assert_eq!(snapshot.token_books[0].market_id, market.condition_id);
+        assert_eq!(snapshot.token_books[0].token_id, "token-up");
     }
 
     #[test]
@@ -508,6 +581,9 @@ mod tests {
                         asset: Asset::Btc,
                         source: "resolution".to_string(),
                         price: 65_000.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
                         source_ts: Some(995),
                         recv_wall_ts: 1_000,
                     },
@@ -523,6 +599,9 @@ mod tests {
                         asset: Asset::Btc,
                         source: "binance".to_string(),
                         price: 65_005.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
                         source_ts: Some(995),
                         recv_wall_ts: 1_000,
                     },

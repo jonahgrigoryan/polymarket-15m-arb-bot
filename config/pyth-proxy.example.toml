@@ -1,0 +1,76 @@
+# Temporary M9 paper/replay validation config.
+# This opt-in config uses Pyth as a proxy reference feed only. It is not
+# settlement-source or live-readiness evidence for current Chainlink-resolved
+# Polymarket BTC/ETH/SOL 15m markets.
+
+[runtime]
+mode = "validate"
+log_level = "info"
+
+[assets]
+symbols = ["BTC", "ETH", "SOL"]
+
+[polymarket]
+clob_rest_url = "https://clob-v2.polymarket.com"
+market_ws_url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+gamma_markets_url = "https://gamma-api.polymarket.com/markets/keyset"
+geoblock_url = "https://polymarket.com/api/geoblock"
+request_timeout_ms = 8_000
+market_discovery_page_limit = 100
+market_discovery_max_pages = 5
+market_discovery_poll_ms = 60_000
+gamma_markets_request_limit_per_10s = 100
+clob_market_info_request_limit_per_10s = 50
+
+[feeds]
+resolution_source_url = "https://data.chain.link/streams"
+binance_ws_url = "wss://stream.binance.com:9443/ws"
+coinbase_ws_url = "wss://ws-feed.exchange.coinbase.com"
+connect_timeout_ms = 8_000
+read_timeout_ms = 5_000
+stale_after_ms = 2_000
+reconnect_initial_backoff_ms = 250
+reconnect_max_backoff_ms = 5_000
+reconnect_max_attempts = 5
+feed_smoke_message_limit = 20
+
+[reference_feed]
+provider = "pyth_proxy"
+pyth_enabled = true
+pyth_hermes_url = "https://hermes.pyth.network"
+pyth_btc_usd_price_id = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+pyth_eth_usd_price_id = "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
+pyth_sol_usd_price_id = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+max_staleness_ms = 5_000
+
+[storage]
+clickhouse_url = "http://localhost:8123"
+postgres_url = "postgres://polymarket:polymarket@localhost:5432/polymarket_15m"
+
+[strategy]
+min_edge_bps = 50
+latency_buffer_ms = 250
+adverse_selection_bps = 25
+final_seconds_no_trade = 30
+
+[risk]
+max_loss_per_market = 25.0
+max_notional_per_market = 100.0
+max_notional_per_asset = 250.0
+max_total_notional = 500.0
+max_correlated_notional = 350.0
+stale_reference_ms = 1_000
+stale_book_ms = 1_000
+max_orders_per_minute = 120
+daily_drawdown_limit = 100.0
+
+[paper]
+starting_balance = 1_000.0
+max_orders_per_market = 20
+
+[metrics]
+bind_addr = "127.0.0.1:9100"
+
+[replay]
+output_dir = "reports"
+deterministic = true

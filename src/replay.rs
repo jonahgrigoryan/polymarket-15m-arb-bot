@@ -18,7 +18,9 @@ use crate::reporting::{
 };
 use crate::risk_engine::{RiskContext, RiskEngine, RiskGateDecision};
 use crate::signal_engine::{SignalEngine, SignalEvaluation};
-use crate::state::{BookUpdateError, DecisionSnapshot, StateStore, TokenBookSnapshot};
+use crate::state::{
+    BookUpdateError, DecisionSnapshot, PositionSnapshot, StateStore, TokenBookSnapshot,
+};
 use crate::storage::{ConfigSnapshot, StorageBackend, StorageError};
 
 pub const MODULE: &str = "replay";
@@ -56,6 +58,7 @@ pub struct ReplayRunResult {
     pub recorded_paper_events: Vec<NormalizedEvent>,
     pub generated_orders: Vec<PaperOrder>,
     pub generated_fills: Vec<PaperFill>,
+    pub position_snapshots: Vec<PositionSnapshot>,
     pub audit_events: Vec<PaperExecutionAuditEvent>,
 }
 
@@ -293,6 +296,7 @@ impl<'a> ReplayExecution<'a> {
             &ordered_events,
             stable_fingerprint(&ordered_events)?,
             stable_fingerprint(self.config)?,
+            self.config,
         );
 
         for envelope in &ordered_events {
@@ -330,6 +334,7 @@ impl<'a> ReplayExecution<'a> {
             recorded_paper_events: self.recorded_paper_events,
             generated_orders,
             generated_fills: self.generated_fills,
+            position_snapshots,
             audit_events: self.audit_events,
         })
     }
@@ -616,7 +621,10 @@ fn replay_metadata(
     events: &[EventEnvelope],
     input_fingerprint: String,
     config_fingerprint: String,
+    config: &AppConfig,
 ) -> ReplayRunMetadata {
+    let is_pyth_proxy = config.reference_feed.is_pyth_proxy_enabled();
+    let is_chainlink = config.reference_feed.provider == "chainlink";
     ReplayRunMetadata {
         run_id: source_run_id.to_string(),
         replay_run_id: format!("{source_run_id}:offline-replay"),
@@ -624,6 +632,8 @@ fn replay_metadata(
         input_fingerprint: Some(input_fingerprint),
         config_fingerprint: Some(config_fingerprint),
         code_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        evidence_type: evidence_type(events, config),
+        live_market_evidence: live_market_evidence(events),
         started_wall_ts: events.first().map(|event| event.recv_wall_ts),
         completed_wall_ts: events.last().map(|event| event.recv_wall_ts),
         first_event_recv_wall_ts: None,
@@ -631,6 +641,42 @@ fn replay_metadata(
         first_event_source_ts: None,
         last_event_source_ts: None,
         source_timestamp_regressions: count_source_timestamp_regressions(events),
+        reference_feed_mode: Some(config.reference_feed.provider.clone()),
+        reference_provider: is_pyth_proxy.then(|| "pyth".to_string()),
+        matches_market_resolution_source: is_pyth_proxy.then_some(false),
+        live_readiness_evidence: is_chainlink,
+        settlement_reference_evidence: is_chainlink,
+    }
+}
+
+fn evidence_type(events: &[EventEnvelope], config: &AppConfig) -> Option<String> {
+    if events
+        .iter()
+        .any(|event| event.source == "deterministic_fixture")
+    {
+        Some("deterministic_fixture".to_string())
+    } else if config.reference_feed.is_pyth_proxy_enabled() {
+        Some("pyth_proxy_live_ingestion".to_string())
+    } else {
+        None
+    }
+}
+
+fn live_market_evidence(events: &[EventEnvelope]) -> Option<bool> {
+    if events
+        .iter()
+        .any(|event| event.source == "deterministic_fixture")
+    {
+        Some(false)
+    } else if events.iter().any(|event| {
+        matches!(
+            event.source.as_str(),
+            "polymarket_clob" | "binance" | "coinbase" | "pyth_proxy"
+        )
+    }) {
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -674,10 +720,11 @@ fn hex_digest(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::domain::{
-        FeeParameters, Market, OrderBookLevel, OrderBookSnapshot, OutcomeToken, ReferencePrice,
-        Side,
+        FeeParameters, Market, OrderBookLevel, OrderBookSnapshot, OrderKind, OutcomeToken,
+        ReferencePrice, Side,
     };
     use crate::events::EventType;
+    use crate::reference_feed::SOURCE_PYTH_PROXY;
     use crate::storage::{ConfigSnapshot, InMemoryStorage};
 
     const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
@@ -717,6 +764,199 @@ mod tests {
         assert_eq!(first.generated_fills.len(), 1);
         assert!(first.report.pnl.totals.fees_paid >= 0.0);
         assert!(!first.report.determinism_fingerprint().is_empty());
+    }
+
+    #[test]
+    fn pyth_proxy_reference_ticks_replay_deterministically_with_proxy_labels() {
+        let mut config = config();
+        config.reference_feed.provider = "pyth_proxy".to_string();
+        config.reference_feed.pyth_enabled = true;
+        let engine = ReplayEngine::new(config);
+        let events = pyth_proxy_synthetic_events();
+
+        let first = engine
+            .replay_events(RUN_ID, events.clone())
+            .expect("first proxy replay succeeds");
+        let second = engine
+            .replay_events(RUN_ID, events)
+            .expect("second proxy replay succeeds");
+        let check = compare_replay_results(&first, &second);
+
+        assert!(check.passed);
+        assert_eq!(
+            first
+                .report
+                .events
+                .counts_by_type
+                .get(EventType::ReferenceTick.as_str()),
+            Some(&1)
+        );
+        assert_eq!(
+            first.report.metadata.reference_feed_mode.as_deref(),
+            Some("pyth_proxy")
+        );
+        assert_eq!(
+            first.report.metadata.reference_provider.as_deref(),
+            Some("pyth")
+        );
+        assert_eq!(
+            first.report.metadata.matches_market_resolution_source,
+            Some(false)
+        );
+        assert!(!first.report.metadata.live_readiness_evidence);
+        assert!(!first.report.metadata.settlement_reference_evidence);
+        assert!(first.report.signals.emitted_order_intent_count > 0);
+        assert!(
+            first
+                .report
+                .signals
+                .skip_reason_counts
+                .get("missing_reference_price")
+                .copied()
+                .unwrap_or_default()
+                < first.report.signals.evaluated_count
+        );
+    }
+
+    #[test]
+    fn deterministic_fixture_source_labels_report_metadata() {
+        let engine = ReplayEngine::new(config());
+        let events = synthetic_events()
+            .into_iter()
+            .map(|mut event| {
+                event.source = "deterministic_fixture".to_string();
+                event
+            })
+            .collect::<Vec<_>>();
+
+        let result = engine
+            .replay_events(RUN_ID, events)
+            .expect("fixture replay succeeds");
+
+        assert_eq!(
+            result.report.metadata.evidence_type.as_deref(),
+            Some("deterministic_fixture")
+        );
+        assert_eq!(result.report.metadata.live_market_evidence, Some(false));
+        assert!(!result.report.metadata.live_readiness_evidence);
+        assert!(!result.report.metadata.settlement_reference_evidence);
+    }
+
+    #[test]
+    fn m9_storage_backed_fixture_sessions_replay_for_default_assets() {
+        let config = config();
+
+        for asset in [Asset::Btc, Asset::Eth, Asset::Sol] {
+            let run_id = captured_run_id(asset);
+            let storage = captured_session_storage(&run_id, asset, &config);
+            let generated = ReplayEngine::replay_from_storage_snapshot(&storage, &run_id)
+                .expect("storage-backed fixture replay succeeds");
+            assert!(
+                generated.recorded_paper_events.is_empty(),
+                "fixture should start with no recorded paper events"
+            );
+            assert_m9_captured_report(asset, &generated);
+
+            append_recorded_paper_events(&storage, &run_id, &generated.generated_paper_events);
+
+            let first = ReplayEngine::replay_from_storage_snapshot(&storage, &run_id)
+                .expect("captured paper replay succeeds");
+            let second = ReplayEngine::replay_from_storage_snapshot(&storage, &run_id)
+                .expect("second captured paper replay succeeds");
+            let replay_check = compare_replay_results(&first, &second);
+            let paper_check = compare_generated_to_recorded_paper_events(&first)
+                .expect("paper event comparison succeeds");
+
+            assert!(
+                replay_check.passed,
+                "{} replay should be deterministic",
+                asset.symbol()
+            );
+            assert!(first
+                .report
+                .determinism_fingerprint()
+                .starts_with("sha256:"));
+            assert!(
+                paper_check.passed,
+                "{} generated paper events should match recorded captured events",
+                asset.symbol()
+            );
+            assert_m9_captured_report(asset, &first);
+            assert_eq!(first.recorded_paper_events, first.generated_paper_events);
+            assert_eq!(first.recorded_paper_events.len(), 2);
+            assert_sha256_fingerprint(&replay_check.left_fingerprint);
+            assert_eq!(
+                replay_check.left_fingerprint,
+                replay_check.right_fingerprint
+            );
+            assert_sha256_fingerprint(&paper_check.left_fingerprint);
+            assert_eq!(paper_check.left_fingerprint, paper_check.right_fingerprint);
+            assert_eq!(
+                first
+                    .report
+                    .events
+                    .counts_by_type
+                    .get(EventType::PaperOrderPlaced.as_str()),
+                Some(&1)
+            );
+            assert_eq!(
+                first
+                    .report
+                    .events
+                    .counts_by_type
+                    .get(EventType::PaperFill.as_str()),
+                Some(&1)
+            );
+            println!(
+                "m9_storage_backed_fixture_session asset={} run_id={} report_fingerprint={} paper_fingerprint={} input_fingerprint={} config_fingerprint={} fills={} fees_paid={:.6} total_pnl={:.6}",
+                asset.symbol(),
+                run_id,
+                first.report.determinism_fingerprint(),
+                paper_check.left_fingerprint,
+                first
+                    .report
+                    .metadata
+                    .input_fingerprint
+                    .as_deref()
+                    .unwrap_or("missing"),
+                first
+                    .report
+                    .metadata
+                    .config_fingerprint
+                    .as_deref()
+                    .unwrap_or("missing"),
+                first.report.paper.fill_count,
+                first.report.paper.total_fees_paid,
+                first.report.pnl.totals.total_pnl
+            );
+        }
+    }
+
+    #[test]
+    fn m9_storage_backed_fixture_paper_event_determinism_fails_when_recorded_event_is_missing() {
+        let config = config();
+        let asset = Asset::Btc;
+        let run_id = captured_run_id(asset);
+        let storage = captured_session_storage(&run_id, asset, &config);
+        let generated = ReplayEngine::replay_from_storage_snapshot(&storage, &run_id)
+            .expect("storage-backed fixture replay succeeds");
+        let mut recorded_paper_events = generated.generated_paper_events.clone();
+        recorded_paper_events
+            .pop()
+            .expect("paper fixture has events");
+        append_recorded_paper_events(&storage, &run_id, &recorded_paper_events);
+
+        let replay = ReplayEngine::replay_from_storage_snapshot(&storage, &run_id)
+            .expect("captured paper replay succeeds");
+        let check = compare_generated_to_recorded_paper_events(&replay)
+            .expect("paper event comparison succeeds");
+
+        assert!(!check.passed);
+        assert_ne!(check.left_fingerprint, check.right_fingerprint);
+        assert_eq!(
+            check.divergence.as_deref(),
+            Some("paper event mismatch: generated_count=2 recorded_count=1")
+        );
     }
 
     #[test]
@@ -860,45 +1100,141 @@ mod tests {
     }
 
     fn synthetic_events() -> Vec<EventEnvelope> {
+        synthetic_events_for_run_and_asset(RUN_ID, Asset::Btc)
+    }
+
+    fn pyth_proxy_synthetic_events() -> Vec<EventEnvelope> {
+        synthetic_events()
+            .into_iter()
+            .map(|mut envelope| {
+                if let NormalizedEvent::ReferenceTick { price } = &mut envelope.payload {
+                    price.provider = Some("pyth".to_string());
+                    price.matches_market_resolution_source = Some(false);
+                    envelope.source = SOURCE_PYTH_PROXY.to_string();
+                }
+                envelope
+            })
+            .collect()
+    }
+
+    fn synthetic_events_for_run_and_asset(run_id: &str, asset: Asset) -> Vec<EventEnvelope> {
+        let market_id = asset_market_id(asset);
+        let up_token_id = asset_up_token_id(asset);
+        let down_token_id = asset_down_token_id(asset);
+
         vec![
-            envelope(1, NormalizedEvent::MarketDiscovered { market: market() }),
-            envelope(
+            envelope_for_run(
+                run_id,
+                1,
+                NormalizedEvent::MarketDiscovered {
+                    market: market_for_asset(asset),
+                },
+            ),
+            envelope_for_run(
+                run_id,
                 2,
                 NormalizedEvent::BookSnapshot {
-                    book: book(UP_TOKEN_ID, 0.49, 0.51),
+                    book: book_for_asset(asset, &up_token_id, 0.49, 0.51),
                 },
             ),
-            envelope(
+            envelope_for_run(
+                run_id,
                 3,
                 NormalizedEvent::BookSnapshot {
-                    book: book(DOWN_TOKEN_ID, 0.49, 0.51),
+                    book: book_for_asset(asset, &down_token_id, 0.49, 0.51),
                 },
             ),
-            envelope(
+            envelope_for_run(
+                run_id,
                 4,
                 NormalizedEvent::ReferenceTick {
-                    price: reference(
-                        Asset::Btc.chainlink_resolution_source(),
+                    price: reference_for_asset(
+                        asset,
+                        asset.chainlink_resolution_source(),
                         100.0,
                         START_TS + 300_000,
                     ),
                 },
             ),
-            envelope(
+            envelope_for_run(
+                run_id,
                 5,
                 NormalizedEvent::PredictiveTick {
-                    price: reference("binance", 101.0, START_TS + 300_100),
+                    price: reference_for_asset(asset, "binance", 101.0, START_TS + 300_100),
                 },
             ),
-            envelope(
+            envelope_for_run(
+                run_id,
                 6,
                 NormalizedEvent::LastTrade {
-                    market_id: MARKET_ID.to_string(),
-                    token_id: UP_TOKEN_ID.to_string(),
+                    market_id,
+                    token_id: up_token_id,
                     side: Side::Buy,
                     price: 0.50,
                     size: 10.0,
                     fee_rate_bps: Some(0.0),
+                    source_ts: Some(START_TS + 300_200),
+                },
+            ),
+        ]
+    }
+
+    fn captured_fixture_events_for_run_and_asset(run_id: &str, asset: Asset) -> Vec<EventEnvelope> {
+        let market_id = asset_market_id(asset);
+        let up_token_id = asset_up_token_id(asset);
+        let down_token_id = asset_down_token_id(asset);
+
+        vec![
+            envelope_for_run(
+                run_id,
+                1,
+                NormalizedEvent::MarketDiscovered {
+                    market: market_for_asset_with_taker_fee(asset, 200.0),
+                },
+            ),
+            envelope_for_run(
+                run_id,
+                2,
+                NormalizedEvent::BookSnapshot {
+                    book: book_for_asset(asset, &up_token_id, 0.50, 0.51),
+                },
+            ),
+            envelope_for_run(
+                run_id,
+                3,
+                NormalizedEvent::BookSnapshot {
+                    book: book_for_asset(asset, &down_token_id, 0.49, 0.51),
+                },
+            ),
+            envelope_for_run(
+                run_id,
+                4,
+                NormalizedEvent::ReferenceTick {
+                    price: reference_for_asset(
+                        asset,
+                        asset.chainlink_resolution_source(),
+                        100.0,
+                        START_TS + 300_000,
+                    ),
+                },
+            ),
+            envelope_for_run(
+                run_id,
+                5,
+                NormalizedEvent::PredictiveTick {
+                    price: reference_for_asset(asset, "binance", 101.0, START_TS + 300_100),
+                },
+            ),
+            envelope_for_run(
+                run_id,
+                6,
+                NormalizedEvent::LastTrade {
+                    market_id,
+                    token_id: up_token_id,
+                    side: Side::Buy,
+                    price: 0.51,
+                    size: 10.0,
+                    fee_rate_bps: Some(200.0),
                     source_ts: Some(START_TS + 300_200),
                 },
             ),
@@ -916,8 +1252,12 @@ mod tests {
     }
 
     fn envelope(seq: u64, payload: NormalizedEvent) -> EventEnvelope {
+        envelope_for_run(RUN_ID, seq, payload)
+    }
+
+    fn envelope_for_run(run_id: &str, seq: u64, payload: NormalizedEvent) -> EventEnvelope {
         EventEnvelope::new(
-            RUN_ID,
+            run_id,
             format!("event-{seq}"),
             "synthetic-fixture",
             START_TS + 300_000 + seq as i64,
@@ -927,32 +1267,53 @@ mod tests {
         )
     }
 
-    fn market() -> Market {
+    fn recorded_paper_envelope(
+        run_id: &str,
+        index: usize,
+        payload: NormalizedEvent,
+    ) -> EventEnvelope {
+        let seq = 10_000 + index as u64;
+        EventEnvelope::new(
+            run_id,
+            format!("recorded-paper-{index}"),
+            "captured-paper-fixture",
+            START_TS + 700_000 + index as i64,
+            seq,
+            seq,
+            payload,
+        )
+    }
+
+    fn market_for_asset(asset: Asset) -> Market {
+        market_for_asset_with_taker_fee(asset, 0.0)
+    }
+
+    fn market_for_asset_with_taker_fee(asset: Asset, taker_fee_bps: f64) -> Market {
         Market {
-            market_id: MARKET_ID.to_string(),
-            slug: "btc-up-down-15m".to_string(),
-            title: "BTC Up or Down".to_string(),
-            asset: Asset::Btc,
-            condition_id: "condition-1".to_string(),
+            market_id: asset_market_id(asset),
+            slug: format!("{}-up-down-15m", asset.symbol().to_ascii_lowercase()),
+            title: format!("{} Up or Down", asset.symbol()),
+            asset,
+            condition_id: format!("condition-{}", asset.symbol().to_ascii_lowercase()),
             outcomes: vec![
                 OutcomeToken {
-                    token_id: UP_TOKEN_ID.to_string(),
+                    token_id: asset_up_token_id(asset),
                     outcome: "Up".to_string(),
                 },
                 OutcomeToken {
-                    token_id: DOWN_TOKEN_ID.to_string(),
+                    token_id: asset_down_token_id(asset),
                     outcome: "Down".to_string(),
                 },
             ],
             start_ts: START_TS,
             end_ts: START_TS + 900_000,
-            resolution_source: Some(Asset::Btc.chainlink_resolution_source().to_string()),
+            resolution_source: Some(asset.chainlink_resolution_source().to_string()),
             tick_size: 0.01,
             min_order_size: 5.0,
             fee_parameters: FeeParameters {
                 fees_enabled: true,
                 maker_fee_bps: 0.0,
-                taker_fee_bps: 0.0,
+                taker_fee_bps,
                 raw_fee_config: None,
             },
             lifecycle_state: MarketLifecycleState::Active,
@@ -960,9 +1321,14 @@ mod tests {
         }
     }
 
-    fn book(token_id: &str, best_bid: f64, best_ask: f64) -> OrderBookSnapshot {
+    fn book_for_asset(
+        asset: Asset,
+        token_id: &str,
+        best_bid: f64,
+        best_ask: f64,
+    ) -> OrderBookSnapshot {
         OrderBookSnapshot {
-            market_id: MARKET_ID.to_string(),
+            market_id: asset_market_id(asset),
             token_id: token_id.to_string(),
             bids: vec![OrderBookLevel {
                 price: best_bid,
@@ -977,11 +1343,19 @@ mod tests {
         }
     }
 
-    fn reference(source: &str, price: f64, recv_wall_ts: i64) -> ReferencePrice {
+    fn reference_for_asset(
+        asset: Asset,
+        source: &str,
+        price: f64,
+        recv_wall_ts: i64,
+    ) -> ReferencePrice {
         ReferencePrice {
-            asset: Asset::Btc,
+            asset,
             source: source.to_string(),
             price,
+            confidence: None,
+            provider: None,
+            matches_market_resolution_source: None,
             source_ts: Some(recv_wall_ts - 1),
             recv_wall_ts,
         }
@@ -989,5 +1363,140 @@ mod tests {
 
     fn config() -> AppConfig {
         toml::from_str(DEFAULT_CONFIG).expect("default config parses")
+    }
+
+    fn captured_session_storage(run_id: &str, asset: Asset, config: &AppConfig) -> InMemoryStorage {
+        let storage = InMemoryStorage::default();
+        storage
+            .insert_config_snapshot(
+                ConfigSnapshot::from_config(run_id, START_TS, config).expect("snapshot builds"),
+            )
+            .expect("config snapshot writes");
+        for event in captured_fixture_events_for_run_and_asset(run_id, asset) {
+            storage
+                .append_normalized_event(event)
+                .expect("storage-backed fixture event writes");
+        }
+        storage
+    }
+
+    fn append_recorded_paper_events(
+        storage: &InMemoryStorage,
+        run_id: &str,
+        paper_events: &[NormalizedEvent],
+    ) {
+        for (index, event) in paper_events.iter().cloned().enumerate() {
+            storage
+                .append_normalized_event(recorded_paper_envelope(run_id, index, event))
+                .expect("recorded paper event writes");
+        }
+    }
+
+    fn assert_m9_captured_report(asset: Asset, result: &ReplayRunResult) {
+        let report = &result.report;
+        let asset_symbol = asset.symbol();
+        let market_id = asset_market_id(asset);
+
+        assert_eq!(report.risk.approval_count, 1);
+        assert_eq!(report.paper.order_count, 1);
+        assert_eq!(report.paper.fill_count, 1);
+        assert_eq!(result.generated_orders.len(), 1);
+        assert_eq!(result.generated_fills.len(), 1);
+        assert_eq!(result.generated_paper_events.len(), 2);
+        assert_eq!(
+            report.paper.audit_event_counts.get("fill_simulated"),
+            Some(&1)
+        );
+        assert_eq!(
+            report.signals.counts_by_asset.get(asset_symbol),
+            Some(&report.signals.evaluated_count)
+        );
+        assert_sha256_fingerprint(&report.determinism_fingerprint());
+        assert_sha256_fingerprint(
+            report
+                .metadata
+                .input_fingerprint
+                .as_deref()
+                .expect("input fingerprint exists"),
+        );
+        assert_sha256_fingerprint(
+            report
+                .metadata
+                .config_fingerprint
+                .as_deref()
+                .expect("config fingerprint exists"),
+        );
+
+        let fill = &result.generated_fills[0];
+        assert_eq!(fill.asset, asset);
+        assert_eq!(fill.liquidity, OrderKind::Taker);
+        assert_close(fill.size, 10.0);
+        assert_close(fill.price, 0.51);
+        assert_close(fill.fee_paid, 0.2);
+        assert_close(report.paper.total_filled_size, 10.0);
+        assert_close(report.paper.total_filled_notional, 5.1);
+        assert_close(report.paper.total_fees_paid, 0.2);
+
+        let asset_pnl = report
+            .pnl
+            .by_asset
+            .get(asset_symbol)
+            .expect("P&L should be grouped by asset");
+        let market_pnl = report
+            .pnl
+            .by_market
+            .get(&market_id)
+            .expect("P&L should be grouped by market");
+        assert_close(asset_pnl.fees_paid, report.paper.total_fees_paid);
+        assert_close(market_pnl.fees_paid, report.paper.total_fees_paid);
+        assert!(
+            asset_pnl.total_pnl < 0.0,
+            "fees and conservative taker mark should be visible in P&L"
+        );
+        assert_close(report.pnl.totals.fees_paid, report.paper.total_fees_paid);
+        assert_close(report.pnl.totals.total_pnl, asset_pnl.total_pnl);
+    }
+
+    fn assert_sha256_fingerprint(fingerprint: &str) {
+        assert!(fingerprint.starts_with("sha256:"));
+        assert_eq!(fingerprint.len(), "sha256:".len() + 64);
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1e-9,
+            "actual={actual} expected={expected}"
+        );
+    }
+
+    fn captured_run_id(asset: Asset) -> String {
+        format!(
+            "m9-{}-captured-paper-fixture",
+            asset.symbol().to_ascii_lowercase()
+        )
+    }
+
+    fn asset_market_id(asset: Asset) -> String {
+        if asset == Asset::Btc {
+            MARKET_ID.to_string()
+        } else {
+            format!("market-{}", asset.symbol().to_ascii_lowercase())
+        }
+    }
+
+    fn asset_up_token_id(asset: Asset) -> String {
+        if asset == Asset::Btc {
+            UP_TOKEN_ID.to_string()
+        } else {
+            format!("token-{}-up", asset.symbol().to_ascii_lowercase())
+        }
+    }
+
+    fn asset_down_token_id(asset: Asset) -> String {
+        if asset == Asset::Btc {
+            DOWN_TOKEN_ID.to_string()
+        } else {
+            format!("token-{}-down", asset.symbol().to_ascii_lowercase())
+        }
     }
 }

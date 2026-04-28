@@ -32,6 +32,15 @@ reconnect_max_backoff_ms = 5_000
 reconnect_max_attempts = 5
 feed_smoke_message_limit = 20
 
+[reference_feed]
+provider = "none"
+pyth_enabled = false
+pyth_hermes_url = "https://hermes.pyth.network"
+pyth_btc_usd_price_id = "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43"
+pyth_eth_usd_price_id = "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace"
+pyth_sol_usd_price_id = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+max_staleness_ms = 5_000
+
 [storage]
 clickhouse_url = "http://localhost:8123"
 postgres_url = "postgres://polymarket:polymarket@localhost:5432/polymarket_15m"

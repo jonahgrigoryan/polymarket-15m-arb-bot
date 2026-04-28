@@ -342,6 +342,9 @@ mod tests {
             asset: Asset::Btc,
             source: "unit-reference".to_string(),
             price: 65_000.0,
+            confidence: None,
+            provider: None,
+            matches_market_resolution_source: None,
             source_ts: Some(1_777_000_000_002),
             recv_wall_ts: 1_777_000_000_003,
         };

@@ -1,0 +1,352 @@
+{
+	"schema_version": "m7_replay_report_v1",
+	"metadata": {
+		"run_id": "m9-deterministic-paper-lifecycle-20260428a",
+		"replay_run_id": "m9-deterministic-paper-lifecycle-20260428a:offline-replay",
+		"input_source": "event_envelopes",
+		"input_fingerprint": "sha256:815693bf7b8e7bda8a52f15d8960dd2b2efb9971c97e52b792964ec62b5c1ee1",
+		"config_fingerprint": "sha256:517e3f9d461a5ccc97c3a12ab767650f37140d4b43fc7eca39887ee2c71291fb",
+		"code_version": "0.1.0",
+		"evidence_type": "deterministic_fixture",
+		"live_market_evidence": false,
+		"started_wall_ts": 1777000300001,
+		"completed_wall_ts": 1777000700001,
+		"first_event_recv_wall_ts": 1777000300001,
+		"last_event_recv_wall_ts": 1777000700001,
+		"first_event_source_ts": 1777000299000,
+		"last_event_source_ts": 1777000300200,
+		"source_timestamp_regressions": 0,
+		"reference_feed_mode": "none",
+		"reference_provider": null,
+		"matches_market_resolution_source": null,
+		"live_readiness_evidence": false,
+		"settlement_reference_evidence": false
+	},
+	"events": {
+		"total_count": 8,
+		"counts_by_type": {
+			"book_snapshot": 2,
+			"last_trade": 1,
+			"market_discovered": 1,
+			"paper_fill": 1,
+			"paper_order_placed": 1,
+			"predictive_tick": 1,
+			"reference_tick": 1
+		}
+	},
+	"signals": {
+		"evaluated_count": 5,
+		"emitted_order_intent_count": 1,
+		"skipped_count": 4,
+		"counts_by_asset": {
+			"BTC": 5
+		},
+		"counts_by_order_kind": {
+			"maker": 4,
+			"taker": 1
+		},
+		"skip_reason_counts": {
+			"missing_predictive_price": 1,
+			"missing_reference_price": 3
+		},
+		"decision_reason_counts": {
+			"candidate:taker:phase=main:net_ev_bps=670.00:required_edge_bps=50.00": 1,
+			"skip:missing_predictive_price": 1,
+			"skip:missing_reference_price": 3
+		},
+		"decisions": [
+			{
+				"decision": {
+					"asset": "BTC",
+					"market_id": "deterministic-btc-taker-market",
+					"token_id": "deterministic-btc-up-token",
+					"outcome": "Up",
+					"side": "buy",
+					"order_kind": "maker",
+					"price": 0.0,
+					"size": 0.0,
+					"notional": 0.0,
+					"fair_probability": 0.0,
+					"market_probability": 0.0,
+					"expected_value_bps": 0.0,
+					"reason": "skip:missing_reference_price",
+					"required_inputs": [
+						"active_market",
+						"resolution_reference_price",
+						"predictive_price",
+						"fresh_book",
+						"best_bid_ask_depth",
+						"fee_parameters"
+					],
+					"created_ts": 1777000300001
+				},
+				"emitted_order_intent": false,
+				"skip_reasons": [
+					"missing_reference_price"
+				]
+			},
+			{
+				"decision": {
+					"asset": "BTC",
+					"market_id": "deterministic-btc-taker-market",
+					"token_id": "deterministic-btc-up-token",
+					"outcome": "Up",
+					"side": "buy",
+					"order_kind": "maker",
+					"price": 0.0,
+					"size": 0.0,
+					"notional": 0.0,
+					"fair_probability": 0.0,
+					"market_probability": 0.0,
+					"expected_value_bps": 0.0,
+					"reason": "skip:missing_reference_price",
+					"required_inputs": [
+						"active_market",
+						"resolution_reference_price",
+						"predictive_price",
+						"fresh_book",
+						"best_bid_ask_depth",
+						"fee_parameters"
+					],
+					"created_ts": 1777000300002
+				},
+				"emitted_order_intent": false,
+				"skip_reasons": [
+					"missing_reference_price"
+				]
+			},
+			{
+				"decision": {
+					"asset": "BTC",
+					"market_id": "deterministic-btc-taker-market",
+					"token_id": "deterministic-btc-up-token",
+					"outcome": "Up",
+					"side": "buy",
+					"order_kind": "maker",
+					"price": 0.0,
+					"size": 0.0,
+					"notional": 0.0,
+					"fair_probability": 0.0,
+					"market_probability": 0.0,
+					"expected_value_bps": 0.0,
+					"reason": "skip:missing_reference_price",
+					"required_inputs": [
+						"active_market",
+						"resolution_reference_price",
+						"predictive_price",
+						"fresh_book",
+						"best_bid_ask_depth",
+						"fee_parameters"
+					],
+					"created_ts": 1777000300003
+				},
+				"emitted_order_intent": false,
+				"skip_reasons": [
+					"missing_reference_price"
+				]
+			},
+			{
+				"decision": {
+					"asset": "BTC",
+					"market_id": "deterministic-btc-taker-market",
+					"token_id": "deterministic-btc-up-token",
+					"outcome": "Up",
+					"side": "buy",
+					"order_kind": "maker",
+					"price": 0.0,
+					"size": 0.0,
+					"notional": 0.0,
+					"fair_probability": 0.0,
+					"market_probability": 0.0,
+					"expected_value_bps": 0.0,
+					"reason": "skip:missing_predictive_price",
+					"required_inputs": [
+						"active_market",
+						"resolution_reference_price",
+						"predictive_price",
+						"fresh_book",
+						"best_bid_ask_depth",
+						"fee_parameters"
+					],
+					"created_ts": 1777000300004
+				},
+				"emitted_order_intent": false,
+				"skip_reasons": [
+					"missing_predictive_price"
+				]
+			},
+			{
+				"decision": {
+					"asset": "BTC",
+					"market_id": "deterministic-btc-taker-market",
+					"token_id": "deterministic-btc-up-token",
+					"outcome": "Up",
+					"side": "buy",
+					"order_kind": "taker",
+					"price": 0.51,
+					"size": 10.0,
+					"notional": 5.1,
+					"fair_probability": 0.6,
+					"market_probability": 0.505,
+					"expected_value_bps": 669.9999999999998,
+					"reason": "candidate:taker:phase=main:net_ev_bps=670.00:required_edge_bps=50.00",
+					"required_inputs": [
+						"active_market",
+						"resolution_reference_price",
+						"predictive_price",
+						"fresh_book",
+						"best_bid_ask_depth",
+						"fee_parameters"
+					],
+					"created_ts": 1777000300005
+				},
+				"emitted_order_intent": true,
+				"skip_reasons": []
+			}
+		]
+	},
+	"risk": {
+		"approval_count": 1,
+		"rejection_count": 0,
+		"halt_reason_counts": {},
+		"decisions": [
+			{
+				"market_id": "deterministic-btc-taker-market",
+				"asset": "BTC",
+				"approved": true,
+				"halt_reasons": [],
+				"messages": [],
+				"updated_ts": 1777000300005
+			}
+		]
+	},
+	"paper": {
+		"order_count": 1,
+		"fill_count": 1,
+		"cancel_count": 0,
+		"reject_count": 0,
+		"expiration_count": 0,
+		"risk_rejection_count": 0,
+		"order_status_counts": {
+			"filled": 1
+		},
+		"audit_event_counts": {
+			"fill_simulated": 1,
+			"order_created": 1,
+			"order_opened": 1
+		},
+		"total_filled_size": 10.0,
+		"total_filled_notional": 5.1,
+		"total_fees_paid": 0.2,
+		"orders": [
+			{
+				"order_id": "paper-order-1",
+				"market_id": "deterministic-btc-taker-market",
+				"token_id": "deterministic-btc-up-token",
+				"asset": "BTC",
+				"side": "buy",
+				"order_kind": "taker",
+				"fee_parameters": {
+					"fees_enabled": true,
+					"maker_fee_bps": 0.0,
+					"taker_fee_bps": 200.0,
+					"raw_fee_config": null
+				},
+				"price": 0.51,
+				"size": 10.0,
+				"filled_size": 10.0,
+				"status": "filled",
+				"reason": "candidate:taker:phase=main:net_ev_bps=670.00:required_edge_bps=50.00",
+				"created_ts": 1777000300005,
+				"updated_ts": 1777000300005
+			}
+		],
+		"fills": [
+			{
+				"fill_id": "paper-fill-1",
+				"order_id": "paper-order-1",
+				"market_id": "deterministic-btc-taker-market",
+				"token_id": "deterministic-btc-up-token",
+				"asset": "BTC",
+				"side": "buy",
+				"price": 0.51,
+				"size": 10.0,
+				"fee_paid": 0.2,
+				"liquidity": "taker",
+				"filled_ts": 1777000300005
+			}
+		],
+		"cancellations": [],
+		"rejections": [],
+		"expirations": [],
+		"risk_rejections": []
+	},
+	"pnl": {
+		"totals": {
+			"gross_realized_pnl": 0.0,
+			"realized_pnl": -0.2,
+			"unrealized_pnl": -0.050000000000000044,
+			"fees_paid": 0.2,
+			"total_pnl": -0.25000000000000006
+		},
+		"by_asset": {
+			"BTC": {
+				"gross_realized_pnl": 0.0,
+				"realized_pnl": -0.2,
+				"unrealized_pnl": -0.050000000000000044,
+				"fees_paid": 0.2,
+				"total_pnl": -0.25000000000000006
+			}
+		},
+		"by_market": {
+			"deterministic-btc-taker-market": {
+				"gross_realized_pnl": 0.0,
+				"realized_pnl": -0.2,
+				"unrealized_pnl": -0.050000000000000044,
+				"fees_paid": 0.2,
+				"total_pnl": -0.25000000000000006
+			}
+		}
+	},
+	"diagnostics": {
+		"latency": {
+			"event_count_with_source_ts": 5,
+			"min_latency_ms": -194,
+			"max_latency_ms": 1003,
+			"average_latency_ms": 362.6,
+			"negative_latency_count": 1,
+			"by_source": {
+				"deterministic_fixture": {
+					"event_count": 5,
+					"min_latency_ms": -194,
+					"max_latency_ms": 1003,
+					"average_latency_ms": 362.6,
+					"negative_latency_count": 1
+				}
+			}
+		},
+		"feed_staleness": {
+			"threshold_ms": 2000,
+			"window_count": 1,
+			"windows": [
+				{
+					"source": "deterministic_fixture",
+					"start_recv_wall_ts": 1777000300006,
+					"end_recv_wall_ts": 1777000700000,
+					"duration_ms": 399994
+				}
+			]
+		},
+		"opportunities": {
+			"evaluated_signal_count": 5,
+			"emitted_order_intent_count": 1,
+			"skipped_signal_count": 4,
+			"risk_approval_count": 1,
+			"risk_rejection_count": 0,
+			"unfilled_order_count": 0,
+			"partial_fill_order_count": 0,
+			"filled_order_count": 1,
+			"missed_opportunity_count": 4
+		}
+	}
+}

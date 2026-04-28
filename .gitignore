@@ -10,5 +10,8 @@ config/local.toml
 # Rust build artifacts
 target/
 
+# Runtime output and captured sessions
+reports/
+
 # Local editor workspace files
 *.code-workspace

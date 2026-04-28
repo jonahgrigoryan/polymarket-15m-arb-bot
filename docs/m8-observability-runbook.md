@@ -5,7 +5,7 @@ This runbook is for the current replay-first, paper-first MVP. It does not cover
 ## Scope And Assumptions
 
 - Runtime modes remain `validate`, `paper`, and `replay`.
-- `paper` and `replay` CLI paths may still report `stubbed_until_later_milestones`; do not treat a stub response as a production paper session.
+- `paper` and `replay` are now file-backed runtime paths after M9 work; treat a paper run as valid evidence only when it writes a session under `reports/sessions/<run_id>` and `replay --run-id <run_id>` passes deterministically.
 - The source of record is persisted raw/normalized events plus config snapshots, not metrics.
 - M6 final start/end settlement artifact verification remains partial unless a separate verification file proves it.
 - Geoblock, feed, storage, stale-state, and risk failures must fail closed: no new paper decisions, no live orders, and clear logs/metrics.
@@ -20,16 +20,16 @@ cargo test --offline
 cargo clippy --offline -- -D warnings
 cargo run --offline -- validate --local-only --config config/default.toml
 cargo run --offline -- validate --local-only --metrics-smoke --config config/default.toml
-cargo run --offline -- --config config/default.toml paper
-cargo run --offline -- --config config/default.toml replay --run-id test-run
+cargo run -- --config config/default.toml paper --run-id m9-runtime-smoke-YYYYMMDD --feed-message-limit 1 --cycles 1
+cargo run --offline -- --config config/default.toml replay --run-id m9-runtime-smoke-YYYYMMDD
 rg -n "live order|private key|api key|wallet|signing|submit order|create order|order client|clob.*order|secret" src Cargo.toml config
 ```
 
 Expected local-mode markers:
 
 - `validate`: `validation_status=ok`, `mode=validate`, `online_validation_status=skipped`, `live_order_placement_enabled=false`.
-- `paper`: either a fail-closed geoblock error or `paper_mode_status=stubbed_until_later_milestones` with `live_order_placement_enabled=false`.
-- `replay`: `replay_status=stubbed_until_later_milestones` until runtime replay is wired to stored runs.
+- `paper`: either a fail-closed geoblock error or `paper_mode_status=runtime_enabled`, `paper_runtime_status=ok`, a `paper_report_path`, and `live_order_placement_enabled=false`.
+- `replay`: `replay_status=deterministic`, matching generated/recorded paper-event counts, a `replay_report_path`, and `live_order_placement_enabled=false`.
 - Safety scan: source hits must not reveal live order placement, signing, wallet, key handling, or a real order client path.
 
 Optional read-only network smoke, no external writes:
@@ -88,7 +88,7 @@ cargo run --offline -- validate --local-only --config config/default.toml 2>&1 |
 
 `validate` is short-lived. If interrupted, it should stop discovery/feed smoke work and exit without starting strategy or paper execution.
 
-`paper` must shut down in this order once a long-running paper runtime is wired:
+`paper` must shut down in this order for bounded sessions and for operator-managed long-running sessions:
 
 1. Stop accepting new market data for decisions and stop creating new paper intents.
 2. Cancel or expire open paper maker orders according to paper-executor rules.
@@ -108,7 +108,7 @@ cargo run --offline -- validate --local-only --config config/default.toml 2>&1 |
 
 ## Replay And Report Verification
 
-Current M7 verification is primarily library/offline. Until runtime replay is wired, use tests and report fingerprints as the local check:
+Current replay verification includes runtime file-backed sessions plus library/offline tests:
 
 ```sh
 cargo test --offline replay::
@@ -128,7 +128,7 @@ When runtime replay is connected to storage, a run is acceptable only if:
 Use the template in `runbooks/polymarket-15m-arb-bot.service.template` as an operator starting point. Keep it paper-only and local-metrics-only:
 
 - Start with `validate --local-only` during install checks.
-- Use `paper` only after geoblock and storage checks pass on the deployment host.
+- Use bounded `paper --cycles 1` for smoke sessions; use `paper --cycles 0` only after geoblock and storage checks pass on the deployment host.
 - Use `KillSignal=SIGTERM` and allow enough `TimeoutStopSec` for final event flushes.
 - Keep `Restart=on-failure`; repeated fail-closed exits should page an operator, not silently continue.
 - Do not add environment variables for secrets or live trading credentials in this MVP.
