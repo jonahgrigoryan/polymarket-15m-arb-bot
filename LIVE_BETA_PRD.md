@@ -552,6 +552,15 @@ Each phase needs its own verification note before the next phase starts.
 
 ## Approval Record
 
+- LB0 scope-lock approval: 2026-04-29 — APPROVED (planning artifacts only).
+- Legal/access owner: Operator.
+- Legal/access status: not yet formally approved; required before LB4+.
+- Strategy boundary for this lock: no strategy-selected live orders until separate robustness gate; first live test remains a human-approved one-order lifecycle canary.
+- Funding cap: tiny cap policy retained (`<= 25 pUSD`), first-order cap retained (`<= 1 pUSD`) pending operational review.
+- Explicit non-authorization statement: LB0 does not authorize live order placement, signing, wallet/API-key handling, authenticated CLOB implementation, or autonomous trading.
+- Next phase: LB1 live-mode kill gates only.
+- Reviewer/approver identity: operator (manual confirmation).
+
 This section is intentionally blank until reviewed.
 
 Required approvals:

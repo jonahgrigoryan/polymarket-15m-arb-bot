@@ -665,6 +665,10 @@ None by default. Any expansion after LB7 requires a new approval record.
 This section is intentionally blank until review.
 
 - LB0 approval:
+  - 2026-04-29: Approved by operator for LB0 scope lock only.  The approved scope is an order-lifecycle probe on BTC/ETH/SOL with a dedicated beta wallet, tiny funding cap, first-order cap, post-only GTD maker-only canary, one open-order max, human approval required, and no autonomous trading.
+  - Legal/access owner recorded as operator; legal/access compliance status remains pending and not required for LB0 completion, but required before LB4.
+  - Explicitly confirmed: LB0 does NOT authorize live order placement, does not remove `LIVE_ORDER_PLACEMENT_ENABLED=false`, and does not introduce signing/wallet/API-key/authenticated CLOB behavior.
+- LB0 verification note: `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md`
 - LB1 approval:
 - LB2 approval:
 - LB3 approval:

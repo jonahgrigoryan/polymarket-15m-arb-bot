@@ -24,9 +24,9 @@ Authoritative sources remain:
 ## Milestones
 
 - Last completed milestone: M9 - Multi-Session Validation And Live-Readiness Review.
-- Active milestone: Live-beta PRD/release-gate planning after merged M9.
+- Active milestone: LB0 scope lock completed. Next actionable milestone is LB1 (live-mode kill gates only), with no source path to place or cancel live orders yet.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next milestone: review and approve `LIVE_BETA_PRD.md` and `LIVE_BETA_IMPLEMENTATION_PLAN.md` as separate live-beta release-gate documents before any implementation of live order placement, signing, wallet/key handling, API-key handling, authenticated CLOB clients, or trading-capable runtime paths. The plan keeps first live beta as an order-lifecycle probe unless additional RTDS paper windows pass an explicit strategy robustness gate.
+- Next milestone: LB1 - add kill-gate checks for live-mode intent, keep `LIVE_ORDER_PLACEMENT_ENABLED=false`, and require geoblock pass before any future trading-capable mode can reach execution gates. `LIVE_BETA_PRD.md` and `LIVE_BETA_IMPLEMENTATION_PLAN.md` are approved for scope lock and phase sequencing.
 
 ## M3 Scope Lock
 
@@ -278,7 +278,8 @@ M9 verification status: PARTIAL.
 
 ## Next Concrete Action
 
-Review and approve `LIVE_BETA_PRD.md` and `LIVE_BETA_IMPLEMENTATION_PLAN.md` as separate live-beta release-gate documents. Do not start live-trading implementation until both documents are explicitly approved and the documented legal/access, deployment geoblock, pUSD collateral/account preflight, SDK/signing, heartbeat, order/cancel/readback, trade reconciliation, venue-state, live-risk, rollback, and mandatory hold-point gates are satisfied. Continue additional bounded RTDS paper sessions only as strategy robustness evidence, not as proof of live profitability.
+- LB0 is approved and complete via `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md`.
+- Start LB1 (live-mode kill gates only) and keep all source code locked to non-live behavior. Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
 
