@@ -865,6 +865,7 @@ fn signal_skip_reason_key(reason: SignalSkipReason) -> &'static str {
     match reason {
         SignalSkipReason::MarketIneligible => "market_ineligible",
         SignalSkipReason::MarketNotActive => "market_not_active",
+        SignalSkipReason::MarketNotStarted => "market_not_started",
         SignalSkipReason::InvalidMarketTime => "invalid_market_time",
         SignalSkipReason::MissingResolutionSource => "missing_resolution_source",
         SignalSkipReason::AmbiguousResolutionSource => "ambiguous_resolution_source",

@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
+use time::{Duration as TimeDuration, OffsetDateTime};
 
 use crate::domain::{
     is_asset_matched_chainlink_resolution_source, Asset, FeeParameters, Market,
@@ -18,6 +18,7 @@ pub const MODULE: &str = "market_discovery";
 
 const FIFTEEN_MINUTES_MS: i64 = 15 * 60 * 1_000;
 const DURATION_TOLERANCE_MS: i64 = 60 * 1_000;
+const DISCOVERY_END_WINDOW_HOURS: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct MarketDiscoveryClient {
@@ -54,9 +55,12 @@ impl MarketDiscoveryClient {
         let mut markets = Vec::new();
         let mut after_cursor = None;
         let mut pages_fetched = 0;
+        let window = DiscoveryWindow::current()?;
 
         while pages_fetched < self.max_pages {
-            let page = self.fetch_gamma_page(after_cursor.as_deref()).await?;
+            let page = self
+                .fetch_gamma_page(after_cursor.as_deref(), &window)
+                .await?;
             pages_fetched += 1;
 
             for gamma_market in page.markets {
@@ -96,12 +100,19 @@ impl MarketDiscoveryClient {
         })
     }
 
-    async fn fetch_gamma_page(&self, after_cursor: Option<&str>) -> DiscoveryResult<GammaPage> {
+    async fn fetch_gamma_page(
+        &self,
+        after_cursor: Option<&str>,
+        window: &DiscoveryWindow,
+    ) -> DiscoveryResult<GammaPage> {
         let mut request = self.http.get(&self.gamma_markets_url).query(&[
             ("limit", self.page_limit.to_string()),
+            ("active", "true".to_string()),
             ("closed", "false".to_string()),
-            ("order", "startDate".to_string()),
-            ("ascending", "false".to_string()),
+            ("order", "endDate".to_string()),
+            ("ascending", "true".to_string()),
+            ("end_date_min", window.end_date_min.clone()),
+            ("end_date_max", window.end_date_max.clone()),
         ]);
 
         if let Some(after_cursor) = after_cursor {
@@ -137,6 +148,35 @@ impl MarketDiscoveryClient {
 
         decode_response(response, "clob_market_info").await
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveryWindow {
+    end_date_min: String,
+    end_date_max: String,
+}
+
+impl DiscoveryWindow {
+    fn current() -> DiscoveryResult<Self> {
+        let now = OffsetDateTime::now_utc();
+        Self::from_bounds(now, now + TimeDuration::hours(DISCOVERY_END_WINDOW_HOURS))
+    }
+
+    fn from_bounds(start: OffsetDateTime, end: OffsetDateTime) -> DiscoveryResult<Self> {
+        Ok(Self {
+            end_date_min: format_rfc3339(start)?,
+            end_date_max: format_rfc3339(end)?,
+        })
+    }
+}
+
+fn format_rfc3339(timestamp: OffsetDateTime) -> DiscoveryResult<String> {
+    timestamp
+        .format(&Rfc3339)
+        .map_err(|source| DiscoveryError::ResponseDecode {
+            operation: "discovery_window",
+            message: source.to_string(),
+        })
 }
 
 async fn decode_response<T: for<'de> Deserialize<'de>>(
@@ -707,6 +747,17 @@ impl Error for DiscoveryError {}
 mod tests {
     use super::*;
     use crate::storage::{InMemoryStorage, StorageBackend};
+
+    #[test]
+    fn discovery_window_formats_current_end_date_bounds() {
+        let start = OffsetDateTime::parse("2026-04-29T03:00:00Z", &Rfc3339).expect("start parses");
+        let end = OffsetDateTime::parse("2026-04-29T05:00:00Z", &Rfc3339).expect("end parses");
+
+        let window = DiscoveryWindow::from_bounds(start, end).expect("window formats");
+
+        assert_eq!(window.end_date_min, "2026-04-29T03:00:00Z");
+        assert_eq!(window.end_date_max, "2026-04-29T05:00:00Z");
+    }
 
     #[test]
     fn maps_gamma_market_with_json_string_tokens() {

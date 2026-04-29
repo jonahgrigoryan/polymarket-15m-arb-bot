@@ -3,7 +3,7 @@ use crate::domain::{
     is_asset_matched_chainlink_resolution_source, Asset, MarketLifecycleState, PaperOrderIntent,
     RiskHaltReason, RiskState, Side,
 };
-use crate::state::{DecisionSnapshot, PositionSnapshot};
+use crate::state::{BookFreshness, DecisionSnapshot, PositionSnapshot};
 
 pub const MODULE: &str = "risk_engine";
 
@@ -204,12 +204,7 @@ impl RiskEngine {
     }
 
     fn book_is_stale(&self, intent: &PaperOrderIntent, snapshot: &DecisionSnapshot) -> bool {
-        snapshot
-            .book_freshness
-            .iter()
-            .find(|freshness| {
-                freshness.market_id == intent.market_id && freshness.token_id == intent.token_id
-            })
+        book_freshness_for_intent(intent, snapshot)
             .map(|freshness| {
                 freshness.is_stale
                     || freshness
@@ -487,12 +482,7 @@ fn stale_reference_message(snapshot: &DecisionSnapshot) -> String {
 }
 
 fn stale_book_message(intent: &PaperOrderIntent, snapshot: &DecisionSnapshot) -> String {
-    snapshot
-        .book_freshness
-        .iter()
-        .find(|freshness| {
-            freshness.market_id == intent.market_id && freshness.token_id == intent.token_id
-        })
+    book_freshness_for_intent(intent, snapshot)
         .map(|freshness| {
             format!(
                 "stale book for market {} token {} age_ms={:?}",
@@ -505,6 +495,24 @@ fn stale_book_message(intent: &PaperOrderIntent, snapshot: &DecisionSnapshot) ->
                 intent.market_id, intent.token_id
             )
         })
+}
+
+fn book_freshness_for_intent<'a>(
+    intent: &PaperOrderIntent,
+    snapshot: &'a DecisionSnapshot,
+) -> Option<&'a BookFreshness> {
+    snapshot.book_freshness.iter().find(|freshness| {
+        freshness.token_id == intent.token_id
+            && book_freshness_matches_market(snapshot, freshness, &intent.market_id)
+    })
+}
+
+fn book_freshness_matches_market(
+    snapshot: &DecisionSnapshot,
+    freshness: &BookFreshness,
+    intent_market_id: &str,
+) -> bool {
+    freshness.market_id == intent_market_id || freshness.market_id == snapshot.market.condition_id
 }
 
 fn push_violation(violations: &mut Vec<RiskViolation>, reason: RiskHaltReason, message: String) {
@@ -585,6 +593,31 @@ mod tests {
     #[test]
     fn stale_book_halts() {
         let mut snapshot = sample_snapshot();
+        snapshot.book_freshness[0].age_ms = Some(1_001);
+        snapshot.book_freshness[0].is_stale = true;
+
+        assert_halt(
+            evaluate(limits(), snapshot, RiskContext::default()),
+            RiskHaltReason::StaleBook,
+        );
+    }
+
+    #[test]
+    fn condition_id_book_freshness_can_satisfy_gamma_market_intent() {
+        let mut snapshot = sample_snapshot();
+        snapshot.book_freshness[0].market_id = snapshot.market.condition_id.clone();
+        snapshot.token_books[0].market_id = snapshot.market.condition_id.clone();
+
+        let decision = evaluate(limits(), snapshot, RiskContext::default());
+
+        assert!(decision.approved);
+        assert!(decision.violations.is_empty());
+    }
+
+    #[test]
+    fn stale_condition_id_book_still_halts_gamma_market_intent() {
+        let mut snapshot = sample_snapshot();
+        snapshot.book_freshness[0].market_id = snapshot.market.condition_id.clone();
         snapshot.book_freshness[0].age_ms = Some(1_001);
         snapshot.book_freshness[0].is_stale = true;
 

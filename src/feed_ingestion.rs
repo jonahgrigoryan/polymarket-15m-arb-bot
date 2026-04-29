@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
@@ -159,8 +159,17 @@ impl ReadOnlyWebSocketClient {
         let mut received_text_messages = Vec::new();
         let mut close_received = false;
         let mut idle_heartbeats = 0_u8;
+        let capture_deadline = Instant::now() + websocket_capture_deadline(config);
         while received_text_messages.len() < config.message_limit {
-            match read_frame(&mut stream, config.read_timeout_ms).await {
+            let remaining = capture_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let frame_timeout_ms = duration_ms_at_least_one(std::cmp::min(
+                Duration::from_millis(config.read_timeout_ms),
+                remaining,
+            ));
+            match read_frame(&mut stream, frame_timeout_ms).await {
                 Ok(WebSocketFrame::Text(payload)) => {
                     idle_heartbeats = 0;
                     if !is_text_heartbeat(&payload) {
@@ -184,6 +193,15 @@ impl ReadOnlyWebSocketClient {
                 Err(FeedError::Timeout {
                     operation: "websocket_frame_header",
                     ..
+                }) if capture_deadline
+                    .saturating_duration_since(Instant::now())
+                    .is_zero() =>
+                {
+                    break;
+                }
+                Err(FeedError::Timeout {
+                    operation: "websocket_frame_header",
+                    ..
                 }) if idle_heartbeats < 3 => {
                     idle_heartbeats += 1;
                     send_text_frame(&mut stream, b"PING").await?;
@@ -199,6 +217,16 @@ impl ReadOnlyWebSocketClient {
             close_received,
         })
     }
+}
+
+fn websocket_capture_deadline(config: &FeedConnectionConfig) -> Duration {
+    Duration::from_millis(config.read_timeout_ms.saturating_mul(4).max(1))
+}
+
+fn duration_ms_at_least_one(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 trait AsyncReadWrite: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -1010,5 +1038,22 @@ mod tests {
         assert!(is_text_heartbeat(" ping "));
         assert!(is_text_heartbeat(" "));
         assert!(!is_text_heartbeat(r#"{"event_type":"book"}"#));
+    }
+
+    #[test]
+    fn websocket_capture_deadline_is_wall_clock_bounded() {
+        let config = FeedConnectionConfig {
+            source: SOURCE_POLYMARKET_CLOB.to_string(),
+            ws_url: "wss://example.test/ws".to_string(),
+            subscribe_payload: None,
+            message_limit: 20,
+            connect_timeout_ms: 8_000,
+            read_timeout_ms: 5_000,
+        };
+
+        assert_eq!(
+            websocket_capture_deadline(&config),
+            Duration::from_millis(20_000)
+        );
     }
 }

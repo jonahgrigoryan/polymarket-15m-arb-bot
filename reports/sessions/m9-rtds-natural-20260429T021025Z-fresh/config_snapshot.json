@@ -1,0 +1,83 @@
+{
+  "run_id": "m9-rtds-natural-20260429T021025Z-fresh",
+  "captured_wall_ts": 1777428631199,
+  "config": {
+    "assets": {
+      "symbols": [
+        "BTC",
+        "ETH",
+        "SOL"
+      ]
+    },
+    "feeds": {
+      "binance_ws_url": "wss://stream.binance.com:9443/ws",
+      "coinbase_ws_url": "wss://ws-feed.exchange.coinbase.com",
+      "connect_timeout_ms": 8000,
+      "feed_smoke_message_limit": 20,
+      "read_timeout_ms": 5000,
+      "reconnect_initial_backoff_ms": 250,
+      "reconnect_max_attempts": 5,
+      "reconnect_max_backoff_ms": 5000,
+      "resolution_source_url": "https://data.chain.link/streams",
+      "stale_after_ms": 2000
+    },
+    "metrics": {
+      "bind_addr": "127.0.0.1:9100"
+    },
+    "paper": {
+      "max_orders_per_market": 20,
+      "starting_balance": 1000.0
+    },
+    "polymarket": {
+      "clob_market_info_request_limit_per_10s": 50,
+      "clob_rest_url": "https://clob.polymarket.com",
+      "gamma_markets_request_limit_per_10s": 100,
+      "gamma_markets_url": "https://gamma-api.polymarket.com/markets/keyset",
+      "geoblock_url": "https://polymarket.com/api/geoblock",
+      "market_discovery_max_pages": 5,
+      "market_discovery_page_limit": 100,
+      "market_discovery_poll_ms": 60000,
+      "market_ws_url": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+      "request_timeout_ms": 8000
+    },
+    "reference_feed": {
+      "max_staleness_ms": 5000,
+      "polymarket_rtds_url": "wss://ws-live-data.polymarket.com",
+      "provider": "polymarket_rtds_chainlink",
+      "pyth_btc_usd_price_id": "0xe62df6c8b4a85fe1a67db44dc12de5db330f7ac66b72dc658afedf0f4a415b43",
+      "pyth_enabled": false,
+      "pyth_eth_usd_price_id": "0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace",
+      "pyth_hermes_url": "https://hermes.pyth.network",
+      "pyth_sol_usd_price_id": "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
+    },
+    "replay": {
+      "deterministic": true,
+      "output_dir": "reports"
+    },
+    "risk": {
+      "daily_drawdown_limit": 100.0,
+      "max_correlated_notional": 350.0,
+      "max_loss_per_market": 25.0,
+      "max_notional_per_asset": 250.0,
+      "max_notional_per_market": 100.0,
+      "max_orders_per_minute": 120,
+      "max_total_notional": 500.0,
+      "stale_book_ms": 1000,
+      "stale_reference_ms": 1000
+    },
+    "runtime": {
+      "log_level": "info",
+      "mode": "validate"
+    },
+    "storage": {
+      "clickhouse_url": "http://localhost:8123",
+      "postgres_url": "postgres://polymarket:polymarket@localhost:5432/polymarket_15m"
+    },
+    "strategy": {
+      "adverse_selection_bps": 25,
+      "final_seconds_no_trade": 30,
+      "latency_buffer_ms": 250,
+      "min_edge_bps": 50
+    }
+  }
+}

@@ -221,8 +221,8 @@ pub fn compare_replay_results(
 pub fn compare_generated_to_recorded_paper_events(
     result: &ReplayRunResult,
 ) -> ReplayResult<ReplayDeterminismCheck> {
-    let left_fingerprint = stable_fingerprint(&result.generated_paper_events)?;
-    let right_fingerprint = stable_fingerprint(&result.recorded_paper_events)?;
+    let left_fingerprint = stable_paper_event_fingerprint(&result.generated_paper_events)?;
+    let right_fingerprint = stable_paper_event_fingerprint(&result.recorded_paper_events)?;
     let passed = left_fingerprint == right_fingerprint;
 
     Ok(ReplayDeterminismCheck {
@@ -387,22 +387,25 @@ impl<'a> ReplayExecution<'a> {
             return Ok(());
         };
 
+        let matching_market_ids = self.market_ids_for_market_or_condition_id(market_id);
         let order_ids = self
             .paper_executor
             .orders()
             .into_iter()
             .filter(|order| {
-                order.market_id == *market_id
+                matching_market_ids.contains(&order.market_id)
                     && order.token_id == *token_id
                     && matches!(
                         order.status,
                         PaperOrderStatus::Open | PaperOrderStatus::PartiallyFilled
                     )
             })
-            .map(|order| order.order_id.clone())
+            .map(|order| (order.order_id.clone(), order.market_id.clone()))
             .collect::<Vec<_>>();
 
-        for order_id in order_ids {
+        for (order_id, order_market_id) in order_ids {
+            let mut book = book.clone();
+            book.market_id = order_market_id;
             let result = self.paper_executor.simulate_fill(FillSimulationInput {
                 order_id,
                 book: book.clone(),
@@ -498,7 +501,7 @@ impl<'a> ReplayExecution<'a> {
                 intent,
                 &risk_decision,
                 &snapshot.market.fee_parameters,
-                book,
+                book.as_ref(),
                 now_wall_ts,
             )?;
             self.record_paper_result(result);
@@ -510,7 +513,7 @@ impl<'a> ReplayExecution<'a> {
             intent,
             &risk_decision,
             &snapshot.market.fee_parameters,
-            book,
+            book.as_ref(),
             now_wall_ts,
         )?;
         if result.order.is_some() {
@@ -599,17 +602,27 @@ impl<'a> ReplayExecution<'a> {
     }
 }
 
-fn matching_book_for_token<'a>(
-    snapshot: &'a DecisionSnapshot,
+fn matching_book_for_token(
+    snapshot: &DecisionSnapshot,
     token_id: &str,
-) -> Option<&'a TokenBookSnapshot> {
-    snapshot.token_books.iter().find(|book| {
-        snapshot
-            .market
-            .outcomes
-            .iter()
-            .any(|outcome| outcome.token_id == book.token_id && outcome.token_id == token_id)
-    })
+) -> Option<TokenBookSnapshot> {
+    snapshot
+        .token_books
+        .iter()
+        .find(|book| {
+            snapshot
+                .market
+                .outcomes
+                .iter()
+                .any(|outcome| outcome.token_id == book.token_id && outcome.token_id == token_id)
+        })
+        .cloned()
+        .map(|mut book| {
+            if book.market_id == snapshot.market.condition_id {
+                book.market_id.clone_from(&snapshot.market.market_id);
+            }
+            book
+        })
 }
 
 fn mark_price(book: &TokenBookSnapshot) -> Option<f64> {
@@ -741,6 +754,16 @@ fn stable_fingerprint(value: &impl Serialize) -> ReplayResult<String> {
     ))
 }
 
+fn stable_paper_event_fingerprint(events: &[NormalizedEvent]) -> ReplayResult<String> {
+    let canonical = canonical_paper_events(events)?;
+    stable_fingerprint(&canonical)
+}
+
+fn canonical_paper_events(events: &[NormalizedEvent]) -> ReplayResult<Vec<NormalizedEvent>> {
+    let bytes = serde_json::to_vec(events).map_err(ReplayError::Serialize)?;
+    serde_json::from_slice(&bytes).map_err(ReplayError::Serialize)
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -756,7 +779,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         FeeParameters, Market, OrderBookLevel, OrderBookSnapshot, OrderKind, OutcomeToken,
-        ReferencePrice, Side,
+        PaperOrder, PaperOrderStatus, ReferencePrice, Side,
     };
     use crate::events::EventType;
     use crate::reference_feed::{
@@ -971,6 +994,70 @@ mod tests {
             .any(|reason| reason == "stale_book"));
         assert_eq!(final_signal.skip_reasons, vec!["edge_below_minimum"]);
         assert_eq!(result.report.paper.order_count, 0);
+    }
+
+    #[test]
+    fn condition_id_book_can_open_gamma_market_maker_order() {
+        let asset = Asset::Eth;
+        let up_token_id = asset_up_token_id(asset);
+        let down_token_id = asset_down_token_id(asset);
+        let decision_ts = START_TS + 320_000;
+        let events = vec![
+            timed_envelope(
+                1,
+                START_TS + 300_000,
+                NormalizedEvent::MarketDiscovered {
+                    market: market_for_asset(asset),
+                },
+            ),
+            timed_envelope(
+                2,
+                decision_ts - 4,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &up_token_id, 0.47, 0.55),
+                },
+            ),
+            timed_envelope(
+                3,
+                decision_ts - 3,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &down_token_id, 0.45, 0.53),
+                },
+            ),
+            timed_envelope(
+                4,
+                decision_ts - 2,
+                NormalizedEvent::ReferenceTick {
+                    price: reference_for_asset(
+                        asset,
+                        asset.chainlink_resolution_source(),
+                        100.0,
+                        decision_ts - 2,
+                    ),
+                },
+            ),
+            timed_envelope(
+                5,
+                decision_ts - 1,
+                NormalizedEvent::PredictiveTick {
+                    price: reference_for_asset(asset, "binance", 102.0, decision_ts - 1),
+                },
+            ),
+        ];
+
+        let result = ReplayEngine::new(config())
+            .replay_events(RUN_ID, events)
+            .expect("condition-id book paper replay succeeds");
+
+        assert_eq!(result.report.signals.emitted_order_intent_count, 1);
+        assert_eq!(result.report.risk.approval_count, 1);
+        assert_eq!(result.report.risk.rejection_count, 0);
+        assert_eq!(result.report.paper.order_count, 1);
+        assert_eq!(result.report.paper.reject_count, 0);
+        assert_eq!(result.generated_orders.len(), 1);
+        assert_eq!(result.generated_orders[0].market_id, asset_market_id(asset));
+        assert_eq!(result.generated_orders[0].token_id, up_token_id);
+        assert_eq!(result.generated_paper_events.len(), 1);
     }
 
     #[test]
@@ -1226,6 +1313,41 @@ mod tests {
             .expect("paper event comparison succeeds");
 
         assert!(check.passed);
+    }
+
+    #[test]
+    fn paper_event_fingerprint_canonicalizes_json_float_roundtrip() {
+        let generated = vec![NormalizedEvent::PaperOrderPlaced {
+            order: PaperOrder {
+                order_id: "paper-order-1".to_string(),
+                market_id: MARKET_ID.to_string(),
+                token_id: UP_TOKEN_ID.to_string(),
+                asset: Asset::Btc,
+                side: Side::Buy,
+                order_kind: OrderKind::Taker,
+                fee_parameters: FeeParameters {
+                    fees_enabled: true,
+                    maker_fee_bps: 0.0,
+                    taker_fee_bps: 180.0,
+                    raw_fee_config: None,
+                },
+                price: 0.21000000000000002,
+                size: 10.0,
+                filled_size: 0.0,
+                status: PaperOrderStatus::Open,
+                reason: "unit".to_string(),
+                created_ts: START_TS,
+                updated_ts: START_TS,
+            },
+        }];
+        let recorded: Vec<NormalizedEvent> =
+            serde_json::from_slice(&serde_json::to_vec(&generated).expect("generated serializes"))
+                .expect("recorded event parses");
+
+        assert_eq!(
+            stable_paper_event_fingerprint(&generated).expect("generated fingerprints"),
+            stable_paper_event_fingerprint(&recorded).expect("recorded fingerprints")
+        );
     }
 
     #[test]

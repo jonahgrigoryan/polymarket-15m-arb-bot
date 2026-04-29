@@ -57,6 +57,8 @@ M2 and later require API verification:
 - M5 signal/risk requires verified fee fields, token/outcome mapping, and resolution-source fields.
 - Any future live-beta work requires verified V2 signing, auth, post/cancel behavior, and rate limits.
 
+2026-04-29 RTDS paper root-cause update: Gamma `active=true` / `acceptingOrders=true` can identify markets that are open for orders before the 15-minute slug interval starts. Current-window paper discovery now bounds Gamma keyset reads by near-term `endDate` and orders ascending by `endDate`; see `verification/2026-04-29-m9-rtds-current-window-rootcause.md`.
+
 ## Checklist
 
 ### 1. V2 Endpoint And Cutover Behavior
