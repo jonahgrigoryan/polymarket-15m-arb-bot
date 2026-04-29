@@ -18,7 +18,7 @@ Authoritative sources remain:
 ## Current Branch
 
 - Branch: `m9/rtds-natural-paper-validation`
-- Short commit: `89e6105`
+- Short commit: `HEAD` (latest local branch commit; run `git rev-parse --short HEAD` before follow-up work)
 - Worktree status: clean except ignored local/build/intermediate report artifacts.
 
 ## Milestones
