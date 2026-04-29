@@ -613,6 +613,14 @@ Polymarket RTDS Chainlink addendum, 2026-04-28:
 - RTDS-backed reference ingestion is settlement-source plumbing evidence, but final M9 live-readiness remains PARTIAL until Chainlink-source paper sessions produce/validate natural risk-reviewed paper behavior and final start/end settlement artifacts are verified.
 - See `verification/2026-04-28-m9-polymarket-rtds-chainlink-reference.md`.
 
+RTDS settlement reconciliation addendum, 2026-04-29:
+
+- Current-window run `m9-rtds-current-window-startuplog-20260429T035356Z` selected BTC/ETH/SOL markets for the 2026-04-29 03:45-04:00 UTC window and produced natural risk-approved paper fills under unchanged gates.
+- Read-only Gamma checks after market close showed all three selected markets closed with final outcome prices `["0","1"]`, so `Down` won for BTC, ETH, and SOL.
+- The run held only `Up` outcome tokens; post-settlement reconciliation therefore marks settlement value to `0.000000` and final paper P&L to `-3.694100`.
+- Settlement artifact: `reports/sessions/m9-rtds-current-window-startuplog-20260429T035356Z/settlement_reconciliation.json`.
+- Evidence note: `verification/2026-04-29-m9-rtds-settlement-reconciliation.md`.
+
 Natural RTDS paper validation addendum, 2026-04-28:
 
 - Longer bounded runs `m9-rtds-natural-20260428d` and `m9-rtds-natural-20260428e` used unchanged signal/risk gates with `config/polymarket-rtds-chainlink.example.toml`.

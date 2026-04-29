@@ -186,16 +186,25 @@ Follow-up implementation on 2026-04-28 added Polymarket RTDS Chainlink as the fi
 
 See `verification/2026-04-28-m9-polymarket-rtds-chainlink-reference.md`.
 
+### RTDS Settlement Reconciliation
+
+Follow-up verification on 2026-04-29 captured final settlement artifacts for the startup-log-confirmed current-window RTDS paper run.
+
+- Run `m9-rtds-current-window-startuplog-20260429T035356Z` selected BTC/ETH/SOL markets for 2026-04-29 03:45-04:00 UTC and produced 6 risk-approved taker paper fills under unchanged gates.
+- Read-only Gamma checks after market close showed all three selected markets closed with final outcome prices `["0","1"]`, so `Down` won for BTC, ETH, and SOL.
+- The paper run held only `Up` outcome tokens, so settlement value was `0.000000`.
+- Post-settlement total paper P&L was `-3.694100` after `3.468000` filled notional and `0.226100` fees.
+- The artifact is stored at `reports/sessions/m9-rtds-current-window-startuplog-20260429T035356Z/settlement_reconciliation.json`.
+
+See `verification/2026-04-29-m9-rtds-settlement-reconciliation.md`.
+
 Required blockers before any real-order phase:
 
 - Separate live-beta PRD and explicit user approval.
 - Legal/access review for deployment jurisdiction and operator.
 - Deployment-host geoblock verification; trading-capable modes must fail closed on blocked, malformed, or unreachable geoblock checks.
-- Additional Polymarket RTDS Chainlink-backed paper sessions where unchanged runtime freshness permits risk-reviewed paper intents, or direct Chainlink Data Streams fallback if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
+- Additional Polymarket RTDS Chainlink-backed paper sessions across more market windows to evaluate strategy robustness, or direct Chainlink Data Streams fallback if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - Explicitly approved credential-handling scope before any authenticated direct Data Streams ingestion is implemented.
-- Real BTC, ETH, and SOL paper sessions where reference ticks allow signal/risk decisions to create or reject paper intents.
-- Offline replay of those real sessions with generated-vs-recorded paper-event determinism.
-- Final start/end settlement artifact verification for paper P&L/reporting reconciliation.
 - API section 6 before live beta: signing/auth/order-create/order-post/order-cancel and current CLOB V2 fields.
 - Key management and wallet custody design.
 - Signing audit, including current V2 signing rules after cutover.
