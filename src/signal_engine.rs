@@ -114,6 +114,7 @@ pub struct FairProbabilityEstimate {
 pub enum SignalSkipReason {
     MarketIneligible,
     MarketNotActive,
+    MarketNotStarted,
     InvalidMarketTime,
     MissingResolutionSource,
     AmbiguousResolutionSource,
@@ -138,6 +139,7 @@ impl SignalSkipReason {
         match self {
             SignalSkipReason::MarketIneligible => "market_ineligible",
             SignalSkipReason::MarketNotActive => "market_not_active",
+            SignalSkipReason::MarketNotStarted => "market_not_started",
             SignalSkipReason::InvalidMarketTime => "invalid_market_time",
             SignalSkipReason::MissingResolutionSource => "missing_resolution_source",
             SignalSkipReason::AmbiguousResolutionSource => "ambiguous_resolution_source",
@@ -753,6 +755,10 @@ fn global_skip_reasons(
         reasons.push(SignalSkipReason::MarketNotActive);
     }
 
+    if snapshot.snapshot_wall_ts < snapshot.market.start_ts {
+        reasons.push(SignalSkipReason::MarketNotStarted);
+    }
+
     if snapshot.market.ineligibility_reason.is_some() {
         reasons.push(SignalSkipReason::MarketIneligible);
     }
@@ -798,6 +804,7 @@ fn is_hard_global_skip(reason: SignalSkipReason) -> bool {
         reason,
         SignalSkipReason::MarketNotActive
             | SignalSkipReason::MarketIneligible
+            | SignalSkipReason::MarketNotStarted
             | SignalSkipReason::InvalidMarketTime
             | SignalSkipReason::MissingResolutionSource
             | SignalSkipReason::AmbiguousResolutionSource
@@ -1425,6 +1432,19 @@ mod tests {
         assert!(evaluation
             .skip_reasons
             .contains(&SignalSkipReason::FinalSeconds));
+    }
+
+    #[test]
+    fn pre_start_market_is_a_hard_skip() {
+        let engine = SignalEngine::new(test_config());
+        let snapshot = decision_snapshot(START_TS - 5_000, vec![book(0.49, 0.51)], vec![]);
+
+        let evaluation = engine.evaluate(&snapshot);
+
+        assert!(evaluation.candidate.is_none());
+        assert!(evaluation
+            .skip_reasons
+            .contains(&SignalSkipReason::MarketNotStarted));
     }
 
     #[test]

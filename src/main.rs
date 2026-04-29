@@ -29,7 +29,8 @@ use polymarket_15m_arb_bot::{
     reference_feed::{
         parse_polymarket_rtds_chainlink_message,
         polymarket_rtds_chainlink_subscription_payload_for_asset, PythHermesClient,
-        PROVIDER_POLYMARKET_RTDS_CHAINLINK, SOURCE_POLYMARKET_RTDS_CHAINLINK, SOURCE_PYTH_PROXY,
+        ReferenceFeedError, PROVIDER_POLYMARKET_RTDS_CHAINLINK, SOURCE_POLYMARKET_RTDS_CHAINLINK,
+        SOURCE_PYTH_PROXY,
     },
     replay::{
         compare_generated_to_recorded_paper_events, compare_replay_results, ReplayEngine,
@@ -43,6 +44,8 @@ use polymarket_15m_arb_bot::{
         PostgresMarketStore, RawMessage, RiskEvent, StorageBackend, StorageError,
     },
 };
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::net::TcpListener;
 use tracing::field::{Field, Visit};
 use tracing::info;
@@ -279,7 +282,8 @@ async fn run_paper_runtime(
         config.polymarket.request_timeout_ms,
     )?;
     let discovery_run = discovery.discover_crypto_15m_markets().await?;
-    let markets = select_paper_markets(&discovery_run.markets)?;
+    let market_selection_ts = unix_time_ms();
+    let markets = select_paper_markets(&discovery_run.markets, market_selection_ts)?;
     let lifecycle_event_count = persist_discovered_markets(
         &storage,
         run_id,
@@ -313,6 +317,20 @@ async fn run_paper_runtime(
     );
     println!("market_discovery_pages={}", discovery_run.pages_fetched);
     println!("paper_selected_market_count={}", markets.len());
+    for market in &markets {
+        println!(
+            "paper_selected_market=asset={},market_id={},slug={},start_ts={},start_utc={},end_ts={},end_utc={},selection_now_ts={},selection_now_utc={}",
+            market.asset.symbol(),
+            market.market_id,
+            market.slug,
+            market.start_ts,
+            format_utc_ms(market.start_ts),
+            market.end_ts,
+            format_utc_ms(market.end_ts),
+            market_selection_ts,
+            format_utc_ms(market_selection_ts)
+        );
+    }
     println!("paper_market_lifecycle_event_count={lifecycle_event_count}");
     println!(
         "live_order_placement_enabled={}",
@@ -912,7 +930,7 @@ async fn capture_paper_cycle(
             unknown_count,
             observed_health.status
         );
-        if normalized_count == 0 {
+        if normalized_count == 0 && paper_probe_requires_normalized_events(&probe.source) {
             return Err(format!(
                 "paper feed source {} connected but produced no normalized events",
                 probe.source
@@ -933,6 +951,10 @@ async fn capture_paper_cycle(
     .await?;
 
     Ok(counts)
+}
+
+fn paper_probe_requires_normalized_events(source: &str) -> bool {
+    source != SOURCE_POLYMARKET_CLOB
 }
 
 async fn record_reference_ticks(
@@ -1061,11 +1083,20 @@ async fn record_polymarket_rtds_chainlink_reference_ticks(
             })?;
             counts.raw_messages += 1;
 
-            let events = parse_polymarket_rtds_chainlink_message(
+            let events = match parse_polymarket_rtds_chainlink_message(
                 &message,
                 recv_wall_ts,
                 config.reference_feed.max_staleness_ms,
-            )?;
+            ) {
+                Ok(events) => events,
+                Err(error) if should_skip_stale_polymarket_rtds_reference_error(&error) => {
+                    println!(
+                        "paper_reference_feed_source={SOURCE_POLYMARKET_RTDS_CHAINLINK},provider={PROVIDER_POLYMARKET_RTDS_CHAINLINK},skipped_stale_reference_update=true,error={error}"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let message_event_count = events.len();
             for (index, event) in events.into_iter().enumerate() {
                 if let Some(asset) = event.asset() {
@@ -1127,6 +1158,14 @@ async fn record_polymarket_rtds_chainlink_reference_ticks(
     Ok(())
 }
 
+fn should_skip_stale_polymarket_rtds_reference_error(error: &ReferenceFeedError) -> bool {
+    matches!(
+        error,
+        ReferenceFeedError::StalePrice { provider, .. }
+            if *provider == PROVIDER_POLYMARKET_RTDS_CHAINLINK
+    )
+}
+
 async fn record_book_snapshots_for_markets(
     storage: &FileSessionStorage,
     run_id: &str,
@@ -1161,18 +1200,40 @@ async fn record_book_snapshots_for_markets(
     Ok(())
 }
 
-fn select_paper_markets(markets: &[Market]) -> Result<Vec<Market>, Box<dyn std::error::Error>> {
+fn select_paper_markets(
+    markets: &[Market],
+    now_wall_ts: i64,
+) -> Result<Vec<Market>, Box<dyn std::error::Error>> {
     let mut selected = Vec::new();
     for asset in [Asset::Btc, Asset::Eth, Asset::Sol] {
-        let Some(market) = markets.iter().find(|market| {
-            market.asset == asset
-                && market.ineligibility_reason.is_none()
-                && market.outcomes.len() == 2
-                && market.lifecycle_state == MarketLifecycleState::Active
-        }) else {
+        let Some(market) = markets
+            .iter()
+            .filter(|market| {
+                market.asset == asset
+                    && market.ineligibility_reason.is_none()
+                    && market.outcomes.len() == 2
+                    && market.lifecycle_state == MarketLifecycleState::Active
+                    && market.start_ts <= now_wall_ts
+                    && now_wall_ts < market.end_ts
+            })
+            .min_by_key(|market| market.end_ts)
+        else {
+            let next_start_ts = markets
+                .iter()
+                .filter(|market| {
+                    market.asset == asset
+                        && market.ineligibility_reason.is_none()
+                        && market.outcomes.len() == 2
+                        && market.lifecycle_state == MarketLifecycleState::Active
+                        && market.start_ts > now_wall_ts
+                })
+                .map(|market| market.start_ts)
+                .min()
+                .map(|start_ts| start_ts.to_string())
+                .unwrap_or_else(|| "none".to_string());
             return Err(format!(
-                "paper runtime requires one eligible active {} 15m market",
-                asset.symbol()
+                "paper runtime requires one eligible in-window active {} 15m market at now_wall_ts={now_wall_ts}; next eligible start_ts={next_start_ts}",
+                asset.symbol(),
             )
             .into());
         };
@@ -1837,6 +1898,18 @@ fn unix_time_ms() -> i64 {
         .unwrap_or_default()
 }
 
+fn format_utc_ms(timestamp_ms: i64) -> String {
+    let Some(timestamp_ns) = i128::from(timestamp_ms).checked_mul(1_000_000) else {
+        return format!("invalid:{timestamp_ms}");
+    };
+    let Ok(timestamp) = OffsetDateTime::from_unix_timestamp_nanos(timestamp_ns) else {
+        return format!("invalid:{timestamp_ms}");
+    };
+    timestamp
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| format!("invalid:{timestamp_ms}"))
+}
+
 fn monotonic_like_ns() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1872,4 +1945,111 @@ fn generate_run_id() -> String {
     let pid = std::process::id();
     let sequence = RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("{now_ns:x}-{pid:x}-{sequence:x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paper_capture_allows_quiet_clob_websocket_when_snapshots_are_recorded() {
+        assert!(!paper_probe_requires_normalized_events(
+            SOURCE_POLYMARKET_CLOB
+        ));
+        assert!(paper_probe_requires_normalized_events(SOURCE_BINANCE));
+        assert!(paper_probe_requires_normalized_events(SOURCE_COINBASE));
+    }
+
+    #[test]
+    fn stale_polymarket_rtds_updates_are_skipped_without_relaxing_other_errors() {
+        let stale = ReferenceFeedError::StalePrice {
+            provider: PROVIDER_POLYMARKET_RTDS_CHAINLINK,
+            asset: Asset::Btc,
+            age_ms: 6_000,
+            max_staleness_ms: 5_000,
+        };
+        let protocol = ReferenceFeedError::Protocol("bad frame".to_string());
+
+        assert!(should_skip_stale_polymarket_rtds_reference_error(&stale));
+        assert!(!should_skip_stale_polymarket_rtds_reference_error(
+            &protocol
+        ));
+    }
+
+    #[test]
+    fn paper_market_selection_requires_current_window() {
+        let now = 1_777_000_000_000;
+        let future_start = now + 86_400_000;
+        let markets = vec![
+            test_paper_market(Asset::Btc, future_start, future_start + 900_000),
+            test_paper_market(Asset::Eth, future_start, future_start + 900_000),
+            test_paper_market(Asset::Sol, future_start, future_start + 900_000),
+            test_paper_market(Asset::Btc, now - 60_000, now + 840_000),
+            test_paper_market(Asset::Eth, now - 60_000, now + 840_000),
+            test_paper_market(Asset::Sol, now - 60_000, now + 840_000),
+        ];
+
+        let selected = select_paper_markets(&markets, now).expect("current markets selected");
+
+        assert_eq!(selected.len(), 3);
+        assert!(selected.iter().all(|market| market.start_ts <= now));
+        assert!(selected.iter().all(|market| now < market.end_ts));
+    }
+
+    #[test]
+    fn paper_market_selection_rejects_pre_start_only_markets() {
+        let now = 1_777_000_000_000;
+        let future_start = now + 86_400_000;
+        let markets = vec![
+            test_paper_market(Asset::Btc, future_start, future_start + 900_000),
+            test_paper_market(Asset::Eth, future_start, future_start + 900_000),
+            test_paper_market(Asset::Sol, future_start, future_start + 900_000),
+        ];
+
+        let error = select_paper_markets(&markets, now)
+            .expect_err("pre-start markets must not be selected")
+            .to_string();
+
+        assert!(error.contains("in-window active BTC 15m market"));
+        assert!(error.contains(&format!("next eligible start_ts={future_start}")));
+    }
+
+    #[test]
+    fn utc_ms_formatter_outputs_rfc3339_utc() {
+        assert_eq!(format_utc_ms(1_777_431_600_000), "2026-04-29T03:00:00Z");
+    }
+
+    fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {
+        let symbol = asset.symbol().to_ascii_lowercase();
+        Market {
+            market_id: format!("{symbol}-{start_ts}"),
+            slug: format!("{symbol}-updown-15m-{}", start_ts / 1_000),
+            title: format!("{} Up or Down", asset.symbol()),
+            asset,
+            condition_id: format!("{symbol}-condition-{start_ts}"),
+            outcomes: vec![
+                OutcomeToken {
+                    token_id: format!("{symbol}-up-{start_ts}"),
+                    outcome: "Up".to_string(),
+                },
+                OutcomeToken {
+                    token_id: format!("{symbol}-down-{start_ts}"),
+                    outcome: "Down".to_string(),
+                },
+            ],
+            start_ts,
+            end_ts,
+            resolution_source: Some(asset.chainlink_resolution_source().to_string()),
+            tick_size: 0.01,
+            min_order_size: 5.0,
+            fee_parameters: FeeParameters {
+                fees_enabled: true,
+                maker_fee_bps: 0.0,
+                taker_fee_bps: 0.0,
+                raw_fee_config: None,
+            },
+            lifecycle_state: MarketLifecycleState::Active,
+            ineligibility_reason: None,
+        }
+    }
 }

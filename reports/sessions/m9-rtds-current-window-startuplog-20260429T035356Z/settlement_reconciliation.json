@@ -1,0 +1,75 @@
+{
+  "schema_version": "m9_settlement_reconciliation_v1",
+  "run_id": "m9-rtds-current-window-startuplog-20260429T035356Z",
+  "checked_at_utc": "2026-04-29T04:09:19Z",
+  "source": "gamma_market_read_only",
+  "market_window": {
+    "start_utc": "2026-04-29T03:45:00Z",
+    "end_utc": "2026-04-29T04:00:00Z",
+    "slug_epoch": 1777434300
+  },
+  "markets": [
+    {
+      "asset": "BTC",
+      "market_id": "2101765",
+      "slug": "btc-updown-15m-1777434300",
+      "condition_id": "0xc7f43f1fd64c9e4c30892b3a9281b9634613d034f02092a4ab339f0536e956d4",
+      "closed": true,
+      "accepting_orders": false,
+      "outcomes": ["Up", "Down"],
+      "outcome_prices": [0.0, 1.0],
+      "winning_outcome": "Down",
+      "held_outcome": "Up",
+      "held_size": 20.0,
+      "filled_notional": 1.2,
+      "fees_paid": 0.081216,
+      "settlement_value": 0.0,
+      "post_settlement_pnl": -1.281216,
+      "updated_at": "2026-04-29T04:08:37.934757Z"
+    },
+    {
+      "asset": "ETH",
+      "market_id": "2101771",
+      "slug": "eth-updown-15m-1777434300",
+      "condition_id": "0xfb74e865dd52a8f6ddf97909fd57a8c689299c1d47bc65c66cc85b29cd179731",
+      "closed": true,
+      "accepting_orders": false,
+      "outcomes": ["Up", "Down"],
+      "outcome_prices": [0.0, 1.0],
+      "winning_outcome": "Down",
+      "held_outcome": "Up",
+      "held_size": 19.2,
+      "filled_notional": 0.768,
+      "fees_paid": 0.05308416,
+      "settlement_value": 0.0,
+      "post_settlement_pnl": -0.82108416,
+      "updated_at": "2026-04-29T04:04:46.435678Z"
+    },
+    {
+      "asset": "SOL",
+      "market_id": "2101772",
+      "slug": "sol-updown-15m-1777434300",
+      "condition_id": "0xb64aec58955d98ab4237e0905c838434896f23a9c01a8efd957d2c7caec4887c",
+      "closed": true,
+      "accepting_orders": false,
+      "outcomes": ["Up", "Down"],
+      "outcome_prices": [0.0, 1.0],
+      "winning_outcome": "Down",
+      "held_outcome": "Up",
+      "held_size": 10.0,
+      "filled_notional": 1.5,
+      "fees_paid": 0.0918,
+      "settlement_value": 0.0,
+      "post_settlement_pnl": -1.5918,
+      "updated_at": "2026-04-29T04:08:37.974824Z"
+    }
+  ],
+  "totals": {
+    "filled_notional": 3.468,
+    "fees_paid": 0.22610016,
+    "settlement_value": 0.0,
+    "pre_settlement_total_pnl": -0.47210016,
+    "post_settlement_total_pnl": -3.69410016
+  },
+  "live_trading_enabled": false
+}

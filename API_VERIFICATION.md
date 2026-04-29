@@ -57,6 +57,8 @@ M2 and later require API verification:
 - M5 signal/risk requires verified fee fields, token/outcome mapping, and resolution-source fields.
 - Any future live-beta work requires verified V2 signing, auth, post/cancel behavior, and rate limits.
 
+2026-04-29 RTDS paper root-cause update: Gamma `active=true` / `acceptingOrders=true` can identify markets that are open for orders before the 15-minute slug interval starts. Current-window paper discovery now bounds Gamma keyset reads by near-term `endDate` and orders ascending by `endDate`; see `verification/2026-04-29-m9-rtds-current-window-rootcause.md`.
+
 ## Checklist
 
 ### 1. V2 Endpoint And Cutover Behavior
@@ -610,6 +612,14 @@ Polymarket RTDS Chainlink addendum, 2026-04-28:
 - Bounded run `m9-rtds-chainlink-smoke-20260428b` persisted 12 BTC/ETH/SOL RTDS Chainlink `ReferenceTick`s, proceeded beyond the all-`missing_reference_price` blocker, and replayed deterministically. Current replay fingerprint after the runtime ordering compatibility fix is `sha256:8a4dce14a349b92dcf10dfb7dbce1f079f667b2fe91689fb6e93d0fa91f3e0df`.
 - RTDS-backed reference ingestion is settlement-source plumbing evidence, but final M9 live-readiness remains PARTIAL until Chainlink-source paper sessions produce/validate natural risk-reviewed paper behavior and final start/end settlement artifacts are verified.
 - See `verification/2026-04-28-m9-polymarket-rtds-chainlink-reference.md`.
+
+RTDS settlement reconciliation addendum, 2026-04-29:
+
+- Current-window run `m9-rtds-current-window-startuplog-20260429T035356Z` selected BTC/ETH/SOL markets for the 2026-04-29 03:45-04:00 UTC window and produced natural risk-approved paper fills under unchanged gates.
+- Read-only Gamma checks after market close showed all three selected markets closed with final outcome prices `["0","1"]`, so `Down` won for BTC, ETH, and SOL.
+- The run held only `Up` outcome tokens; post-settlement reconciliation therefore marks settlement value to `0.000000` and final paper P&L to `-3.694100`.
+- Settlement artifact: `reports/sessions/m9-rtds-current-window-startuplog-20260429T035356Z/settlement_reconciliation.json`.
+- Evidence note: `verification/2026-04-29-m9-rtds-settlement-reconciliation.md`.
 
 Natural RTDS paper validation addendum, 2026-04-28:
 
