@@ -17,15 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `m9/rtds-natural-paper-validation`
-- Short commit: `HEAD` (latest local branch commit; run `git rev-parse --short HEAD` before follow-up work)
-- Worktree status: clean except ignored local/build/intermediate report artifacts.
+- Branch: `live-beta/prd`
+- Base short commit: `c7c91b8` (`Merge pull request #13 from jonahgrigoryan/m9/rtds-natural-paper-validation`)
+- Worktree status: scoped live-beta PRD/release-gate and implementation-plan documentation updates; no live order, signing, wallet, API-key, or authenticated order-client implementation.
 
 ## Milestones
 
-- Last completed milestone: M8 - Observability And Production-Like Runbook.
-- Active milestone: M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence. M9 still does not authorize live trading; a separate live-beta PRD/release gate is required before any real orders.
-- Next milestone: open the scoped M9 current-window/settlement PR, then plan a separate live-beta readiness phase only after legal/access review, deployment geoblock check, key management, signing/auth verification, and live risk gates are approved.
+- Last completed milestone: M9 - Multi-Session Validation And Live-Readiness Review.
+- Active milestone: Live-beta PRD/release-gate planning after merged M9.
+- M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
+- Next milestone: review and approve `LIVE_BETA_PRD.md` and `LIVE_BETA_IMPLEMENTATION_PLAN.md` as separate live-beta release-gate documents before any implementation of live order placement, signing, wallet/key handling, API-key handling, authenticated CLOB clients, or trading-capable runtime paths. The plan keeps first live beta as an order-lifecycle probe unless additional RTDS paper windows pass an explicit strategy robustness gate.
 
 ## M3 Scope Lock
 
@@ -277,7 +278,7 @@ M9 verification status: PARTIAL.
 
 ## Next Concrete Action
 
-Open the scoped M9 current-window/settlement PR. Do not start live trading from M9 alone; live trading requires a separate live-beta PRD/release gate covering legal/access review, deployment geoblock verification, key management, signing/auth/order endpoints, and live risk controls. Continue additional bounded RTDS paper sessions only as strategy robustness evidence.
+Review and approve `LIVE_BETA_PRD.md` and `LIVE_BETA_IMPLEMENTATION_PLAN.md` as separate live-beta release-gate documents. Do not start live-trading implementation until both documents are explicitly approved and the documented legal/access, deployment geoblock, pUSD collateral/account preflight, SDK/signing, heartbeat, order/cancel/readback, trade reconciliation, venue-state, live-risk, rollback, and mandatory hold-point gates are satisfied. Continue additional bounded RTDS paper sessions only as strategy robustness evidence, not as proof of live profitability.
 
 ## Update Checklist
 
