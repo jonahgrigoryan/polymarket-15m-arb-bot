@@ -18,8 +18,8 @@ Authoritative sources remain:
 ## Current Branch
 
 - Branch: `m9/rtds-natural-paper-validation`
-- Short commit: `f82d38a`
-- Worktree status: dirty with scoped M9 settlement reconciliation docs/artifact updates; preserve existing user/doc changes.
+- Short commit: `89e6105`
+- Worktree status: clean except ignored local/build/intermediate report artifacts.
 
 ## Milestones
 
