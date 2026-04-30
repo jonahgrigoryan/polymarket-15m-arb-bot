@@ -11,6 +11,12 @@ log_level = "info"
 intent_enabled = false
 kill_switch_active = true
 
+[live_beta.secret_handles]
+backend = "env"
+clob_l2_access = "P15M_LIVE_BETA_CLOB_L2_ACCESS"
+clob_l2_credential = "P15M_LIVE_BETA_CLOB_L2_CREDENTIAL"
+clob_l2_passphrase = "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE"
+
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
 

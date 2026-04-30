@@ -12,6 +12,7 @@ pub mod replay;
 pub mod reporting;
 pub mod risk_engine;
 pub mod safety;
+pub mod secret_handling;
 pub mod shutdown;
 pub mod signal_engine;
 pub mod state;
@@ -33,6 +34,7 @@ pub fn module_names() -> Vec<&'static str> {
         reporting::MODULE,
         risk_engine::MODULE,
         safety::MODULE,
+        secret_handling::MODULE,
         shutdown::MODULE,
         signal_engine::MODULE,
         state::MODULE,
