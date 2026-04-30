@@ -1,6 +1,6 @@
 # Project Status Handoff
 
-Last updated: 2026-04-29
+Last updated: 2026-04-30
 
 ## Purpose
 
@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb2-auth-secrets`
-- Base short commit: `b839ffc`
-- Worktree status: scoped LB2 secret-handling source/config/docs updates; no live order, signing, wallet key material, API-key values, authenticated CLOB client, order post, cancel, or readback implementation.
+- Branch: `live-beta/lb3-signing-dry-run`
+- Base short commit: `9a5c783`
+- Worktree status: scoped LB3 source/config/docs/status/verification updates are present. No live order placement, network order submission, live cancel, authenticated readback, authenticated CLOB client, production signing, wallet key material, API-key value, secret value, geoblock bypass, or strategy/risk/freshness change was added.
 
 ## Milestones
 
-- Last completed milestone: M9 - Multi-Session Validation And Live-Readiness Review.
-- Active milestone: LB2 - Auth And Secret Handling, No Order Submission is PASS.
+- Last completed milestone: LB3 - Signing Dry Run, No Network Post is PASS for dry-run payload construction. M9 remains the last completed replay/paper milestone.
+- Active milestone: mandatory hold after LB3. Do not start LB4 until explicit human/operator approval is recorded.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next milestone: LB3 - Signing Dry Run, No Network Post. Do not start LB3 unless explicitly requested; LB3 must not add order submission, cancel submission, authenticated order readback, or any live trading path.
+- Next exit gate: LB4 may start only after the LB3 hold is approved and the required legal/access and deployment geoblock prerequisites are recorded. LB4 must not add order submission, cancel submission, cancel-all, or live trading.
 
 ## M3 Scope Lock
 
@@ -277,6 +277,21 @@ PASS.
 - LB2 checks passed: `cargo test --offline secret`, `cargo test --offline redaction`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo fmt --check`, `cargo test --offline` (142 lib tests, 5 main tests), `cargo clippy --offline -- -D warnings`, and required safety/no-secret scans.
 - LB2 safety result: no secret values, live order placement, signing, wallet key material, API-key values, authenticated CLOB client, order post, cancel, readback, or live-trading path was added.
 
+## LB3 Verification Status
+
+PASS for dry-run payload construction.
+- Evidence file: `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
+- Design note: `docs/live-beta-lb3-signing-dry-run.md`.
+- SDK decision: do not import `polymarket_client_sdk_v2` or `rs-clob-client-v2` in LB3; keep those official Rust paths as audit targets before any real signing/authenticated-client work. LB3 uses only a minimal custom V2 payload draft builder with no HTTP client.
+- Dry-run command: `cargo run --offline -- --config config/default.toml validate --local-only --live-beta-signing-dry-run`.
+- Dry-run fingerprint: `sha256:649e44a4913f5e58ad60147932c253eab0cf35e93f12c44631d2ec9ec2744d3c`.
+- Dry-run output confirmed `live_order_placement_enabled=false`, `live_beta_gate_status=blocked`, `not_submitted=true`, and `network_post_enabled=false`.
+- The artifact is sanitized and includes the required funder/proxy fixture field: owner redacted, signature redacted, no cryptographic signature produced, no credential values loaded, and no network post path.
+- Non-secret config cleanup: `config/default.toml`, `config/example.local.toml`, and `config/pyth-proxy.example.toml` now use `https://clob.polymarket.com`, matching the already-recorded post-cutover endpoint evidence.
+- LB3 checks passed: `cargo test --offline safety`, `cargo test --offline compliance`, `cargo test --offline secret`, `cargo test --offline redaction`, `cargo test --offline signing`, `cargo test --offline dry_run`, `cargo run --offline -- --config config/default.toml validate --local-only`, LB3 dry-run validate, `cargo fmt --check`, `cargo test --offline` (147 lib tests, 5 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, required safety/no-secret scans, and `.env` guard.
+- LB3 safety result: no live order placement, network order submission, live cancel, authenticated readback, authenticated CLOB client, production signing, wallet key material, API-key value, secret value, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
+- Mandatory hold: stop before LB4 until explicit human/operator approval is recorded.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -292,7 +307,11 @@ PASS.
 - LB0 is approved and complete via `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md`.
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
-- Next planned phase is LB3 (signing dry run, no network post), but LB3 has not started and must not introduce order posting, canceling, authenticated order readback, or live trading. Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
+- LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
+- Current branch is `live-beta/lb3-signing-dry-run`, based on the LB2 merge commit `9a5c783` from `origin/main`.
+- Next planned phase is LB4 (authenticated readback and account preflight), but LB4 must not start until the mandatory LB3 human hold approval is recorded. LB4 also requires recorded legal/access and deployment geoblock prerequisites before live-host/authenticated readback checks.
+- Do not create LB4 source changes on this branch unless the human explicitly approves that branch strategy. Do not start LB6.
+- Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
 

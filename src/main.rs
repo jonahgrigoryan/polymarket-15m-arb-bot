@@ -17,6 +17,7 @@ use polymarket_15m_arb_bot::{
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
+    live_beta_signing,
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
     },
@@ -92,6 +93,11 @@ enum Commands {
             help = "Validate LB2 secret handle names and backend presence without printing values"
         )]
         validate_secret_handles: bool,
+        #[arg(
+            long,
+            help = "Build the LB3 sanitized signing dry-run artifact without network submission"
+        )]
+        live_beta_signing_dry_run: bool,
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
@@ -176,6 +182,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 metrics_smoke,
                 live_beta_intent,
                 validate_secret_handles,
+                live_beta_signing_dry_run,
                 feed_message_limit,
             } => {
                 println!("validation_status=ok");
@@ -234,6 +241,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if validate_secret_handles {
                     run_lb2_secret_handle_validation(&secret_inventory)?;
+                }
+                if live_beta_signing_dry_run {
+                    run_lb3_signing_dry_run_validation(&config)?;
                 }
                 if feed_smoke {
                     run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
@@ -1816,6 +1826,31 @@ fn run_lb2_secret_handle_validation(
         .into());
     }
 
+    Ok(())
+}
+
+fn run_lb3_signing_dry_run_validation(
+    config: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let artifact =
+        live_beta_signing::sample_live_beta_signing_dry_run(&config.polymarket.clob_rest_url)?;
+    println!("live_beta_signing_dry_run_status=ok");
+    println!(
+        "live_beta_signing_dry_run_not_submitted={}",
+        artifact.not_submitted
+    );
+    println!(
+        "live_beta_signing_dry_run_network_post_enabled={}",
+        artifact.network_post_enabled
+    );
+    println!(
+        "live_beta_signing_dry_run_fingerprint={}",
+        artifact.fingerprint()?
+    );
+    println!(
+        "live_beta_signing_dry_run_artifact={}",
+        serde_json::to_string(&artifact)?
+    );
     Ok(())
 }
 
