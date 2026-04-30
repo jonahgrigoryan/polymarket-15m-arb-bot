@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb3-signing-dry-run`
-- Base short commit: `9a5c783`
-- Worktree status: scoped LB3 source/config/docs/status/verification updates are present. No live order placement, network order submission, live cancel, authenticated readback, authenticated CLOB client, production signing, wallet key material, API-key value, secret value, geoblock bypass, or strategy/risk/freshness change was added.
+- Branch: `live-beta/lb4-readback-account-preflight`
+- Base short commit: `664c4cb`
+- Worktree status: scoped LB4 local readback/account-preflight source, runtime prerequisite config, status, and verification updates are present. No live order placement, network order submission, live cancel, cancel-all, wallet key material, API-key value, secret value, geoblock bypass, or strategy/risk/freshness change was added.
 
 ## Milestones
 
 - Last completed milestone: LB3 - Signing Dry Run, No Network Post is PASS for dry-run payload construction. M9 remains the last completed replay/paper milestone.
-- Active milestone: mandatory hold after LB3. Do not start LB4 until explicit human/operator approval is recorded.
+- Active milestone: LB4 - Authenticated Readback And Account Preflight. The LB3 hold release was explicitly approved by the operator on 2026-04-30 for branch `live-beta/lb4-readback-account-preflight`.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: LB4 may start only after the LB3 hold is approved and the required legal/access and deployment geoblock prerequisites are recorded. LB4 must not add order submission, cancel submission, cancel-all, or live trading.
+- Next exit gate: LB4 can exit only after approved-host authenticated readback/account preflight passes with recorded legal/access approval and deployment geoblock PASS. Until then, LB4 remains blocked for live-host checks and must not add order submission, cancel submission, cancel-all, or live trading.
 
 ## M3 Scope Lock
 
@@ -292,6 +292,20 @@ PASS for dry-run payload construction.
 - LB3 safety result: no live order placement, network order submission, live cancel, authenticated readback, authenticated CLOB client, production signing, wallet key material, API-key value, secret value, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
 - Mandatory hold: stop before LB4 until explicit human/operator approval is recorded.
 
+## LB4 Verification Status
+
+LOCAL SCAFFOLDING PASS; FULL LB4 EXIT BLOCKED pending approved-host prerequisites.
+- Evidence file: `verification/2026-04-30-live-beta-lb4-readback-account-preflight.md`.
+- Operator approval to release the LB3 hold and start LB4 was recorded on 2026-04-30 for branch `live-beta/lb4-readback-account-preflight`.
+- LB4 added local readback/account-preflight parsing and fail-closed evaluation for runtime-derived LB4 prerequisites, pUSD balance/allowance, reserved balance from open orders using fixed-unit open-order sizes, open-order status, trade lifecycle status and transaction hash presence, venue state, heartbeat readiness, CLOB host, chain ID, nonzero case-insensitive wallet/funder consistency, EOA wallet/funder equality, and redacted endpoint-error classification.
+- Local validate flag: `cargo run --offline -- --config config/default.toml validate --local-only --live-readback-preflight`.
+- Local fail-closed output confirmed `live_beta_readback_preflight_lb3_hold_released=true`, `live_beta_readback_preflight_legal_access_approved=false`, `live_beta_readback_preflight_deployment_geoblock_passed=false`, `live_beta_readback_preflight_status=blocked`, `live_beta_readback_preflight_live_network_enabled=false`, and block reasons `deployment_geoblock_not_recorded,legal_access_not_recorded`.
+- Live-host/authenticated readback checks were NOT RUN because `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md` still records legal/access as pending formal confirmation, and no deployment-host geoblock PASS record exists.
+- Real wallet/funder/proxy address, signature type, pUSD balance, available/reserved balance, open orders, allowances, trade readback status, and heartbeat status remain pending approved-host evidence. Fixture values in tests and local validation are non-secret placeholders only.
+- LB4 local checks passed: `cargo test --offline readback`, `cargo test --offline balance`, `cargo test --offline allowance`, `cargo test --offline heartbeat`, `cargo run --offline -- --config config/default.toml validate --local-only`, expected fail-closed LB4 preflight validate, `cargo fmt --check`, `cargo test --offline` (164 lib tests, 6 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, required safety/no-secret scans, and `.env` guard.
+- LB4 safety result: no live order placement, order post, live cancel, cancel-all, wallet/private-key material, API-key value, secret value, authenticated order write client, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
+- Do not start LB5 until a reviewer/human decides how to handle the blocked approved-host LB4 evidence.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -308,9 +322,10 @@ PASS for dry-run payload construction.
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb3-signing-dry-run`, based on the LB2 merge commit `9a5c783` from `origin/main`.
-- Next planned phase is LB4 (authenticated readback and account preflight), but LB4 must not start until the mandatory LB3 human hold approval is recorded. LB4 also requires recorded legal/access and deployment geoblock prerequisites before live-host/authenticated readback checks.
-- Do not create LB4 source changes on this branch unless the human explicitly approves that branch strategy. Do not start LB6.
+- Current branch is `live-beta/lb4-readback-account-preflight`, based on the LB3 merge commit `664c4cb` from `origin/main`.
+- LB4 local readback/account-preflight scaffolding is implemented and locally verified, but live-host/authenticated readback checks are blocked until legal/access approval and deployment geoblock PASS are recorded.
+- Next concrete action is reviewer/human review of `verification/2026-04-30-live-beta-lb4-readback-account-preflight.md` and the LB4 PR, with a decision on whether to record the missing approved-host prerequisites and run the live-readback preflight from the approved host.
+- Do not start LB5 or LB6 until the LB4 evidence blocker is resolved by explicit human/operator direction.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
