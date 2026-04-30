@@ -38,6 +38,7 @@ use polymarket_15m_arb_bot::{
     },
     reporting::deterministic_report_json,
     safety,
+    secret_handling::{self, EnvSecretPresenceProvider},
     shutdown::{GracefulShutdownState, RuntimeMode},
     storage::{
         ConfigSnapshot, FileSessionStorage, InMemoryStorage, PaperBalanceSnapshot,
@@ -86,6 +87,11 @@ enum Commands {
         metrics_smoke: bool,
         #[arg(long, help = "Evaluate the LB1 future live-mode gate")]
         live_beta_intent: bool,
+        #[arg(
+            long,
+            help = "Validate LB2 secret handle names and backend presence without printing values"
+        )]
+        validate_secret_handles: bool,
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
@@ -169,6 +175,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 feed_smoke,
                 metrics_smoke,
                 live_beta_intent,
+                validate_secret_handles,
                 feed_message_limit,
             } => {
                 println!("validation_status=ok");
@@ -190,6 +197,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "live_beta_kill_switch_active={}",
                     config.live_beta.kill_switch_active
                 );
+                let secret_inventory = config.live_beta.secret_inventory();
+                println!("live_beta_secret_backend={}", secret_inventory.backend);
+                println!(
+                    "live_beta_secret_handle_count={}",
+                    secret_inventory.handles.len()
+                );
+                println!("live_beta_secret_values_loaded=false");
                 let geoblock_gate_status = if local_only {
                     println!("online_validation_status=skipped");
                     safety::GeoblockGateStatus::Unknown
@@ -217,6 +231,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         live_beta_gate.reason_list()
                     )
                     .into());
+                }
+                if validate_secret_handles {
+                    run_lb2_secret_handle_validation(&secret_inventory)?;
                 }
                 if feed_smoke {
                     run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
@@ -1772,6 +1789,34 @@ fn compliance_client(config: &AppConfig) -> Result<ComplianceClient, Box<dyn std
         &config.polymarket.geoblock_url,
         config.polymarket.request_timeout_ms,
     )?)
+}
+
+fn run_lb2_secret_handle_validation(
+    inventory: &secret_handling::SecretInventory,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = EnvSecretPresenceProvider;
+    let report = secret_handling::validate_secret_presence(inventory, &provider)?;
+    let status = if report.all_present() {
+        "ok"
+    } else {
+        "missing"
+    };
+    println!("live_beta_secret_presence_status={status}");
+    for check in &report.checks {
+        println!(
+            "live_beta_secret_handle=label={},backend={},handle={},present={}",
+            check.label, report.backend, check.handle, check.present
+        );
+    }
+    if !report.all_present() {
+        return Err(format!(
+            "LB2 secret handles missing from approved backend: {}",
+            report.missing_handle_list()
+        )
+        .into());
+    }
+
+    Ok(())
 }
 
 fn init_tracing(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {

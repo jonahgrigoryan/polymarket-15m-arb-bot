@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb1-kill-gates`
-- Base short commit: `eb62868`
-- Worktree status: scoped LB1 live-mode kill-gate source/config/docs updates; no live order, signing, wallet, API-key, authenticated CLOB client, order post, cancel, or readback implementation.
+- Branch: `live-beta/lb2-auth-secrets`
+- Base short commit: `b839ffc`
+- Worktree status: scoped LB2 secret-handling source/config/docs updates; no live order, signing, wallet key material, API-key values, authenticated CLOB client, order post, cancel, or readback implementation.
 
 ## Milestones
 
 - Last completed milestone: M9 - Multi-Session Validation And Live-Readiness Review.
-- Active milestone: LB1 - Live-Mode Kill Gates is PASS.
+- Active milestone: LB2 - Auth And Secret Handling, No Order Submission is PASS.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next milestone: LB2 - Auth And Secret Handling, No Order Submission. Do not start LB2 unless explicitly requested; LB2 must not add order submission, cancel submission, signed order posting, or any live trading path.
+- Next milestone: LB3 - Signing Dry Run, No Network Post. Do not start LB3 unless explicitly requested; LB3 must not add order submission, cancel submission, authenticated order readback, or any live trading path.
 
 ## M3 Scope Lock
 
@@ -266,6 +266,17 @@ M9 verification status: PARTIAL.
 - Fresh corrected-code session verification passed: `cargo fmt --check`, `cargo test --offline` (126 lib tests, 2 main tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- --config config/polymarket-rtds-chainlink.example.toml validate --local-only`, replay of `m9-rtds-natural-20260429T021025Z-fresh`, `git diff --check`, and focused safety scan.
 - Latest natural RTDS verification passed: `cargo test --offline` (122 tests), `cargo clippy --offline -- -D warnings`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo run --offline -- --config config/polymarket-rtds-chainlink.example.toml validate --local-only`, `git diff --check`, replay-all-stored-sessions twice, and focused safety scans.
 
+## LB2 Verification Status
+
+PASS.
+- Evidence file: `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
+- Approved backend is environment-variable handles managed outside the repo. Config stores only non-secret handle names: `P15M_LIVE_BETA_CLOB_L2_ACCESS`, `P15M_LIVE_BETA_CLOB_L2_CREDENTIAL`, and `P15M_LIVE_BETA_CLOB_L2_PASSPHRASE`.
+- LB2 local validation prints `live_beta_secret_backend=env`, `live_beta_secret_handle_count=3`, and `live_beta_secret_values_loaded=false`.
+- Missing-handle validation with all three handles unset fails closed and prints only handle names plus `present=false`.
+- Secretless deterministic paper/replay smoke run `lb2-secretless-fixture-20260429a` passed with all three handles unset; replay fingerprint `sha256:317adb0ffa1fd61270e7e4b4eb22ed18c7718903360d34337af3fb478f1fe918`.
+- LB2 checks passed: `cargo test --offline secret`, `cargo test --offline redaction`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo fmt --check`, `cargo test --offline` (142 lib tests, 5 main tests), `cargo clippy --offline -- -D warnings`, and required safety/no-secret scans.
+- LB2 safety result: no secret values, live order placement, signing, wallet key material, API-key values, authenticated CLOB client, order post, cancel, readback, or live-trading path was added.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -280,7 +291,8 @@ M9 verification status: PARTIAL.
 
 - LB0 is approved and complete via `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md`.
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
-- Next planned phase is LB2 (auth and secret handling, no order submission), but LB2 has not started and must not introduce order posting, canceling, readback clients, signed order posts, or live trading. Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
+- LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
+- Next planned phase is LB3 (signing dry run, no network post), but LB3 has not started and must not introduce order posting, canceling, authenticated order readback, or live trading. Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
 

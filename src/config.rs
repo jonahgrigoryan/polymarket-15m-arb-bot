@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::fmt::{Display, Formatter};
@@ -5,6 +6,8 @@ use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::secret_handling::{SecretHandle, SecretInventory, ENV_SECRET_BACKEND};
 
 pub const MODULE: &str = "config";
 
@@ -62,6 +65,7 @@ impl AppConfig {
 
         require_non_empty(&mut errors, "runtime.log_level", &self.runtime.log_level);
         require_supported_mode(&mut errors, &self.runtime.mode);
+        require_live_beta_secret_handles_config(&mut errors, &self.live_beta.secret_handles);
 
         require_exact_assets(&mut errors, &self.assets.symbols);
 
@@ -294,8 +298,12 @@ pub struct RuntimeConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LiveBetaConfig {
+    #[serde(default)]
     pub intent_enabled: bool,
+    #[serde(default = "default_live_beta_kill_switch_active")]
     pub kill_switch_active: bool,
+    #[serde(default)]
+    pub secret_handles: LiveBetaSecretHandlesConfig,
 }
 
 impl Default for LiveBetaConfig {
@@ -303,8 +311,71 @@ impl Default for LiveBetaConfig {
         Self {
             intent_enabled: false,
             kill_switch_active: true,
+            secret_handles: LiveBetaSecretHandlesConfig::default(),
         }
     }
+}
+
+impl LiveBetaConfig {
+    pub fn secret_inventory(&self) -> SecretInventory {
+        SecretInventory::new(
+            self.secret_handles.backend.clone(),
+            vec![
+                SecretHandle::new("clob_l2_access", self.secret_handles.clob_l2_access.clone()),
+                SecretHandle::new(
+                    "clob_l2_credential",
+                    self.secret_handles.clob_l2_credential.clone(),
+                ),
+                SecretHandle::new(
+                    "clob_l2_passphrase",
+                    self.secret_handles.clob_l2_passphrase.clone(),
+                ),
+            ],
+        )
+    }
+}
+
+fn default_live_beta_kill_switch_active() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LiveBetaSecretHandlesConfig {
+    #[serde(default = "default_live_beta_secret_backend")]
+    pub backend: String,
+    #[serde(default = "default_clob_l2_access_handle")]
+    pub clob_l2_access: String,
+    #[serde(default = "default_clob_l2_credential_handle")]
+    pub clob_l2_credential: String,
+    #[serde(default = "default_clob_l2_passphrase_handle")]
+    pub clob_l2_passphrase: String,
+}
+
+impl Default for LiveBetaSecretHandlesConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_live_beta_secret_backend(),
+            clob_l2_access: default_clob_l2_access_handle(),
+            clob_l2_credential: default_clob_l2_credential_handle(),
+            clob_l2_passphrase: default_clob_l2_passphrase_handle(),
+        }
+    }
+}
+
+fn default_live_beta_secret_backend() -> String {
+    ENV_SECRET_BACKEND.to_string()
+}
+
+fn default_clob_l2_access_handle() -> String {
+    "P15M_LIVE_BETA_CLOB_L2_ACCESS".to_string()
+}
+
+fn default_clob_l2_credential_handle() -> String {
+    "P15M_LIVE_BETA_CLOB_L2_CREDENTIAL".to_string()
+}
+
+fn default_clob_l2_passphrase_handle() -> String {
+    "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -596,6 +667,65 @@ fn require_reference_feed_config(errors: &mut Vec<String>, config: &ReferenceFee
     );
 }
 
+fn require_live_beta_secret_handles_config(
+    errors: &mut Vec<String>,
+    config: &LiveBetaSecretHandlesConfig,
+) {
+    if config.backend != ENV_SECRET_BACKEND {
+        errors.push("live_beta.secret_handles.backend must be env".to_string());
+    }
+    require_env_handle_name(
+        errors,
+        "live_beta.secret_handles.clob_l2_access",
+        &config.clob_l2_access,
+    );
+    require_env_handle_name(
+        errors,
+        "live_beta.secret_handles.clob_l2_credential",
+        &config.clob_l2_credential,
+    );
+    require_env_handle_name(
+        errors,
+        "live_beta.secret_handles.clob_l2_passphrase",
+        &config.clob_l2_passphrase,
+    );
+    let mut seen = BTreeSet::new();
+    for (name, value) in [
+        (
+            "live_beta.secret_handles.clob_l2_access",
+            &config.clob_l2_access,
+        ),
+        (
+            "live_beta.secret_handles.clob_l2_credential",
+            &config.clob_l2_credential,
+        ),
+        (
+            "live_beta.secret_handles.clob_l2_passphrase",
+            &config.clob_l2_passphrase,
+        ),
+    ] {
+        if !seen.insert(value) {
+            errors.push(format!(
+                "{name} must not duplicate another live beta secret handle"
+            ));
+        }
+    }
+}
+
+fn require_env_handle_name(errors: &mut Vec<String>, name: &str, value: &str) {
+    if value.trim().is_empty()
+        || !value.starts_with("P15M_")
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        errors.push(format!(
+            "{name} must be an environment-variable handle starting with P15M_ and containing only A-Z, 0-9, or _"
+        ));
+    }
+}
+
 fn require_price_id(errors: &mut Vec<String>, name: &str, value: &str) {
     let Some(stripped) = value.strip_prefix("0x") else {
         errors.push(format!("{name} must start with 0x"));
@@ -624,6 +754,19 @@ mod tests {
         config.validate().expect("default config validates");
         assert!(!config.live_beta.intent_enabled);
         assert!(config.live_beta.kill_switch_active);
+        assert_eq!(config.live_beta.secret_handles.backend, "env");
+        assert_eq!(
+            config.live_beta.secret_handles.clob_l2_access,
+            "P15M_LIVE_BETA_CLOB_L2_ACCESS"
+        );
+        assert_eq!(
+            config.live_beta.secret_handles.clob_l2_credential,
+            "P15M_LIVE_BETA_CLOB_L2_CREDENTIAL"
+        );
+        assert_eq!(
+            config.live_beta.secret_handles.clob_l2_passphrase,
+            "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE"
+        );
         assert_eq!(config.reference_feed.provider, "none");
         assert!(!config.reference_feed.pyth_enabled);
         assert_eq!(
@@ -655,9 +798,13 @@ mod tests {
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
-                !trimmed.starts_with("[live_beta]")
+                !trimmed.starts_with("[live_beta")
                     && !trimmed.starts_with("intent_enabled")
                     && !trimmed.starts_with("kill_switch_active")
+                    && !trimmed.starts_with("backend")
+                    && !trimmed.starts_with("clob_l2_access")
+                    && !trimmed.starts_with("clob_l2_credential")
+                    && !trimmed.starts_with("clob_l2_passphrase")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -666,7 +813,52 @@ mod tests {
 
         assert!(!config.live_beta.intent_enabled);
         assert!(config.live_beta.kill_switch_active);
+        assert_eq!(config.live_beta.secret_handles.backend, "env");
         config.validate().expect("legacy config validates");
+    }
+
+    #[test]
+    fn live_beta_secret_handles_reject_value_like_config_without_echoing_value() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.live_beta.secret_handles.clob_l2_access = "lowercase-value".to_string();
+
+        let error = config
+            .validate()
+            .expect_err("value-like handle fails validation")
+            .to_string();
+
+        assert!(error.contains("live_beta.secret_handles.clob_l2_access"));
+        assert!(!error.contains("lowercase-value"));
+    }
+
+    #[test]
+    fn live_beta_secret_handles_reject_duplicate_handles_without_echoing_handle() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.live_beta.secret_handles.clob_l2_credential =
+            config.live_beta.secret_handles.clob_l2_access.clone();
+
+        let error = config
+            .validate()
+            .expect_err("duplicate handle fails validation")
+            .to_string();
+
+        assert!(error.contains("live_beta.secret_handles.clob_l2_credential"));
+        assert!(!error.contains("P15M_LIVE_BETA_CLOB_L2_ACCESS"));
+    }
+
+    #[test]
+    fn paper_and_replay_modes_validate_without_secret_presence() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+
+        config.runtime.mode = "paper".to_string();
+        config
+            .validate()
+            .expect("paper mode does not require secret values");
+
+        config.runtime.mode = "replay".to_string();
+        config
+            .validate()
+            .expect("replay mode does not require secret values");
     }
 
     #[test]
