@@ -3,6 +3,7 @@ pub mod config;
 pub mod domain;
 pub mod events;
 pub mod feed_ingestion;
+pub mod live_beta_readback;
 pub mod live_beta_signing;
 pub mod market_discovery;
 pub mod metrics;
@@ -26,6 +27,7 @@ pub fn module_names() -> Vec<&'static str> {
         domain::MODULE,
         events::MODULE,
         feed_ingestion::MODULE,
+        live_beta_readback::MODULE,
         live_beta_signing::MODULE,
         market_discovery::MODULE,
         metrics::MODULE,

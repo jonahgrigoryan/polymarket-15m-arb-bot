@@ -7,6 +7,8 @@ log_level = "debug"
 
 [live_beta]
 intent_enabled = false
+lb3_hold_released = true
+legal_access_approved = false
 kill_switch_active = true
 
 [live_beta.secret_handles]

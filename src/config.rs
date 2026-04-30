@@ -300,6 +300,10 @@ pub struct RuntimeConfig {
 pub struct LiveBetaConfig {
     #[serde(default)]
     pub intent_enabled: bool,
+    #[serde(default)]
+    pub lb3_hold_released: bool,
+    #[serde(default)]
+    pub legal_access_approved: bool,
     #[serde(default = "default_live_beta_kill_switch_active")]
     pub kill_switch_active: bool,
     #[serde(default)]
@@ -310,6 +314,8 @@ impl Default for LiveBetaConfig {
     fn default() -> Self {
         Self {
             intent_enabled: false,
+            lb3_hold_released: false,
+            legal_access_approved: false,
             kill_switch_active: true,
             secret_handles: LiveBetaSecretHandlesConfig::default(),
         }
@@ -753,6 +759,8 @@ mod tests {
         let config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
         config.validate().expect("default config validates");
         assert!(!config.live_beta.intent_enabled);
+        assert!(config.live_beta.lb3_hold_released);
+        assert!(!config.live_beta.legal_access_approved);
         assert!(config.live_beta.kill_switch_active);
         assert_eq!(config.live_beta.secret_handles.backend, "env");
         assert_eq!(
@@ -800,6 +808,8 @@ mod tests {
                 let trimmed = line.trim_start();
                 !trimmed.starts_with("[live_beta")
                     && !trimmed.starts_with("intent_enabled")
+                    && !trimmed.starts_with("lb3_hold_released")
+                    && !trimmed.starts_with("legal_access_approved")
                     && !trimmed.starts_with("kill_switch_active")
                     && !trimmed.starts_with("backend")
                     && !trimmed.starts_with("clob_l2_access")
@@ -812,6 +822,8 @@ mod tests {
         let config: AppConfig = toml::from_str(&legacy_config).expect("legacy config parses");
 
         assert!(!config.live_beta.intent_enabled);
+        assert!(!config.live_beta.lb3_hold_released);
+        assert!(!config.live_beta.legal_access_approved);
         assert!(config.live_beta.kill_switch_active);
         assert_eq!(config.live_beta.secret_handles.backend, "env");
         config.validate().expect("legacy config validates");

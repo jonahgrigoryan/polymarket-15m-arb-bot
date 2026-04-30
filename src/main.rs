@@ -17,6 +17,7 @@ use polymarket_15m_arb_bot::{
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
+    live_beta_readback::{self, ReadbackPrerequisites},
     live_beta_signing,
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
@@ -98,6 +99,11 @@ enum Commands {
             help = "Build the LB3 sanitized signing dry-run artifact without network submission"
         )]
         live_beta_signing_dry_run: bool,
+        #[arg(
+            long,
+            help = "Evaluate the LB4 readback/account preflight gate without live network calls"
+        )]
+        live_readback_preflight: bool,
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
@@ -183,6 +189,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 live_beta_intent,
                 validate_secret_handles,
                 live_beta_signing_dry_run,
+                live_readback_preflight,
                 feed_message_limit,
             } => {
                 println!("validation_status=ok");
@@ -244,6 +251,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if live_beta_signing_dry_run {
                     run_lb3_signing_dry_run_validation(&config)?;
+                }
+                if live_readback_preflight {
+                    run_lb4_readback_preflight_validation(&config, geoblock_gate_status)?;
                 }
                 if feed_smoke {
                     run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
@@ -1854,6 +1864,83 @@ fn run_lb3_signing_dry_run_validation(
     Ok(())
 }
 
+fn run_lb4_readback_preflight_validation(
+    config: &AppConfig,
+    geoblock_gate_status: safety::GeoblockGateStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let prerequisites = lb4_readback_prerequisites(config, geoblock_gate_status);
+    let report = live_beta_readback::sample_readback_preflight(prerequisites)?;
+    println!(
+        "live_beta_readback_preflight_lb3_hold_released={}",
+        prerequisites.lb3_hold_released
+    );
+    println!(
+        "live_beta_readback_preflight_legal_access_approved={}",
+        prerequisites.legal_access_approved
+    );
+    println!(
+        "live_beta_readback_preflight_deployment_geoblock_passed={}",
+        prerequisites.deployment_geoblock_passed
+    );
+    println!("live_beta_readback_preflight_status={}", report.status);
+    println!(
+        "live_beta_readback_preflight_live_network_enabled={}",
+        report.live_network_enabled
+    );
+    println!(
+        "live_beta_readback_preflight_block_reasons={}",
+        report.block_reasons.join(",")
+    );
+    println!(
+        "live_beta_readback_preflight_open_order_count={}",
+        report.open_order_count
+    );
+    println!(
+        "live_beta_readback_preflight_trade_count={}",
+        report.trade_count
+    );
+    println!(
+        "live_beta_readback_preflight_reserved_pusd_units={}",
+        report.reserved_pusd_units
+    );
+    println!(
+        "live_beta_readback_preflight_available_pusd_units={}",
+        report.available_pusd_units
+    );
+    println!(
+        "live_beta_readback_preflight_venue_state={}",
+        report.venue_state
+    );
+    println!(
+        "live_beta_readback_preflight_heartbeat={}",
+        report.heartbeat
+    );
+    println!(
+        "live_beta_readback_preflight_report={}",
+        serde_json::to_string(&report)?
+    );
+    if !report.passed() {
+        return Err(format!(
+            "LB4 readback/account preflight blocked: {}",
+            report.block_reasons.join(",")
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn lb4_readback_prerequisites(
+    config: &AppConfig,
+    geoblock_gate_status: safety::GeoblockGateStatus,
+) -> ReadbackPrerequisites {
+    ReadbackPrerequisites {
+        lb3_hold_released: config.live_beta.lb3_hold_released,
+        legal_access_approved: config.live_beta.legal_access_approved,
+        deployment_geoblock_passed: geoblock_gate_status == safety::GeoblockGateStatus::Passed,
+    }
+}
+
 fn init_tracing(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
     let filter = EnvFilter::try_new(log_level)?;
     tracing_subscriber::fmt()
@@ -2132,6 +2219,35 @@ mod tests {
     #[test]
     fn utc_ms_formatter_outputs_rfc3339_utc() {
         assert_eq!(format_utc_ms(1_777_431_600_000), "2026-04-29T03:00:00Z");
+    }
+
+    #[test]
+    fn lb4_readback_prerequisites_follow_runtime_config_and_geoblock_status() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        let local_prerequisites =
+            lb4_readback_prerequisites(&config, safety::GeoblockGateStatus::Unknown);
+
+        assert!(local_prerequisites.lb3_hold_released);
+        assert!(!local_prerequisites.legal_access_approved);
+        assert!(!local_prerequisites.deployment_geoblock_passed);
+
+        config.live_beta.legal_access_approved = true;
+        let approved_host_prerequisites =
+            lb4_readback_prerequisites(&config, safety::GeoblockGateStatus::Passed);
+
+        assert_eq!(
+            approved_host_prerequisites,
+            ReadbackPrerequisites {
+                lb3_hold_released: true,
+                legal_access_approved: true,
+                deployment_geoblock_passed: true,
+            }
+        );
+        let report = live_beta_readback::sample_readback_preflight(approved_host_prerequisites)
+            .expect("approved runtime prerequisites can pass LB4 preflight");
+
+        assert_eq!(report.status, "passed");
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {
