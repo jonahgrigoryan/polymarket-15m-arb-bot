@@ -11,6 +11,8 @@ pub const MODULE: &str = "config";
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub live_beta: LiveBetaConfig,
     pub assets: AssetsConfig,
     pub polymarket: PolymarketConfig,
     pub feeds: FeedsConfig,
@@ -288,6 +290,21 @@ impl AppConfig {
 pub struct RuntimeConfig {
     pub mode: String,
     pub log_level: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LiveBetaConfig {
+    pub intent_enabled: bool,
+    pub kill_switch_active: bool,
+}
+
+impl Default for LiveBetaConfig {
+    fn default() -> Self {
+        Self {
+            intent_enabled: false,
+            kill_switch_active: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -605,6 +622,8 @@ mod tests {
     fn default_config_is_valid() {
         let config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
         config.validate().expect("default config validates");
+        assert!(!config.live_beta.intent_enabled);
+        assert!(config.live_beta.kill_switch_active);
         assert_eq!(config.reference_feed.provider, "none");
         assert!(!config.reference_feed.pyth_enabled);
         assert_eq!(
@@ -627,6 +646,26 @@ mod tests {
             config.reference_feed.polymarket_rtds_url,
             "wss://ws-live-data.polymarket.com"
         );
+        config.validate().expect("legacy config validates");
+    }
+
+    #[test]
+    fn missing_live_beta_section_defaults_to_fail_closed() {
+        let legacy_config = VALID_CONFIG
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("[live_beta]")
+                    && !trimmed.starts_with("intent_enabled")
+                    && !trimmed.starts_with("kill_switch_active")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let config: AppConfig = toml::from_str(&legacy_config).expect("legacy config parses");
+
+        assert!(!config.live_beta.intent_enabled);
+        assert!(config.live_beta.kill_switch_active);
         config.validate().expect("legacy config validates");
     }
 

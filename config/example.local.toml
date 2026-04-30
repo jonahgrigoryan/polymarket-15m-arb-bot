@@ -5,6 +5,10 @@
 mode = "validate"
 log_level = "debug"
 
+[live_beta]
+intent_enabled = false
+kill_switch_active = true
+
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
 

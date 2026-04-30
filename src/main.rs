@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use polymarket_15m_arb_bot::{
-    compliance::{ComplianceClient, ComplianceError},
+    compliance::{ComplianceClient, ComplianceError, GeoblockResponse},
     config::AppConfig,
     domain::{
         Asset, FeeParameters, Market, MarketLifecycleState, OrderBookLevel, OrderBookSnapshot,
@@ -84,6 +84,8 @@ enum Commands {
         feed_smoke: bool,
         #[arg(long, help = "Run M8 local loopback metrics endpoint smoke check")]
         metrics_smoke: bool,
+        #[arg(long, help = "Evaluate the LB1 future live-mode gate")]
+        live_beta_intent: bool,
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
@@ -166,6 +168,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 local_only,
                 feed_smoke,
                 metrics_smoke,
+                live_beta_intent,
                 feed_message_limit,
             } => {
                 println!("validation_status=ok");
@@ -178,10 +181,42 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "live_order_placement_enabled={}",
                     safety::LIVE_ORDER_PLACEMENT_ENABLED
                 );
-                if local_only {
+                println!(
+                    "live_beta_config_intent_enabled={}",
+                    config.live_beta.intent_enabled
+                );
+                println!("live_beta_cli_intent_enabled={live_beta_intent}");
+                println!(
+                    "live_beta_kill_switch_active={}",
+                    config.live_beta.kill_switch_active
+                );
+                let geoblock_gate_status = if local_only {
                     println!("online_validation_status=skipped");
+                    safety::GeoblockGateStatus::Unknown
                 } else {
-                    run_m2_online_validation(&config, &run_id).await?;
+                    safety::GeoblockGateStatus::from_blocked(
+                        run_m2_online_validation(&config, &run_id).await?.blocked,
+                    )
+                };
+                let live_beta_gate =
+                    safety::evaluate_live_mode_gate(safety::LiveModeGateInput::lb1(
+                        config.live_beta.intent_enabled,
+                        live_beta_intent,
+                        config.live_beta.kill_switch_active,
+                        geoblock_gate_status,
+                    ));
+                println!("live_beta_geoblock_gate={}", geoblock_gate_status.as_str());
+                println!("live_beta_gate_status={}", live_beta_gate.status());
+                println!(
+                    "live_beta_gate_block_reasons={}",
+                    live_beta_gate.reason_list()
+                );
+                if live_beta_intent && !live_beta_gate.allowed {
+                    return Err(format!(
+                        "LB1 live-mode gate refused future live intent: {}",
+                        live_beta_gate.reason_list()
+                    )
+                    .into());
                 }
                 if feed_smoke {
                     run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
@@ -1642,7 +1677,7 @@ async fn run_m3_feed_smoke(
 async fn run_m2_online_validation(
     config: &AppConfig,
     run_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<GeoblockResponse, Box<dyn std::error::Error>> {
     let geoblock = compliance_client(config)?.check_geoblock().await?;
     let masked_geoblock = geoblock.masked_for_logs();
     println!("geoblock_blocked={}", masked_geoblock.blocked);
@@ -1729,7 +1764,7 @@ async fn run_m2_online_validation(
         );
     }
 
-    Ok(())
+    Ok(geoblock)
 }
 
 fn compliance_client(config: &AppConfig) -> Result<ComplianceClient, Box<dyn std::error::Error>> {

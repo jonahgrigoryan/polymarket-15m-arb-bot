@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/prd`
-- Base short commit: `c7c91b8` (`Merge pull request #13 from jonahgrigoryan/m9/rtds-natural-paper-validation`)
-- Worktree status: scoped live-beta PRD/release-gate and implementation-plan documentation updates; no live order, signing, wallet, API-key, or authenticated order-client implementation.
+- Branch: `live-beta/lb1-kill-gates`
+- Base short commit: `eb62868`
+- Worktree status: scoped LB1 live-mode kill-gate source/config/docs updates; no live order, signing, wallet, API-key, authenticated CLOB client, order post, cancel, or readback implementation.
 
 ## Milestones
 
 - Last completed milestone: M9 - Multi-Session Validation And Live-Readiness Review.
-- Active milestone: LB0 scope lock completed. Next actionable milestone is LB1 (live-mode kill gates only), with no source path to place or cancel live orders yet.
+- Active milestone: LB1 - Live-Mode Kill Gates is PASS.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next milestone: LB1 - add kill-gate checks for live-mode intent, keep `LIVE_ORDER_PLACEMENT_ENABLED=false`, and require geoblock pass before any future trading-capable mode can reach execution gates. `LIVE_BETA_PRD.md` and `LIVE_BETA_IMPLEMENTATION_PLAN.md` are approved for scope lock and phase sequencing.
+- Next milestone: LB2 - Auth And Secret Handling, No Order Submission. Do not start LB2 unless explicitly requested; LB2 must not add order submission, cancel submission, signed order posting, or any live trading path.
 
 ## M3 Scope Lock
 
@@ -279,7 +279,8 @@ M9 verification status: PARTIAL.
 ## Next Concrete Action
 
 - LB0 is approved and complete via `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md`.
-- Start LB1 (live-mode kill gates only) and keep all source code locked to non-live behavior. Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
+- LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
+- Next planned phase is LB2 (auth and secret handling, no order submission), but LB2 has not started and must not introduce order posting, canceling, readback clients, signed order posts, or live trading. Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
 
