@@ -187,10 +187,17 @@ pub fn parse_single_cancel_response(
         .canceled
         .iter()
         .any(|canceled_id| canceled_id != order_id);
+    let unexpected_not_canceled_order = response
+        .not_canceled
+        .keys()
+        .any(|not_canceled_id| not_canceled_id != order_id);
     let not_canceled_reason = response.not_canceled.get(order_id);
 
     if unexpected_canceled_order {
         block_reasons.push("unexpected_canceled_order_ids");
+    }
+    if unexpected_not_canceled_order {
+        block_reasons.push("unexpected_not_canceled_order_ids");
     }
     if canceled && not_canceled_reason.is_some() {
         block_reasons.push("cancel_response_conflict");
@@ -450,6 +457,25 @@ mod tests {
         assert!(report
             .block_reasons
             .contains(&"unexpected_canceled_order_ids"));
+    }
+
+    #[test]
+    fn cancel_response_fails_closed_for_extra_not_canceled_order_ids() {
+        let report = parse_single_cancel_response(
+            ORDER_ID,
+            &format!(
+                r#"{{"canceled":["{ORDER_ID}"],"not_canceled":{{"{OTHER_ORDER_ID}":"not found"}}}}"#
+            ),
+            0,
+        )
+        .expect("response parses");
+
+        assert_eq!(report.status, "blocked");
+        assert_eq!(report.canceled_count, 1);
+        assert_eq!(report.not_canceled_count, 1);
+        assert!(report
+            .block_reasons
+            .contains(&"unexpected_not_canceled_order_ids"));
     }
 
     #[test]

@@ -40,6 +40,7 @@ Focused tests cover:
 - single-order cancel draft requires LB6 gates and an approved canary order,
 - successful `canceled` response,
 - extra canceled order IDs in a one-order cancel response,
+- extra `not_canceled` order IDs in a one-order cancel response,
 - partial-fill ambiguity,
 - already filled / partially filled,
 - already canceled,
@@ -93,14 +94,14 @@ Required sections present:
 
 ## Verification
 
-- `cargo test --offline cancel`: PASS, 13 lib tests.
+- `cargo test --offline cancel`: PASS, 14 lib tests.
 - `cargo test --offline rollback`: PASS, 1 lib test.
 - `cargo test --offline runbook`: PASS, 1 lib test.
 - `cargo test --offline readback`: PASS, 28 lib tests and 1 main test.
 - `cargo run --offline -- --config config/default.toml validate --local-only`: PASS.
 - `cargo run --offline -- --config config/default.toml validate --local-only --live-cancel-readiness`: PASS.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 187 lib tests and 7 main tests.
+- `cargo test --offline`: PASS, 188 lib tests and 7 main tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - Trailing whitespace scan over tracked Rust/TOML/Markdown excluding `.git` and `target`: PASS, no output.
