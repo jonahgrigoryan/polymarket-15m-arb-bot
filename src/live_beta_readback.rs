@@ -1,6 +1,9 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::URL_SAFE, Engine as _};
+use ring::hmac;
 use serde::{Deserialize, Serialize};
 
 pub const MODULE: &str = "live_beta_readback";
@@ -9,6 +12,8 @@ pub const BALANCE_ALLOWANCE_PATH: &str = "/balance-allowance";
 pub const USER_ORDERS_PATH: &str = "/data/orders";
 pub const TRADES_PATH: &str = "/trades";
 pub const SINGLE_ORDER_PATH_PREFIX: &str = "/order/";
+const HTTP_GET: &str = "GET";
+const INITIAL_CURSOR: &str = "MA==";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadbackPrerequisites {
@@ -32,6 +37,47 @@ pub enum SignatureType {
     Eoa,
     PolyProxy,
     GnosisSafe,
+}
+
+impl SignatureType {
+    pub fn from_config(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "0" | "eoa" => Some(Self::Eoa),
+            "1" | "poly_proxy" | "poly-proxy" | "polyproxy" => Some(Self::PolyProxy),
+            "2" | "gnosis_safe" | "gnosis-safe" | "gnosissafe" => Some(Self::GnosisSafe),
+            _ => None,
+        }
+    }
+
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Eoa => "eoa",
+            Self::PolyProxy => "poly_proxy",
+            Self::GnosisSafe => "gnosis_safe",
+        }
+    }
+
+    fn as_balance_allowance_param(self) -> &'static str {
+        match self {
+            Self::Eoa => "0",
+            Self::PolyProxy => "1",
+            Self::GnosisSafe => "2",
+        }
+    }
+}
+
+pub struct L2ReadbackCredentials {
+    pub api_key: String,
+    pub api_secret: String,
+    pub api_passphrase: String,
+}
+
+pub struct AuthenticatedReadbackInput {
+    pub prerequisites: ReadbackPrerequisites,
+    pub account: AccountPreflight,
+    pub credentials: L2ReadbackCredentials,
+    pub required_collateral_allowance_units: u64,
+    pub request_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +364,14 @@ pub fn evaluate_readback_preflight(
     if input.collateral.balance_units < reserved_pusd_units {
         block_reasons.push("balance_below_reserved");
     }
+    if input
+        .collateral
+        .balance_units
+        .saturating_sub(reserved_pusd_units)
+        < input.required_collateral_allowance_units
+    {
+        block_reasons.push("balance_below_required");
+    }
     if input.collateral.allowance_units < input.required_collateral_allowance_units {
         block_reasons.push("allowance_below_required");
     }
@@ -410,6 +464,42 @@ pub fn sample_readback_preflight(
     })
 }
 
+pub async fn authenticated_readback_preflight(
+    input: AuthenticatedReadbackInput,
+) -> LiveBetaReadbackResult<ReadbackPreflightReport> {
+    validate_authenticated_readback_input(&input)?;
+
+    let client = ReadOnlyClobReadbackClient::new(
+        input.account.clob_host.clone(),
+        input.account.wallet_address.clone(),
+        input.credentials,
+        input.request_timeout_ms,
+    )?;
+    let collateral = client
+        .get_balance_allowance(input.account.signature_type)
+        .await?;
+    let open_orders = client.get_user_orders().await?;
+    let trades = client.get_trades().await?;
+    let heartbeat = if open_orders.is_empty() {
+        HeartbeatReadiness::NotStartedNoOpenOrders
+    } else {
+        HeartbeatReadiness::Unknown
+    };
+
+    let mut report = evaluate_readback_preflight(&ReadbackPreflightInput {
+        prerequisites: input.prerequisites,
+        account: input.account,
+        venue_state: VenueState::TradingEnabled,
+        collateral,
+        open_orders,
+        trades,
+        heartbeat,
+        required_collateral_allowance_units: input.required_collateral_allowance_units,
+    })?;
+    report.live_network_enabled = true;
+    Ok(report)
+}
+
 pub fn readback_path_catalog() -> Vec<&'static str> {
     vec![
         BALANCE_ALLOWANCE_PATH,
@@ -417,6 +507,185 @@ pub fn readback_path_catalog() -> Vec<&'static str> {
         TRADES_PATH,
         SINGLE_ORDER_PATH_PREFIX,
     ]
+}
+
+struct ReadOnlyClobReadbackClient {
+    http: reqwest::Client,
+    host: String,
+    address: String,
+    credentials: L2ReadbackCredentials,
+}
+
+impl ReadOnlyClobReadbackClient {
+    fn new(
+        host: String,
+        address: String,
+        credentials: L2ReadbackCredentials,
+        timeout_ms: u64,
+    ) -> LiveBetaReadbackResult<Self> {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_millis(timeout_ms))
+            .build()
+            .map_err(|source| {
+                LiveBetaReadbackError::Network(format!(
+                    "failed to build LB4 read-only HTTP client: {source}"
+                ))
+            })?;
+        Ok(Self {
+            http,
+            host: host.trim_end_matches('/').to_string(),
+            address,
+            credentials,
+        })
+    }
+
+    async fn get_balance_allowance(
+        &self,
+        signature_type: SignatureType,
+    ) -> LiveBetaReadbackResult<BalanceAllowanceReadback> {
+        let body = self
+            .get_text(
+                BALANCE_ALLOWANCE_PATH,
+                &[
+                    ("asset_type", AssetType::Collateral.as_str().to_string()),
+                    (
+                        "signature_type",
+                        signature_type.as_balance_allowance_param().to_string(),
+                    ),
+                ],
+            )
+            .await?;
+        parse_balance_allowance(&body, AssetType::Collateral, None)
+    }
+
+    async fn get_user_orders(&self) -> LiveBetaReadbackResult<Vec<OpenOrderReadback>> {
+        let body = self
+            .get_text(
+                USER_ORDERS_PATH,
+                &[("next_cursor", INITIAL_CURSOR.to_string())],
+            )
+            .await?;
+        parse_user_orders_page(&body)
+    }
+
+    async fn get_trades(&self) -> LiveBetaReadbackResult<Vec<TradeReadback>> {
+        let body = self
+            .get_text(TRADES_PATH, &[("next_cursor", INITIAL_CURSOR.to_string())])
+            .await?;
+        parse_trades_page(&body)
+    }
+
+    async fn get_text(
+        &self,
+        path: &'static str,
+        query: &[(&'static str, String)],
+    ) -> LiveBetaReadbackResult<String> {
+        let timestamp = current_unix_timestamp()?;
+        let signature = build_l2_hmac_signature(
+            &self.credentials.api_secret,
+            timestamp,
+            HTTP_GET,
+            path,
+            None,
+        )?;
+        let response = self
+            .http
+            .get(format!("{}{}", self.host, path))
+            .query(query)
+            .header("POLY_ADDRESS", &self.address)
+            .header("POLY_SIGNATURE", signature)
+            .header("POLY_TIMESTAMP", timestamp.to_string())
+            .header("POLY_API_KEY", &self.credentials.api_key)
+            .header("POLY_PASSPHRASE", &self.credentials.api_passphrase)
+            .send()
+            .await
+            .map_err(|source| {
+                LiveBetaReadbackError::Network(format!(
+                    "LB4 authenticated read-only GET failed for {path}: {source}"
+                ))
+            })?;
+        let status = response.status();
+        let status_code = status.as_u16();
+        let body = response.text().await.map_err(|source| {
+            LiveBetaReadbackError::Network(format!(
+                "LB4 authenticated read-only response body failed for {path}: {source}"
+            ))
+        })?;
+        if status.is_success() {
+            if body.trim().is_empty() {
+                return Err(LiveBetaReadbackError::Validation(format!(
+                    "{path} returned an empty body"
+                )));
+            }
+            return Ok(body);
+        }
+
+        let endpoint_error =
+            parse_readback_error_response(status_code, &body).unwrap_or_else(|_| {
+                ReadbackEndpointError {
+                    status_code,
+                    code: format!("http_{status_code}"),
+                    message_redacted: true,
+                }
+            });
+        Err(LiveBetaReadbackError::Endpoint(endpoint_error))
+    }
+}
+
+pub fn build_l2_hmac_signature(
+    secret: &str,
+    timestamp: u64,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> LiveBetaReadbackResult<String> {
+    let decoded_secret = URL_SAFE.decode(secret).map_err(|_| {
+        LiveBetaReadbackError::Credential(
+            "l2 credential handle value is not valid base64".to_string(),
+        )
+    })?;
+    let mut message = format!("{timestamp}{method}{path}");
+    if let Some(body) = body.filter(|body| !body.is_empty()) {
+        message.push_str(body);
+    }
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &decoded_secret);
+    let tag = hmac::sign(&key, message.as_bytes());
+    Ok(URL_SAFE.encode(tag.as_ref()))
+}
+
+fn current_unix_timestamp() -> LiveBetaReadbackResult<u64> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| {
+            LiveBetaReadbackError::Validation("system clock is before Unix epoch".to_string())
+        })?
+        .as_secs())
+}
+
+fn validate_authenticated_readback_input(
+    input: &AuthenticatedReadbackInput,
+) -> LiveBetaReadbackResult<()> {
+    let mut errors = Vec::new();
+    if input.request_timeout_ms == 0 {
+        errors.push("request_timeout_ms must be positive".to_string());
+    }
+    if input.required_collateral_allowance_units == 0 {
+        errors.push("required_collateral_allowance_units must be positive".to_string());
+    }
+    if input.credentials.api_key.trim().is_empty() {
+        errors.push("clob_l2_access handle is missing".to_string());
+    }
+    if input.credentials.api_secret.trim().is_empty() {
+        errors.push("clob_l2_credential handle is missing".to_string());
+    }
+    if input.credentials.api_passphrase.trim().is_empty() {
+        errors.push("clob_l2_passphrase handle is missing".to_string());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(LiveBetaReadbackError::Validation(errors.join(", ")))
+    }
 }
 
 pub fn parse_balance_allowance(
@@ -429,8 +698,8 @@ pub fn parse_balance_allowance(
     Ok(BalanceAllowanceReadback {
         asset_type,
         token_id,
-        balance_units: parse_u64_units(&wire.balance, "balance")?,
-        allowance_units: parse_u64_units(&wire.allowance, "allowance")?,
+        balance_units: parse_u64_units_value(&wire.balance, "balance")?,
+        allowance_units: parse_allowance_units(&wire)?,
     })
 }
 
@@ -478,8 +747,11 @@ pub fn reserved_pusd_units(orders: &[OpenOrderReadback]) -> LiveBetaReadbackResu
 
 #[derive(Debug, Deserialize)]
 struct BalanceAllowanceWire {
-    balance: String,
-    allowance: String,
+    balance: serde_json::Value,
+    #[serde(default)]
+    allowance: Option<serde_json::Value>,
+    #[serde(default)]
+    allowances: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -581,6 +853,72 @@ fn parse_u64_units(value: &str, field: &'static str) -> LiveBetaReadbackResult<u
     })
 }
 
+fn parse_u64_units_value(
+    value: &serde_json::Value,
+    field: &'static str,
+) -> LiveBetaReadbackResult<u64> {
+    match value {
+        serde_json::Value::String(text) => parse_u64_units(text, field),
+        serde_json::Value::Number(number) => number.as_u64().ok_or_else(|| {
+            LiveBetaReadbackError::Validation(format!("{field} must be unsigned fixed-math units"))
+        }),
+        _ => Err(LiveBetaReadbackError::Validation(format!(
+            "{field} must be unsigned fixed-math units"
+        ))),
+    }
+}
+
+fn parse_allowance_units(wire: &BalanceAllowanceWire) -> LiveBetaReadbackResult<u64> {
+    if let Some(allowance) = &wire.allowance {
+        return parse_saturating_u64_units_value(allowance, "allowance");
+    }
+
+    let Some(allowances) = &wire.allowances else {
+        return Err(LiveBetaReadbackError::Validation(
+            "allowance or allowances must be present".to_string(),
+        ));
+    };
+    let serde_json::Value::Object(entries) = allowances else {
+        return Err(LiveBetaReadbackError::Validation(
+            "allowances must be an object of unsigned fixed-math unit values".to_string(),
+        ));
+    };
+    if entries.is_empty() {
+        return Err(LiveBetaReadbackError::Validation(
+            "allowances must not be empty".to_string(),
+        ));
+    }
+
+    entries
+        .values()
+        .map(|value| parse_saturating_u64_units_value(value, "allowance"))
+        .try_fold(u64::MAX, |lowest, units| {
+            units.map(|units| lowest.min(units))
+        })
+}
+
+fn parse_saturating_u64_units_value(
+    value: &serde_json::Value,
+    field: &'static str,
+) -> LiveBetaReadbackResult<u64> {
+    match value {
+        serde_json::Value::String(text) => parse_saturating_u64_units(text, field),
+        serde_json::Value::Number(number) => parse_saturating_u64_units(&number.to_string(), field),
+        _ => Err(LiveBetaReadbackError::Validation(format!(
+            "{field} must be unsigned fixed-math units"
+        ))),
+    }
+}
+
+fn parse_saturating_u64_units(value: &str, field: &'static str) -> LiveBetaReadbackResult<u64> {
+    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+        return Err(LiveBetaReadbackError::Validation(format!(
+            "{field} must be unsigned fixed-math units"
+        )));
+    }
+    Ok(value.parse::<u64>().unwrap_or(u64::MAX))
+}
+
 fn parse_decimal_to_fixed6(value: &str, field: &'static str) -> LiveBetaReadbackResult<u64> {
     let trimmed = value.trim();
     let (whole, fractional) = trimmed
@@ -674,6 +1012,9 @@ pub type LiveBetaReadbackResult<T> = Result<T, LiveBetaReadbackError>;
 pub enum LiveBetaReadbackError {
     Parse(serde_json::Error),
     Validation(String),
+    Credential(String),
+    Network(String),
+    Endpoint(ReadbackEndpointError),
 }
 
 impl Display for LiveBetaReadbackError {
@@ -683,6 +1024,18 @@ impl Display for LiveBetaReadbackError {
             Self::Validation(message) => {
                 write!(formatter, "LB4 readback validation failed: {message}")
             }
+            Self::Credential(message) => {
+                write!(
+                    formatter,
+                    "LB4 readback credential validation failed: {message}"
+                )
+            }
+            Self::Network(message) => write!(formatter, "LB4 readback network failed: {message}"),
+            Self::Endpoint(error) => write!(
+                formatter,
+                "LB4 readback endpoint returned status={} code={} message_redacted={}",
+                error.status_code, error.code, error.message_redacted
+            ),
         }
     }
 }
@@ -770,6 +1123,25 @@ mod tests {
 
         assert_eq!(report.status, "blocked");
         assert!(report.block_reasons.contains(&"allowance_below_required"));
+    }
+
+    #[test]
+    fn balance_preflight_blocks_low_available_collateral() {
+        let mut input = passing_input();
+        input.collateral.balance_units = 500_000;
+        input.collateral.allowance_units = 1_000_000;
+
+        let report = evaluate_readback_preflight(&input).expect("report builds");
+
+        assert_eq!(report.status, "blocked");
+        assert!(report.block_reasons.contains(&"balance_below_required"));
+    }
+
+    #[test]
+    fn balance_allowance_signature_type_params_match_official_v2_client() {
+        assert_eq!(SignatureType::Eoa.as_balance_allowance_param(), "0");
+        assert_eq!(SignatureType::PolyProxy.as_balance_allowance_param(), "1");
+        assert_eq!(SignatureType::GnosisSafe.as_balance_allowance_param(), "2");
     }
 
     #[test]
@@ -922,6 +1294,40 @@ mod tests {
     }
 
     #[test]
+    fn readback_parses_plural_allowances_map_fail_closed_to_lowest_allowance() {
+        let parsed = parse_balance_allowance(
+            r#"{
+                "balance":"25000000",
+                "allowances":{
+                    "0x1111111111111111111111111111111111111111":"3000000",
+                    "0x2222222222222222222222222222222222222222":"1000000",
+                    "0x3333333333333333333333333333333333333333":"115792089237316195423570985008687907853269984665640564039457584007913129639935"
+                }
+            }"#,
+            AssetType::Collateral,
+            None,
+        )
+        .expect("plural allowances parse");
+
+        assert_eq!(parsed.balance_units, 25_000_000);
+        assert_eq!(parsed.allowance_units, 1_000_000);
+    }
+
+    #[test]
+    fn readback_rejects_missing_allowance_fields() {
+        let parsed = parse_balance_allowance(
+            r#"{"balance":"25000000","allowances":{}}"#,
+            AssetType::Collateral,
+            None,
+        );
+
+        assert!(matches!(
+            parsed,
+            Err(LiveBetaReadbackError::Validation(message)) if message == "allowances must not be empty"
+        ));
+    }
+
+    #[test]
     fn readback_parses_confirmed_trade_with_transaction_hash() {
         let json = format!(
             r#"{{
@@ -992,6 +1398,20 @@ mod tests {
         assert!(parsed.message_redacted);
         assert!(!parsed.code.contains("api key"));
         assert!(!parsed.code.contains("operator"));
+    }
+
+    #[test]
+    fn l2_hmac_signature_matches_official_v2_client_fixture() {
+        let signature = build_l2_hmac_signature(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            1_000_000,
+            "test-sign",
+            "/orders",
+            Some(r#"{"hash": "0x123"}"#),
+        )
+        .expect("signature builds");
+
+        assert_eq!(signature, "ZwAdJKvoYRlEKDkNMwd5BuwNNtg93kNaR_oU2HrfVvc=");
     }
 
     #[test]

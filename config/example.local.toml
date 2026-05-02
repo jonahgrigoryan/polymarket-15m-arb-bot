@@ -17,6 +17,13 @@ clob_l2_access = "P15M_LIVE_BETA_CLOB_L2_ACCESS"
 clob_l2_credential = "P15M_LIVE_BETA_CLOB_L2_CREDENTIAL"
 clob_l2_passphrase = "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE"
 
+# LB4 readback (copy into config/local.toml). No private keys — only public addresses / signature model.
+[live_beta.readback_account]
+wallet_address = "0x1111111111111111111111111111111111111111"
+funder_address = "0x1111111111111111111111111111111111111111"
+signature_type = "eoa"
+required_collateral_allowance_units = 1_000_000
+
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
 

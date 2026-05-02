@@ -1,3 +1,4 @@
+use std::env;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -6,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use polymarket_15m_arb_bot::{
     compliance::{ComplianceClient, ComplianceError, GeoblockResponse},
-    config::AppConfig,
+    config::{AppConfig, LiveBetaSecretHandlesConfig},
     domain::{
         Asset, FeeParameters, Market, MarketLifecycleState, OrderBookLevel, OrderBookSnapshot,
         OutcomeToken, PaperOrderStatus, ReferencePrice, RiskHaltReason, Side,
@@ -17,7 +18,10 @@ use polymarket_15m_arb_bot::{
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
-    live_beta_readback::{self, ReadbackPrerequisites},
+    live_beta_readback::{
+        self, AccountPreflight, AuthenticatedReadbackInput, L2ReadbackCredentials,
+        ReadbackPrerequisites, SignatureType,
+    },
     live_beta_signing,
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
@@ -221,6 +225,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let geoblock_gate_status = if local_only {
                     println!("online_validation_status=skipped");
                     safety::GeoblockGateStatus::Unknown
+                } else if live_readback_preflight {
+                    safety::GeoblockGateStatus::from_blocked(
+                        run_geoblock_validation(&config).await?.blocked,
+                    )
                 } else {
                     safety::GeoblockGateStatus::from_blocked(
                         run_m2_online_validation(&config, &run_id).await?.blocked,
@@ -253,7 +261,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     run_lb3_signing_dry_run_validation(&config)?;
                 }
                 if live_readback_preflight {
-                    run_lb4_readback_preflight_validation(&config, geoblock_gate_status)?;
+                    run_lb4_readback_preflight_validation(
+                        &config,
+                        geoblock_gate_status,
+                        local_only,
+                    )
+                    .await?;
                 }
                 if feed_smoke {
                     run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
@@ -1715,17 +1728,7 @@ async fn run_m2_online_validation(
     config: &AppConfig,
     run_id: &str,
 ) -> Result<GeoblockResponse, Box<dyn std::error::Error>> {
-    let geoblock = compliance_client(config)?.check_geoblock().await?;
-    let masked_geoblock = geoblock.masked_for_logs();
-    println!("geoblock_blocked={}", masked_geoblock.blocked);
-    println!(
-        "geoblock_country={}",
-        masked_geoblock.country.as_deref().unwrap_or("unknown")
-    );
-    println!(
-        "geoblock_region={}",
-        masked_geoblock.region.as_deref().unwrap_or("unknown")
-    );
+    let geoblock = run_geoblock_validation(config).await?;
 
     let discovery = MarketDiscoveryClient::new(
         &config.polymarket.gamma_markets_url,
@@ -1804,6 +1807,23 @@ async fn run_m2_online_validation(
     Ok(geoblock)
 }
 
+async fn run_geoblock_validation(
+    config: &AppConfig,
+) -> Result<GeoblockResponse, Box<dyn std::error::Error>> {
+    let geoblock = compliance_client(config)?.check_geoblock().await?;
+    let masked_geoblock = geoblock.masked_for_logs();
+    println!("geoblock_blocked={}", masked_geoblock.blocked);
+    println!(
+        "geoblock_country={}",
+        masked_geoblock.country.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "geoblock_region={}",
+        masked_geoblock.region.as_deref().unwrap_or("unknown")
+    );
+    Ok(geoblock)
+}
+
 fn compliance_client(config: &AppConfig) -> Result<ComplianceClient, Box<dyn std::error::Error>> {
     Ok(ComplianceClient::new(
         &config.polymarket.geoblock_url,
@@ -1864,12 +1884,12 @@ fn run_lb3_signing_dry_run_validation(
     Ok(())
 }
 
-fn run_lb4_readback_preflight_validation(
+async fn run_lb4_readback_preflight_validation(
     config: &AppConfig,
     geoblock_gate_status: safety::GeoblockGateStatus,
+    local_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let prerequisites = lb4_readback_prerequisites(config, geoblock_gate_status);
-    let report = live_beta_readback::sample_readback_preflight(prerequisites)?;
     println!(
         "live_beta_readback_preflight_lb3_hold_released={}",
         prerequisites.lb3_hold_released
@@ -1882,6 +1902,37 @@ fn run_lb4_readback_preflight_validation(
         "live_beta_readback_preflight_deployment_geoblock_passed={}",
         prerequisites.deployment_geoblock_passed
     );
+    let report = if local_only || !lb4_prerequisites_ready(prerequisites) {
+        live_beta_readback::sample_readback_preflight(prerequisites)?
+    } else {
+        let secret_inventory = config.live_beta.secret_inventory();
+        run_lb2_secret_handle_validation(&secret_inventory)?;
+        let credentials = lb4_l2_credentials_from_env(&config.live_beta.secret_handles)?;
+        let account = lb4_account_preflight(config)?;
+        println!(
+            "live_beta_readback_preflight_wallet_address={}",
+            account.wallet_address
+        );
+        println!(
+            "live_beta_readback_preflight_funder_address={}",
+            account.funder_address
+        );
+        println!(
+            "live_beta_readback_preflight_signature_type={}",
+            account.signature_type.as_config_str()
+        );
+        live_beta_readback::authenticated_readback_preflight(AuthenticatedReadbackInput {
+            prerequisites,
+            account,
+            credentials,
+            required_collateral_allowance_units: config
+                .live_beta
+                .readback_account
+                .required_collateral_allowance_units,
+            request_timeout_ms: config.polymarket.request_timeout_ms,
+        })
+        .await?
+    };
     println!("live_beta_readback_preflight_status={}", report.status);
     println!(
         "live_beta_readback_preflight_live_network_enabled={}",
@@ -1928,6 +1979,43 @@ fn run_lb4_readback_preflight_validation(
     }
 
     Ok(())
+}
+
+fn lb4_prerequisites_ready(prerequisites: ReadbackPrerequisites) -> bool {
+    prerequisites.lb3_hold_released
+        && prerequisites.legal_access_approved
+        && prerequisites.deployment_geoblock_passed
+}
+
+fn lb4_account_preflight(
+    config: &AppConfig,
+) -> Result<AccountPreflight, Box<dyn std::error::Error>> {
+    let account = &config.live_beta.readback_account;
+    let Some(signature_type) = SignatureType::from_config(&account.signature_type) else {
+        return Err(
+            "LB4 readback account signature_type must be eoa, poly_proxy, or gnosis_safe".into(),
+        );
+    };
+    Ok(AccountPreflight {
+        clob_host: config.polymarket.clob_rest_url.clone(),
+        chain_id: 137,
+        wallet_address: account.wallet_address.clone(),
+        funder_address: account.funder_address.clone(),
+        signature_type,
+    })
+}
+
+fn lb4_l2_credentials_from_env(
+    handles: &LiveBetaSecretHandlesConfig,
+) -> Result<L2ReadbackCredentials, Box<dyn std::error::Error>> {
+    Ok(L2ReadbackCredentials {
+        api_key: env::var(&handles.clob_l2_access)
+            .map_err(|_| "LB4 clob_l2_access handle is not present")?,
+        api_secret: env::var(&handles.clob_l2_credential)
+            .map_err(|_| "LB4 clob_l2_credential handle is not present")?,
+        api_passphrase: env::var(&handles.clob_l2_passphrase)
+            .map_err(|_| "LB4 clob_l2_passphrase handle is not present")?,
+    })
 }
 
 fn lb4_readback_prerequisites(
