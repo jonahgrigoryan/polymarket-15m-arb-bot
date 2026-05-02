@@ -11,9 +11,12 @@ pub const CLOB_HOST: &str = "https://clob.polymarket.com";
 pub const BALANCE_ALLOWANCE_PATH: &str = "/balance-allowance";
 pub const USER_ORDERS_PATH: &str = "/data/orders";
 pub const TRADES_PATH: &str = "/trades";
+pub const SAMPLING_MARKETS_PATH: &str = "/sampling-markets";
 pub const SINGLE_ORDER_PATH_PREFIX: &str = "/order/";
 const HTTP_GET: &str = "GET";
 const INITIAL_CURSOR: &str = "MA==";
+const END_CURSOR: &str = "LTE=";
+const MAX_READBACK_PAGES: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadbackPrerequisites {
@@ -480,6 +483,7 @@ pub async fn authenticated_readback_preflight(
         .await?;
     let open_orders = client.get_user_orders().await?;
     let trades = client.get_trades().await?;
+    let venue_state = client.get_venue_state().await?;
     let heartbeat = if open_orders.is_empty() {
         HeartbeatReadiness::NotStartedNoOpenOrders
     } else {
@@ -489,7 +493,7 @@ pub async fn authenticated_readback_preflight(
     let mut report = evaluate_readback_preflight(&ReadbackPreflightInput {
         prerequisites: input.prerequisites,
         account: input.account,
-        venue_state: VenueState::TradingEnabled,
+        venue_state,
         collateral,
         open_orders,
         trades,
@@ -505,6 +509,7 @@ pub fn readback_path_catalog() -> Vec<&'static str> {
         BALANCE_ALLOWANCE_PATH,
         USER_ORDERS_PATH,
         TRADES_PATH,
+        SAMPLING_MARKETS_PATH,
         SINGLE_ORDER_PATH_PREFIX,
     ]
 }
@@ -559,20 +564,51 @@ impl ReadOnlyClobReadbackClient {
     }
 
     async fn get_user_orders(&self) -> LiveBetaReadbackResult<Vec<OpenOrderReadback>> {
-        let body = self
-            .get_text(
-                USER_ORDERS_PATH,
-                &[("next_cursor", INITIAL_CURSOR.to_string())],
-            )
-            .await?;
-        parse_user_orders_page(&body)
+        let mut cursor = INITIAL_CURSOR.to_string();
+        let mut orders = Vec::new();
+        for _ in 0..MAX_READBACK_PAGES {
+            let body = self
+                .get_text(USER_ORDERS_PATH, &[("next_cursor", cursor.clone())])
+                .await?;
+            let page = parse_user_orders_page_with_cursor(&body)?;
+            orders.extend(page.data);
+            let Some(next_cursor) = next_readback_cursor(&cursor, &page.next_cursor)? else {
+                return Ok(orders);
+            };
+            cursor = next_cursor;
+        }
+        Err(LiveBetaReadbackError::Validation(format!(
+            "{USER_ORDERS_PATH} pagination exceeded {MAX_READBACK_PAGES} pages"
+        )))
     }
 
     async fn get_trades(&self) -> LiveBetaReadbackResult<Vec<TradeReadback>> {
+        let mut cursor = INITIAL_CURSOR.to_string();
+        let mut trades = Vec::new();
+        for _ in 0..MAX_READBACK_PAGES {
+            let body = self
+                .get_text(TRADES_PATH, &[("next_cursor", cursor.clone())])
+                .await?;
+            let page = parse_trades_page_with_cursor(&body)?;
+            trades.extend(page.data);
+            let Some(next_cursor) = next_readback_cursor(&cursor, &page.next_cursor)? else {
+                return Ok(trades);
+            };
+            cursor = next_cursor;
+        }
+        Err(LiveBetaReadbackError::Validation(format!(
+            "{TRADES_PATH} pagination exceeded {MAX_READBACK_PAGES} pages"
+        )))
+    }
+
+    async fn get_venue_state(&self) -> LiveBetaReadbackResult<VenueState> {
         let body = self
-            .get_text(TRADES_PATH, &[("next_cursor", INITIAL_CURSOR.to_string())])
+            .get_text(
+                SAMPLING_MARKETS_PATH,
+                &[("next_cursor", INITIAL_CURSOR.to_string())],
+            )
             .await?;
-        parse_trades_page(&body)
+        parse_sampling_markets_venue_state(&body)
     }
 
     async fn get_text(
@@ -704,22 +740,53 @@ pub fn parse_balance_allowance(
 }
 
 pub fn parse_user_orders_page(json: &str) -> LiveBetaReadbackResult<Vec<OpenOrderReadback>> {
+    Ok(parse_user_orders_page_with_cursor(json)?.data)
+}
+
+fn parse_user_orders_page_with_cursor(
+    json: &str,
+) -> LiveBetaReadbackResult<ReadbackPage<OpenOrderReadback>> {
     let wire: OpenOrdersPageWire =
         serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
-    wire.data
+    let data = wire
+        .data
         .into_iter()
         .map(OpenOrderReadback::try_from)
-        .collect()
+        .collect::<LiveBetaReadbackResult<Vec<_>>>()?;
+    Ok(ReadbackPage {
+        data,
+        next_cursor: wire.next_cursor,
+    })
 }
 
 pub fn parse_trades_page(json: &str) -> LiveBetaReadbackResult<Vec<TradeReadback>> {
+    Ok(parse_trades_page_with_cursor(json)?.data)
+}
+
+fn parse_trades_page_with_cursor(
+    json: &str,
+) -> LiveBetaReadbackResult<ReadbackPage<TradeReadback>> {
     let wire: TradesPageWire = serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
-    wire.data.into_iter().map(TradeReadback::try_from).collect()
+    let data = wire
+        .data
+        .into_iter()
+        .map(TradeReadback::try_from)
+        .collect::<LiveBetaReadbackResult<Vec<_>>>()?;
+    Ok(ReadbackPage {
+        data,
+        next_cursor: wire.next_cursor,
+    })
 }
 
 pub fn parse_venue_state(json: &str) -> LiveBetaReadbackResult<VenueState> {
     let wire: VenueStateWire = serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
     Ok(VenueState::from_wire(&wire.state))
+}
+
+pub fn parse_sampling_markets_venue_state(json: &str) -> LiveBetaReadbackResult<VenueState> {
+    let wire: SamplingMarketsPageWire =
+        serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
+    derive_venue_state_from_sampling_markets(&wire.data)
 }
 
 pub fn parse_readback_error_response(
@@ -756,6 +823,7 @@ struct BalanceAllowanceWire {
 
 #[derive(Debug, Deserialize)]
 struct OpenOrdersPageWire {
+    next_cursor: String,
     data: Vec<OpenOrderWire>,
 }
 
@@ -803,7 +871,13 @@ impl TryFrom<OpenOrderWire> for OpenOrderReadback {
 
 #[derive(Debug, Deserialize)]
 struct TradesPageWire {
+    next_cursor: String,
     data: Vec<TradeWire>,
+}
+
+struct ReadbackPage<T> {
+    data: Vec<T>,
+    next_cursor: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -820,6 +894,20 @@ struct TradeWire {
 #[derive(Debug, Deserialize)]
 struct VenueStateWire {
     state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SamplingMarketsPageWire {
+    data: Vec<SamplingMarketWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SamplingMarketWire {
+    enable_order_book: bool,
+    active: bool,
+    closed: bool,
+    archived: bool,
+    accepting_orders: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -971,6 +1059,51 @@ fn is_valid_tx_hash(value: &str) -> bool {
         return false;
     };
     stripped.len() == 64 && stripped.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn next_readback_cursor(
+    current_cursor: &str,
+    next_cursor: &str,
+) -> LiveBetaReadbackResult<Option<String>> {
+    let trimmed = next_cursor.trim();
+    if trimmed.is_empty() || trimmed == END_CURSOR {
+        return Ok(None);
+    }
+    if trimmed == current_cursor {
+        return Err(LiveBetaReadbackError::Validation(
+            "readback pagination cursor did not advance".to_string(),
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn derive_venue_state_from_sampling_markets(
+    markets: &[SamplingMarketWire],
+) -> LiveBetaReadbackResult<VenueState> {
+    if markets.is_empty() {
+        return Ok(VenueState::Unknown);
+    }
+    if markets.iter().any(|market| {
+        market.enable_order_book && market.active && !market.closed && !market.archived
+    }) {
+        if markets.iter().any(|market| {
+            market.enable_order_book
+                && market.active
+                && !market.closed
+                && !market.archived
+                && market.accepting_orders
+        }) {
+            return Ok(VenueState::TradingEnabled);
+        }
+        return Ok(VenueState::CancelOnly);
+    }
+    if markets
+        .iter()
+        .all(|market| market.closed || market.archived)
+    {
+        return Ok(VenueState::ClosedOnly);
+    }
+    Ok(VenueState::TradingDisabled)
 }
 
 fn classify_readback_error_code(
@@ -1180,6 +1313,7 @@ mod tests {
     fn readback_parses_open_orders_and_blocks_existing_orders() {
         let json = format!(
             r#"{{
+                "next_cursor": "",
                 "data": [{{
                     "id": "order-1",
                     "status": "ORDER_STATUS_LIVE",
@@ -1213,6 +1347,7 @@ mod tests {
     fn readback_parses_open_order_sizes_as_fixed_units() {
         let orders = parse_user_orders_page(
             r#"{
+                "next_cursor": "",
                 "data": [{
                     "id": "order-1",
                     "status": "ORDER_STATUS_LIVE",
@@ -1331,6 +1466,7 @@ mod tests {
     fn readback_parses_confirmed_trade_with_transaction_hash() {
         let json = format!(
             r#"{{
+                "next_cursor": "",
                 "data": [{{
                     "id": "trade-confirmed",
                     "market": "condition-1",
@@ -1349,6 +1485,133 @@ mod tests {
             .transaction_hash
             .as_deref()
             .is_some_and(is_valid_tx_hash));
+    }
+
+    #[test]
+    fn readback_order_pages_preserve_next_cursor_for_complete_fetches() {
+        let page = parse_user_orders_page_with_cursor(
+            r#"{
+                "next_cursor": "MTAw",
+                "data": [{
+                    "id": "order-1",
+                    "status": "ORDER_STATUS_LIVE",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "side": "BUY",
+                    "original_size": "1000000",
+                    "size_matched": "0",
+                    "price": "0.50",
+                    "outcome": "YES",
+                    "expiration": "1777434180",
+                    "order_type": "GTD",
+                    "associate_trades": [],
+                    "created_at": 1777434000
+                }]
+            }"#,
+        )
+        .expect("orders page parses");
+
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(
+            next_readback_cursor(INITIAL_CURSOR, &page.next_cursor).expect("cursor advances"),
+            Some("MTAw".to_string())
+        );
+        assert_eq!(
+            next_readback_cursor("MTAw", "").expect("empty cursor ends pagination"),
+            None
+        );
+        assert_eq!(
+            next_readback_cursor("MTAw", END_CURSOR).expect("end cursor ends pagination"),
+            None
+        );
+    }
+
+    #[test]
+    fn readback_trade_pagination_can_surface_later_page_blocker() {
+        let first_page = parse_trades_page_with_cursor(&format!(
+            r#"{{
+                    "next_cursor": "MTAw",
+                    "data": [{{
+                        "id": "trade-confirmed",
+                        "market": "condition-1",
+                        "asset_id": "token-1",
+                        "status": "TRADE_STATUS_CONFIRMED",
+                        "transaction_hash": "{}",
+                        "maker_address": "0x1111111111111111111111111111111111111111"
+                    }}]
+                }}"#,
+            valid_tx_hash()
+        ))
+        .expect("first trades page parses");
+        let second_page = parse_trades_page_with_cursor(&format!(
+            r#"{{
+                    "next_cursor": "",
+                    "data": [{{
+                        "id": "trade-failed",
+                        "market": "condition-1",
+                        "asset_id": "token-1",
+                        "status": "TRADE_STATUS_FAILED",
+                        "transaction_hash": "{}",
+                        "maker_address": "0x1111111111111111111111111111111111111111"
+                    }}]
+                }}"#,
+            valid_tx_hash()
+        ))
+        .expect("second trades page parses");
+        let mut input = passing_input();
+        input.trades = first_page
+            .data
+            .into_iter()
+            .chain(second_page.data)
+            .collect();
+
+        let report = evaluate_readback_preflight(&input).expect("report builds");
+
+        assert_eq!(report.trade_count, 2);
+        assert!(report.block_reasons.contains(&"failed_trade_status"));
+    }
+
+    #[test]
+    fn sampling_markets_derive_trading_enabled_from_accepting_orderbook_market() {
+        let state = parse_sampling_markets_venue_state(
+            r#"{
+                "data": [{
+                    "enable_order_book": true,
+                    "active": true,
+                    "closed": false,
+                    "archived": false,
+                    "accepting_orders": true
+                }]
+            }"#,
+        )
+        .expect("sampling markets parse");
+
+        assert_eq!(state, VenueState::TradingEnabled);
+    }
+
+    #[test]
+    fn sampling_markets_fail_closed_when_no_market_accepts_orders() {
+        let state = parse_sampling_markets_venue_state(
+            r#"{
+                "data": [{
+                    "enable_order_book": true,
+                    "active": true,
+                    "closed": false,
+                    "archived": false,
+                    "accepting_orders": false
+                }]
+            }"#,
+        )
+        .expect("sampling markets parse");
+        let mut input = passing_input();
+        input.venue_state = state;
+
+        let report = evaluate_readback_preflight(&input).expect("report builds");
+
+        assert_eq!(state, VenueState::CancelOnly);
+        assert_eq!(report.status, "blocked");
+        assert!(report.block_reasons.contains(&"venue_state_not_open"));
     }
 
     #[test]
