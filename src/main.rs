@@ -18,6 +18,7 @@ use polymarket_15m_arb_bot::{
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
+    live_beta_cancel,
     live_beta_readback::{
         self, AccountPreflight, AuthenticatedReadbackInput, L2ReadbackCredentials,
         ReadbackPrerequisites, SignatureType,
@@ -108,6 +109,11 @@ enum Commands {
             help = "Evaluate the LB4 readback/account preflight gate without live network calls"
         )]
         live_readback_preflight: bool,
+        #[arg(
+            long,
+            help = "Evaluate the LB5 single-order cancel readiness gate without live canceling"
+        )]
+        live_cancel_readiness: bool,
         #[arg(long, help = "Override feed smoke message limit")]
         feed_message_limit: Option<usize>,
     },
@@ -194,6 +200,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 validate_secret_handles,
                 live_beta_signing_dry_run,
                 live_readback_preflight,
+                live_cancel_readiness,
                 feed_message_limit,
             } => {
                 println!("validation_status=ok");
@@ -267,6 +274,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         local_only,
                     )
                     .await?;
+                }
+                if live_cancel_readiness {
+                    run_lb5_cancel_readiness_validation(&config)?;
                 }
                 if feed_smoke {
                     run_m3_feed_smoke(&config, &run_id, feed_message_limit).await?;
@@ -1880,6 +1890,48 @@ fn run_lb3_signing_dry_run_validation(
     println!(
         "live_beta_signing_dry_run_artifact={}",
         serde_json::to_string(&artifact)?
+    );
+    Ok(())
+}
+
+fn run_lb5_cancel_readiness_validation(
+    _config: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = live_beta_cancel::evaluate_cancel_readiness(
+        &live_beta_cancel::CancelReadinessInput::lb5_default(safety::LIVE_ORDER_PLACEMENT_ENABLED),
+    );
+    println!("live_beta_cancel_readiness_status={}", report.status);
+    println!(
+        "live_beta_cancel_readiness_live_network_enabled={}",
+        report.live_cancel_network_enabled
+    );
+    println!(
+        "live_beta_cancel_readiness_cancel_all_enabled={}",
+        report.cancel_all_enabled
+    );
+    println!(
+        "live_beta_cancel_readiness_request_constructable={}",
+        report.cancel_request_constructable
+    );
+    println!(
+        "live_beta_cancel_readiness_single_cancel_method={}",
+        report.single_cancel_method
+    );
+    println!(
+        "live_beta_cancel_readiness_single_cancel_path={}",
+        report.single_cancel_path
+    );
+    println!(
+        "live_beta_cancel_readiness_single_order_readback_path_prefix={}",
+        report.single_order_readback_path_prefix
+    );
+    println!(
+        "live_beta_cancel_readiness_block_reasons={}",
+        report.block_reasons.join(",")
+    );
+    println!(
+        "live_beta_cancel_readiness_report={}",
+        serde_json::to_string(&report)?
     );
     Ok(())
 }
