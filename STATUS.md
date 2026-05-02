@@ -1,6 +1,6 @@
 # Project Status Handoff
 
-Last updated: 2026-05-01
+Last updated: 2026-05-02
 
 ## Purpose
 
@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb4-approved-host-readback`
-- Base commit: `a4a54d2d1a3876435be73cd7935f80d1d0928549` (merged PR #19 on `main`).
-- Worktree status: scoped LB4 approved-host read-only CLOB readback code, status, and verification updates are present. No live order placement, order post, cancel, cancel-all, wallet key material, API-key value, secret value, geoblock bypass, strategy-to-live routing, or strategy/risk/freshness change was added.
+- Branch: `live-beta/lb5-cancel-readiness-rollback`
+- Base commit: `22d58dfbbf2e` (merged PR #20 on `main`).
+- Worktree status: scoped LB5 cancel-readiness/runbook source, runbook, status, and verification updates are present. No live order placement, live cancel proof, cancel-all, wallet key material, API-key value, secret value, geoblock bypass, strategy-to-live routing, or strategy/risk/freshness change was added.
 
 ## Milestones
 
 - Last completed milestone: LB4 - Authenticated Readback And Account Preflight is PASS for the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB4 - Authenticated Readback And Account Preflight. The LB3 hold release was explicitly approved by the operator on 2026-04-30 for branch `live-beta/lb4-readback-account-preflight`; the approved-host readback attempt was explicitly approved on 2026-04-30 for this Mexico host/session only.
+- Active milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum. The operator explicitly authorized starting LB5 only on 2026-05-02 after PR #20 merged to `main`; this authorization does not approve LB6, order posting, live cancel proof, cancel-all, autonomous live trading, or strategy-to-live routing.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: LB4 is PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. LB5/LB6 must not start until the human explicitly authorizes the next phase.
+- Next exit gate: LB5 exits only when single-order cancel readiness is tested behind disabled gates, rollback/runbook minimums exist, no live cancel proof occurred, and the mandatory hold before LB6 is preserved.
 
 ## M3 Scope Lock
 
@@ -318,7 +318,23 @@ PASS for approved-host authenticated readback/account preflight.
 - LB4 approved-host continuation checks passed: `cargo fmt --check`, `cargo test --offline readback`, `cargo test --offline balance`, `cargo test --offline allowance`, `cargo test --offline heartbeat`, `cargo test --offline secret`, `cargo test --offline redaction`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo test --offline` (169 lib tests, 6 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, trailing-whitespace scan, required safety/no-secret scans, and `.env` guard. The plural `allowances` parser correction passed `cargo fmt --check`, `cargo test --offline readback`, `cargo test --offline balance`, and `cargo test --offline allowance`. The PR #20 review fixes passed `cargo test --offline readback` with 28 lib tests and 1 main test covering venue-state readback derivation, paginated readback blockers, required trade `maker_address`, and paginated sampling-market venue classification; `cargo test --offline lb4_account_preflight_normalizes_clob_host_before_gate_evaluation`; then `cargo test --offline` with 175 lib tests and 7 main tests.
 - Final LB4 PASS closeout checks passed after the approved-host success evidence: `git diff --check`, `cargo fmt --check`, `cargo test --offline` (175 lib tests, 7 main tests), `cargo clippy --offline -- -D warnings`, required safety/no-secret scans excluding ignored `.env` and `config/local.toml`, and gitignore guards for `.env` and `config/local.toml`.
 - LB4 safety result: no live order placement, order post, live cancel, cancel-all, wallet/private-key material, API-key value, secret value, authenticated order write client, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
-- Mandatory hold: do not start LB5 or LB6 until the human explicitly authorizes the next phase.
+- Historical hold: LB5 did not start until the operator explicitly authorized LB5 only on 2026-05-02 after PR #20 merged.
+
+## LB5 Verification Status
+
+PASS for offline cancel readiness and rollback/runbook minimum only.
+- Evidence file: `verification/2026-05-02-live-beta-lb5-cancel-readiness-rollback.md`.
+- Runbook: `runbooks/live-beta-lb5-rollback-runbook.md`.
+- Operator approval to start LB5 only was recorded on 2026-05-02. The same approval explicitly did not authorize LB6, live order posting, live cancel proof, cancel-all, autonomous live trading, or strategy-to-live routing.
+- Official docs rechecked for LB5 scope: CLOB host `https://clob.polymarket.com`; single-order cancel is authenticated `DELETE /order` with body field `orderID`; response includes `canceled` and `not_canceled`; multiple, all, and market-wide cancels are separate endpoints and remain out of scope; heartbeat may auto-cancel open orders if not maintained; rate limits must fail closed.
+- LB5 added offline single-order cancel readiness only. `LIVE_CANCEL_NETWORK_ENABLED=false`, `cancel_all_enabled=false`, and `LIVE_ORDER_PLACEMENT_ENABLED=false` remain true in validation evidence.
+- Local readiness command: `cargo run --offline -- --config config/default.toml validate --local-only --live-cancel-readiness`.
+- Local readiness output confirmed `live_beta_cancel_readiness_status=blocked`, `live_beta_cancel_readiness_live_network_enabled=false`, `live_beta_cancel_readiness_cancel_all_enabled=false`, `live_beta_cancel_readiness_request_constructable=false`, `live_beta_cancel_readiness_single_cancel_method=DELETE`, `live_beta_cancel_readiness_single_cancel_path=/order`, and block reasons `live_order_placement_disabled,lb4_preflight_not_recorded,lb6_hold_not_released,human_canary_approval_missing,human_cancel_approval_missing,approved_canary_order_missing,single_open_order_not_verified,heartbeat_not_ready`.
+- Cancel fixture tests cover default blocked readiness before LB6 canary, request construction requiring LB6 gates plus an approved canary order, success, partial-fill ambiguity, already filled, already canceled, missing order, auth error, rate limit, unknown response, no cancel-all path, no network dispatch/secret-loading surface, and runbook minimums.
+- Rollback minimum includes kill switch command, service stop command, open-order readback procedure, cancel plan, heartbeat failure handling, incident note template, artifact checklist, and LB6 hold.
+- LB5 checks passed: `cargo test --offline cancel` (12 lib tests), `cargo test --offline rollback` (1 lib test), `cargo test --offline runbook` (1 lib test), `cargo test --offline readback` (28 lib tests, 1 main test), `cargo run --offline -- --config config/default.toml validate --local-only`, LB5 cancel-readiness validate, `cargo fmt --check`, `cargo test --offline` (186 lib tests, 7 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, trailing-whitespace scan, required safety/no-secret scans, and ignored-local guards for `.env` and `config/local.toml`.
+- LB5 safety result: no live order placement, order post, live cancel proof, cancel-all, wallet/private-key material, API-key value, secret value, authenticated order write client, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
+- Mandatory hold: stop after LB5. Do not start LB6 until the human/operator explicitly approves the exact one-order canary plan.
 
 ## Blockers And Risks
 
@@ -329,6 +345,7 @@ PASS for approved-host authenticated readback/account preflight.
 - CLOB V2 post-cutover endpoint was rechecked on 2026-04-28; use `https://clob.polymarket.com` for CLOB REST unless official docs/live read-only checks change again.
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
+- LB5 is offline readiness only. It does not prove live cancellation because live cancel proof is intentionally deferred to LB6 after one approved tiny canary order exists.
 
 ## Next Concrete Action
 
@@ -336,11 +353,12 @@ PASS for approved-host authenticated readback/account preflight.
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb4-approved-host-readback`, based on merged PR #19 commit `a4a54d2d1a3876435be73cd7935f80d1d0928549`.
+- Current branch is `live-beta/lb5-cancel-readiness-rollback`, based on merged PR #20 commit `22d58dfbbf2e`.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
-- Next concrete action is to finish LB4 branch verification/PR closeout. Do not start LB5 or LB6 until the human explicitly authorizes the next phase.
-- Mandatory hold: LB5/LB6 remain blocked pending explicit human authorization.
+- LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
+- Next concrete action is to review and merge the LB5 readiness PR after branch push/PR creation. Do not start LB6 until the human explicitly authorizes the exact one-order canary plan.
+- Mandatory hold: LB6 remains blocked pending explicit human/operator authorization.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
