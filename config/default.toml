@@ -13,6 +13,7 @@ backend = "env"
 clob_l2_access = "P15M_LIVE_BETA_CLOB_L2_ACCESS"
 clob_l2_credential = "P15M_LIVE_BETA_CLOB_L2_CREDENTIAL"
 clob_l2_passphrase = "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE"
+canary_private_key = "P15M_LIVE_BETA_CANARY_PRIVATE_KEY"
 
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
