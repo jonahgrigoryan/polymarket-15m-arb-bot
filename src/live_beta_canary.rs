@@ -12,8 +12,14 @@ use crate::live_beta_readback::SignatureType;
 
 pub const MODULE: &str = "live_beta_canary";
 pub const LB6_ONE_ORDER_CANARY_SUBMISSION_ENABLED: bool = true;
+pub const LB6_PREAUTHORIZED_CANARY_ENVELOPE_ENABLED: bool = true;
 pub const MAX_LB6_CANARY_NOTIONAL: f64 = 1.0;
 pub const MIN_GTD_SECURITY_BUFFER_SECS: u64 = 60;
+pub const LB6_PREAUTHORIZED_MARKET_INTERVAL_SECS: u64 = 15 * 60;
+pub const LB6_PREAUTHORIZED_PRICE: f64 = 0.01;
+pub const LB6_PREAUTHORIZED_SIZE: f64 = 5.0;
+pub const LB6_PREAUTHORIZED_NOTIONAL: f64 = 0.05;
+pub const LB6_PREAUTHORIZED_TICK_SIZE: f64 = 0.01;
 pub const OFFICIAL_SIGNING_CLIENT: &str = "polymarket_client_sdk_v2";
 pub const OFFICIAL_SIGNING_CLIENT_VERSION: &str = "0.6.0-canary.1";
 
@@ -21,6 +27,7 @@ pub const OFFICIAL_SIGNING_CLIENT_VERSION: &str = "0.6.0-canary.1";
 pub enum CanaryMode {
     DryRun,
     FinalGated,
+    PreauthorizedEnvelope,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +68,14 @@ pub struct CanaryApprovalContext {
     pub heartbeat: String,
     pub cancel_plan: String,
     pub rollback_command: String,
+    pub preauthorized_envelope_binding: Option<PreauthorizedEnvelopeBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreauthorizedEnvelopeBinding {
+    pub market_slug: String,
+    pub condition_id: String,
+    pub up_token_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -122,7 +137,8 @@ pub struct CanaryReadinessReport {
 
 impl CanaryReadinessReport {
     pub fn ready_for_final_submission(&self) -> bool {
-        self.mode == "final_gated" && self.block_reasons.is_empty()
+        matches!(self.mode, "final_gated" | "preauthorized_envelope")
+            && self.block_reasons.is_empty()
     }
 }
 
@@ -237,6 +253,7 @@ pub fn evaluate_canary_readiness(
     let canonical_hash = approval_hash(&canonical_text);
     let mut block_reasons = validate_plan(mode, plan, approval);
     validate_context(context, &mut block_reasons);
+    validate_plan_context(plan, context, &mut block_reasons);
 
     if mode == CanaryMode::FinalGated {
         match approval.approval_text.as_deref() {
@@ -250,6 +267,12 @@ pub fn evaluate_canary_readiness(
             Some(_) => block_reasons.push("approval_hash_mismatch"),
             None => block_reasons.push("approval_hash_missing"),
         }
+    }
+    if mode == CanaryMode::PreauthorizedEnvelope && !LB6_PREAUTHORIZED_CANARY_ENVELOPE_ENABLED {
+        block_reasons.push("preauthorized_envelope_disabled");
+    }
+    if mode == CanaryMode::PreauthorizedEnvelope {
+        validate_preauthorized_envelope_binding(plan, context, &mut block_reasons);
     }
 
     if !checks.canary_submission_enabled {
@@ -299,6 +322,7 @@ pub fn evaluate_canary_readiness(
         mode: match mode {
             CanaryMode::DryRun => "dry_run",
             CanaryMode::FinalGated => "final_gated",
+            CanaryMode::PreauthorizedEnvelope => "preauthorized_envelope",
         },
         block_reasons,
         approval_sha256: canonical_hash,
@@ -511,6 +535,9 @@ fn validate_plan<'a>(
     if plan.market_end_unix == 0 || plan.gtd_expiry_unix >= plan.market_end_unix {
         block_reasons.push("gtd_expiry_not_before_market_end");
     }
+    if mode == CanaryMode::PreauthorizedEnvelope {
+        validate_preauthorized_envelope(plan, approval.now_unix, &mut block_reasons);
+    }
     if mode == CanaryMode::FinalGated {
         match approval.approval_expires_at_unix {
             Some(expires_at) if expires_at > approval.now_unix => {}
@@ -541,6 +568,9 @@ fn validate_context(context: &CanaryApprovalContext, block_reasons: &mut Vec<&st
     if context.signature_type.trim().is_empty() {
         block_reasons.push("signature_type_missing");
     }
+    if context.reserved_pusd_units != 0 {
+        block_reasons.push("reserved_pusd_nonzero");
+    }
     if context.book_age_ms > context.max_book_age_ms {
         block_reasons.push("book_stale");
     }
@@ -555,6 +585,91 @@ fn validate_context(context: &CanaryApprovalContext, block_reasons: &mut Vec<&st
     }
     if context.rollback_command.trim().is_empty() {
         block_reasons.push("rollback_missing");
+    }
+}
+
+fn validate_plan_context(
+    plan: &CanaryOrderPlan,
+    context: &CanaryApprovalContext,
+    block_reasons: &mut Vec<&'static str>,
+) {
+    let required_pusd_units = (plan.notional * 1_000_000.0).ceil() as u64;
+    if context.available_pusd_units < required_pusd_units {
+        block_reasons.push("available_pusd_below_canary_notional");
+    }
+}
+
+fn validate_preauthorized_envelope(
+    plan: &CanaryOrderPlan,
+    now_unix: u64,
+    block_reasons: &mut Vec<&'static str>,
+) {
+    let Some(market_start_unix) = eth_15m_market_start_unix(&plan.market_slug) else {
+        block_reasons.push("preauthorized_envelope_market_not_eth_15m");
+        return;
+    };
+    if plan.market_end_unix != market_start_unix + LB6_PREAUTHORIZED_MARKET_INTERVAL_SECS {
+        block_reasons.push("preauthorized_envelope_market_end_mismatch");
+    }
+    if now_unix < market_start_unix || now_unix >= plan.market_end_unix {
+        block_reasons.push("preauthorized_envelope_market_not_current");
+    }
+    if plan.gtd_expiry_unix
+        > plan
+            .market_end_unix
+            .saturating_sub(MIN_GTD_SECURITY_BUFFER_SECS)
+    {
+        block_reasons.push("preauthorized_envelope_gtd_too_close_to_market_end");
+    }
+    if !plan.outcome.eq_ignore_ascii_case("Up") {
+        block_reasons.push("preauthorized_envelope_outcome_not_up");
+    }
+    if plan.side != Side::Buy {
+        block_reasons.push("preauthorized_envelope_side_not_buy");
+    }
+    if !float_eq(plan.price, LB6_PREAUTHORIZED_PRICE) {
+        block_reasons.push("preauthorized_envelope_price_mismatch");
+    }
+    if !float_eq(plan.size, LB6_PREAUTHORIZED_SIZE) {
+        block_reasons.push("preauthorized_envelope_size_mismatch");
+    }
+    if !float_eq(plan.notional, LB6_PREAUTHORIZED_NOTIONAL) {
+        block_reasons.push("preauthorized_envelope_notional_mismatch");
+    }
+    if !float_eq(plan.tick_size, LB6_PREAUTHORIZED_TICK_SIZE) {
+        block_reasons.push("preauthorized_envelope_tick_size_mismatch");
+    }
+}
+
+fn validate_preauthorized_envelope_binding(
+    plan: &CanaryOrderPlan,
+    context: &CanaryApprovalContext,
+    block_reasons: &mut Vec<&'static str>,
+) {
+    let Some(binding) = context.preauthorized_envelope_binding.as_ref() else {
+        block_reasons.push("preauthorized_envelope_binding_missing");
+        return;
+    };
+    if binding.market_slug != plan.market_slug {
+        block_reasons.push("preauthorized_envelope_binding_slug_mismatch");
+    }
+    if !binding
+        .condition_id
+        .eq_ignore_ascii_case(&plan.condition_id)
+    {
+        block_reasons.push("preauthorized_envelope_condition_id_mismatch");
+    }
+    if binding.up_token_id.trim() != plan.token_id.trim() {
+        block_reasons.push("preauthorized_envelope_up_token_id_mismatch");
+    }
+}
+
+fn eth_15m_market_start_unix(slug: &str) -> Option<u64> {
+    let timestamp = slug.strip_prefix("eth-updown-15m-")?.parse::<u64>().ok()?;
+    if timestamp % LB6_PREAUTHORIZED_MARKET_INTERVAL_SECS == 0 {
+        Some(timestamp)
+    } else {
+        None
     }
 }
 
@@ -686,6 +801,10 @@ fn tick_aligned(price: f64, tick_size: f64) -> bool {
     }
     let ticks = price / tick_size;
     (ticks - ticks.round()).abs() < 1e-9
+}
+
+fn float_eq(lhs: f64, rhs: f64) -> bool {
+    (lhs - rhs).abs() < 1e-9
 }
 
 fn side_label(side: Side) -> &'static str {
@@ -832,6 +951,192 @@ mod tests {
     }
 
     #[test]
+    fn canary_accepts_preauthorized_envelope_without_chat_prompt() {
+        let plan = valid_plan();
+        let context = valid_context();
+        let report = evaluate_canary_readiness(
+            CanaryMode::PreauthorizedEnvelope,
+            &plan,
+            &context,
+            &CanaryApprovalGuard {
+                approval_text: None,
+                expected_approval_sha256: None,
+                approval_expires_at_unix: None,
+                now_unix: 1_777_755_700,
+            },
+            &passing_checks(),
+        );
+
+        assert_eq!(report.status, "ready_for_one_order_canary");
+        assert_eq!(report.mode, "preauthorized_envelope");
+        assert!(report.ready_for_final_submission());
+        assert!(report.canonical_approval_text.contains("Outcome: Up"));
+        assert!(report.canonical_approval_text.contains("Price: 0.01"));
+        assert!(report.canonical_approval_text.contains("Size: 5"));
+    }
+
+    #[test]
+    fn canary_preauthorized_envelope_stays_inside_fixed_order_shape() {
+        for (mut plan, expected_reason) in [
+            {
+                let mut plan = valid_plan();
+                plan.market_slug = "btc-updown-15m-1777755600".to_string();
+                (plan, "preauthorized_envelope_market_not_eth_15m")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.market_end_unix += 60;
+                (plan, "preauthorized_envelope_market_end_mismatch")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.outcome = "Down".to_string();
+                (plan, "preauthorized_envelope_outcome_not_up")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.side = Side::Sell;
+                (plan, "preauthorized_envelope_side_not_buy")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.price = 0.02;
+                (plan, "preauthorized_envelope_price_mismatch")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.size = 10.0;
+                (plan, "preauthorized_envelope_size_mismatch")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.notional = 0.10;
+                (plan, "preauthorized_envelope_notional_mismatch")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.tick_size = 0.001;
+                (plan, "preauthorized_envelope_tick_size_mismatch")
+            },
+            {
+                let mut plan = valid_plan();
+                plan.gtd_expiry_unix = plan.market_end_unix - 30;
+                (plan, "preauthorized_envelope_gtd_too_close_to_market_end")
+            },
+        ] {
+            plan.best_ask = plan.best_ask.max(plan.price + plan.tick_size);
+            let report = report_for_plan_and_mode(
+                CanaryMode::PreauthorizedEnvelope,
+                plan,
+                CanaryApprovalGuard {
+                    approval_text: None,
+                    expected_approval_sha256: None,
+                    approval_expires_at_unix: None,
+                    now_unix: 1_777_755_700,
+                },
+            );
+
+            assert!(
+                report.block_reasons.contains(&expected_reason),
+                "expected {expected_reason}, got {:?}",
+                report.block_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn canary_preauthorized_envelope_requires_current_market_window() {
+        let report = report_for_plan_and_mode(
+            CanaryMode::PreauthorizedEnvelope,
+            valid_plan(),
+            CanaryApprovalGuard {
+                approval_text: None,
+                expected_approval_sha256: None,
+                approval_expires_at_unix: None,
+                now_unix: 1_777_756_500,
+            },
+        );
+
+        assert!(report
+            .block_reasons
+            .contains(&"preauthorized_envelope_market_not_current"));
+    }
+
+    #[test]
+    fn canary_preauthorized_envelope_requires_fresh_market_binding() {
+        let mut context = valid_context();
+        context.preauthorized_envelope_binding = None;
+        let plan = valid_plan();
+        let report = evaluate_canary_readiness(
+            CanaryMode::PreauthorizedEnvelope,
+            &plan,
+            &context,
+            &CanaryApprovalGuard {
+                approval_text: None,
+                expected_approval_sha256: None,
+                approval_expires_at_unix: None,
+                now_unix: 1_777_755_700,
+            },
+            &passing_checks(),
+        );
+
+        assert!(report
+            .block_reasons
+            .contains(&"preauthorized_envelope_binding_missing"));
+    }
+
+    #[test]
+    fn canary_preauthorized_envelope_rejects_mismatched_binding() {
+        for (binding, expected_reason) in [
+            (
+                PreauthorizedEnvelopeBinding {
+                    market_slug: "eth-updown-15m-1777756500".to_string(),
+                    ..valid_preauthorized_binding()
+                },
+                "preauthorized_envelope_binding_slug_mismatch",
+            ),
+            (
+                PreauthorizedEnvelopeBinding {
+                    condition_id:
+                        "0x1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_string(),
+                    ..valid_preauthorized_binding()
+                },
+                "preauthorized_envelope_condition_id_mismatch",
+            ),
+            (
+                PreauthorizedEnvelopeBinding {
+                    up_token_id: "1".to_string(),
+                    ..valid_preauthorized_binding()
+                },
+                "preauthorized_envelope_up_token_id_mismatch",
+            ),
+        ] {
+            let mut context = valid_context();
+            context.preauthorized_envelope_binding = Some(binding);
+            let plan = valid_plan();
+            let report = evaluate_canary_readiness(
+                CanaryMode::PreauthorizedEnvelope,
+                &plan,
+                &context,
+                &CanaryApprovalGuard {
+                    approval_text: None,
+                    expected_approval_sha256: None,
+                    approval_expires_at_unix: None,
+                    now_unix: 1_777_755_700,
+                },
+                &passing_checks(),
+            );
+
+            assert!(
+                report.block_reasons.contains(&expected_reason),
+                "expected {expected_reason}, got {:?}",
+                report.block_reasons
+            );
+        }
+    }
+
+    #[test]
     fn canary_fails_closed_when_secret_handles_are_missing() {
         let report = report_with_checks(CanaryRuntimeChecks {
             canary_secret_handles_present: false,
@@ -872,6 +1177,33 @@ mod tests {
             .block_reasons
             .contains(&"lb4_account_preflight_not_passed"));
         assert!(report.block_reasons.contains(&"open_orders_nonzero"));
+    }
+
+    #[test]
+    fn canary_fails_closed_when_balance_or_reserved_state_is_unsafe() {
+        let plan = valid_plan();
+        let mut context = valid_context();
+        context.available_pusd_units = 49_999;
+        context.reserved_pusd_units = 1;
+        let approval_text = canonical_approval_text(&plan, &context);
+        let expected_approval_sha256 = approval_hash(&approval_text);
+        let report = evaluate_canary_readiness(
+            CanaryMode::FinalGated,
+            &plan,
+            &context,
+            &CanaryApprovalGuard {
+                approval_text: Some(approval_text),
+                expected_approval_sha256: Some(expected_approval_sha256),
+                approval_expires_at_unix: Some(1_777_756_000),
+                now_unix: 1_777_755_000,
+            },
+            &passing_checks(),
+        );
+
+        assert!(report
+            .block_reasons
+            .contains(&"available_pusd_below_canary_notional"));
+        assert!(report.block_reasons.contains(&"reserved_pusd_nonzero"));
     }
 
     #[test]
@@ -997,21 +1329,36 @@ mod tests {
     }
 
     fn report_for_plan(plan: CanaryOrderPlan) -> CanaryReadinessReport {
-        let context = valid_context();
-        let approval_text = canonical_approval_text(&plan, &context);
-        let expected_approval_sha256 = approval_hash(&approval_text);
-        evaluate_canary_readiness(
+        report_for_plan_and_mode(
             CanaryMode::FinalGated,
-            &plan,
-            &context,
-            &CanaryApprovalGuard {
-                approval_text: Some(approval_text),
-                expected_approval_sha256: Some(expected_approval_sha256),
+            plan,
+            CanaryApprovalGuard {
+                approval_text: None,
+                expected_approval_sha256: None,
                 approval_expires_at_unix: Some(1_777_756_000),
                 now_unix: 1_777_755_000,
             },
-            &passing_checks(),
         )
+    }
+
+    fn report_for_plan_and_mode(
+        mode: CanaryMode,
+        plan: CanaryOrderPlan,
+        approval: CanaryApprovalGuard,
+    ) -> CanaryReadinessReport {
+        let context = valid_context();
+        let approval_text = canonical_approval_text(&plan, &context);
+        let expected_approval_sha256 = approval_hash(&approval_text);
+        let approval = if mode == CanaryMode::FinalGated {
+            CanaryApprovalGuard {
+                approval_text: Some(approval_text),
+                expected_approval_sha256: Some(expected_approval_sha256),
+                ..approval
+            }
+        } else {
+            approval
+        };
+        evaluate_canary_readiness(mode, &plan, &context, &approval, &passing_checks())
     }
 
     fn report_with_checks(checks: CanaryRuntimeChecks) -> CanaryReadinessReport {
@@ -1051,7 +1398,7 @@ mod tests {
             maker_only: true,
             tick_size: 0.01,
             gtd_expiry_unix: 1_777_756_200,
-            market_end_unix: 1_777_756_600,
+            market_end_unix: 1_777_756_500,
             best_bid: 0.49,
             best_ask: 0.50,
         }
@@ -1078,6 +1425,16 @@ mod tests {
                     .to_string(),
             rollback_command: "LIVE_ORDER_PLACEMENT_ENABLED=false; stop service if running"
                 .to_string(),
+            preauthorized_envelope_binding: Some(valid_preauthorized_binding()),
+        }
+    }
+
+    fn valid_preauthorized_binding() -> PreauthorizedEnvelopeBinding {
+        let plan = valid_plan();
+        PreauthorizedEnvelopeBinding {
+            market_slug: plan.market_slug,
+            condition_id: plan.condition_id,
+            up_token_id: plan.token_id,
         }
     }
 

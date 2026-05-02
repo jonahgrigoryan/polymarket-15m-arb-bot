@@ -23,7 +23,7 @@ use polymarket_15m_arb_bot::{
     },
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
-        CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks,
+        CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks, PreauthorizedEnvelopeBinding,
     },
     live_beta_cancel,
     live_beta_order_lifecycle::{
@@ -161,6 +161,11 @@ enum Commands {
             help = "Final gated mode; may submit only after all exact gates pass"
         )]
         human_approved: bool,
+        #[arg(
+            long,
+            help = "Use the reviewed LB6 pre-authorized ETH one-order canary envelope"
+        )]
+        preauthorized_envelope: bool,
         #[arg(
             long,
             help = "Required in final gated mode to enforce the one-order cap"
@@ -438,6 +443,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Commands::LiveCanary {
                 dry_run,
                 human_approved,
+                preauthorized_envelope,
                 one_order,
                 approval_text,
                 approval_sha256,
@@ -466,6 +472,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &config,
                     dry_run,
                     human_approved,
+                    preauthorized_envelope,
                     one_order,
                     approval_text,
                     approval_sha256,
@@ -2162,6 +2169,7 @@ async fn run_lb6_live_canary(
     config: &AppConfig,
     dry_run: bool,
     human_approved: bool,
+    preauthorized_envelope: bool,
     one_order: bool,
     approval_text: Option<String>,
     approval_sha256: Option<String>,
@@ -2187,15 +2195,33 @@ async fn run_lb6_live_canary(
     order_cap_state: &Path,
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if dry_run == human_approved {
-        return Err("live-canary requires exactly one of --dry-run or --human-approved".into());
+    let selected_mode_count = [dry_run, human_approved, preauthorized_envelope]
+        .iter()
+        .filter(|selected| **selected)
+        .count();
+    if selected_mode_count != 1 {
+        return Err(
+            "live-canary requires exactly one of --dry-run, --human-approved, or --preauthorized-envelope"
+                .into(),
+        );
     }
-    if human_approved && !one_order {
-        return Err("live-canary --human-approved requires --one-order".into());
+    if (human_approved || preauthorized_envelope) && !one_order {
+        return Err("live-canary final modes require --one-order to enforce the canary cap".into());
+    }
+    if preauthorized_envelope
+        && (approval_text.is_some()
+            || approval_sha256.is_some()
+            || approval_expires_at_unix.is_some())
+    {
+        return Err(
+            "live-canary --preauthorized-envelope does not accept exact approval flags".into(),
+        );
     }
 
     let mode = if human_approved {
         CanaryMode::FinalGated
+    } else if preauthorized_envelope {
+        CanaryMode::PreauthorizedEnvelope
     } else {
         CanaryMode::DryRun
     };
@@ -2218,12 +2244,16 @@ async fn run_lb6_live_canary(
         best_bid,
         best_ask,
     };
-
     let geoblock = run_geoblock_validation(config).await?;
     let geoblock_status = if geoblock.blocked {
         CanaryGateStatus::Blocked
     } else {
         CanaryGateStatus::Passed
+    };
+    let preauthorized_envelope_binding = if preauthorized_envelope && !geoblock.blocked {
+        discover_preauthorized_envelope_binding(config, &plan).await?
+    } else {
+        None
     };
     let l2_secret_report = secret_handling::validate_secret_presence(
         &config.live_beta.secret_inventory(),
@@ -2277,6 +2307,7 @@ async fn run_lb6_live_canary(
         cancel_plan: "if still open after readback, cancel only this exact order ID; no cancel-all"
             .to_string(),
         rollback_command: "LIVE_ORDER_PLACEMENT_ENABLED=false; stop service if running".to_string(),
+        preauthorized_envelope_binding,
     };
     let cancel_report = live_beta_cancel::evaluate_cancel_readiness(
         &live_beta_cancel::CancelReadinessInput::lb5_default(true),
@@ -2365,10 +2396,17 @@ async fn run_lb6_live_canary(
         "live_beta_canary_l2_secret_handles_present={}",
         checks.l2_secret_handles_present
     );
-    println!(
-        "live_beta_canary_final_approval_prompt=\n{}",
-        report.canonical_approval_text
-    );
+    match mode {
+        CanaryMode::DryRun | CanaryMode::FinalGated => {
+            println!(
+                "live_beta_canary_final_approval_prompt=\n{}",
+                report.canonical_approval_text
+            );
+        }
+        CanaryMode::PreauthorizedEnvelope => {
+            println!("live_beta_canary_preauthorized_envelope_enabled=true");
+        }
+    }
     println!(
         "live_beta_canary_report={}",
         serde_json::to_string(&report)?
@@ -2411,6 +2449,41 @@ async fn run_lb6_live_canary(
     );
 
     Ok(())
+}
+
+async fn discover_preauthorized_envelope_binding(
+    config: &AppConfig,
+    plan: &CanaryOrderPlan,
+) -> Result<Option<PreauthorizedEnvelopeBinding>, Box<dyn std::error::Error>> {
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    let Some(market) = discovery_run.markets.iter().find(|market| {
+        market.slug == plan.market_slug
+            && market.asset == Asset::Eth
+            && market.lifecycle_state == MarketLifecycleState::Active
+            && market.ineligibility_reason.is_none()
+    }) else {
+        return Ok(None);
+    };
+    let Some(up_token) = market
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.outcome.eq_ignore_ascii_case("Up"))
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(PreauthorizedEnvelopeBinding {
+        market_slug: market.slug.clone(),
+        condition_id: market.condition_id.clone(),
+        up_token_id: up_token.token_id.clone(),
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
