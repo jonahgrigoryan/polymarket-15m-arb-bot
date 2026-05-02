@@ -26,7 +26,7 @@ Authoritative sources remain:
 - Last completed milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum is PASS for offline readiness only. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
 - Active milestone: LB6 fresh final recheck and one-order canary approval prompt. Order submission remains blocked until the operator approves a new exact prompt text/hash after all final gates pass.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: set the missing local canary signing handle, run a fresh immediate final recheck, and produce a fresh market/order approval prompt only if all final gates pass. No order may be submitted until the operator approves the new exact prompt text/hash.
+- Next exit gate: add an approved exact single-order live cancel/readback path, then run a fresh immediate final recheck and produce a fresh market/order approval prompt only if all final gates pass. No order may be submitted until the operator approves the new exact prompt text/hash.
 
 ## M3 Scope Lock
 
@@ -348,7 +348,8 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - Final mode validates non-empty/parseable local signing and L2 env values before reserving the one-order cap sentinel, so bad local credentials cannot consume the only canary attempt before any venue submission call.
 - Global `LIVE_ORDER_PLACEMENT_ENABLED=false` remains unchanged. LB6 uses a narrower compile-time canary gate, `LB6_ONE_ORDER_CANARY_SUBMISSION_ENABLED=true`, inside `src/live_beta_canary.rs`; this path is still unreachable without the exact final gates above.
 - Latest approved-host readback recheck after PR #22 merge: PASS from Mexico host/session with `geoblock_country=MX`, `geoblock_region=CHP`, `live_beta_readback_preflight_open_order_count=0`, `live_beta_readback_preflight_reserved_pusd_units=0`, `live_beta_readback_preflight_available_pusd_units=1614478`, `live_beta_readback_preflight_venue_state=trading_enabled`, and `live_beta_readback_preflight_heartbeat=not_started_no_open_orders`.
-- Current final gate blocker: the three L2 handles are present locally, but `P15M_LIVE_BETA_CANARY_PRIVATE_KEY` is missing. Because the final gate is not ready, no fresh approval prompt for a live market was produced here.
+- Latest LB6 dry-run generated approval hash `sha256:4f620792ae4c8c1579254b2873c9e9aae0e045c5bf5ba298fcf6fdf30b0877ea` for `eth-updown-15m-1777761000`; the operator approved that prompt in chat.
+- No order was submitted after approval. The immediate final safety check stopped fail-closed because the runtime still has no approved live single-order cancel network path: `live_beta_cancel_readiness_live_network_enabled=false`, `live_beta_cancel_readiness_cancel_all_enabled=false`, and `live_beta_cancel_readiness_request_constructable=false`. The one-order cap sentinel remains absent.
 - Safety result: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values in repo/logs/docs/chat, and no expired market approval reused.
 
 ## Blockers And Risks
@@ -361,7 +362,7 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
 - LB5 is offline readiness only. It does not prove live cancellation because live cancel proof is intentionally deferred to LB6 after one approved tiny canary order exists.
-- LB6 mechanism is present, but current final submission remains blocked until a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible market, side-aware non-marketable best bid/ask evidence, exact approval text/hash, and unused one-order cap.
+- LB6 mechanism is present, but current final submission remains blocked until an approved exact live single-order cancel/readback path exists and a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible market, side-aware non-marketable best bid/ask evidence, exact approval text/hash, and unused one-order cap.
 
 ## Next Concrete Action
 
@@ -373,7 +374,7 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
-- Next concrete action is set `P15M_LIVE_BETA_CANARY_PRIVATE_KEY` only in the ignored local `.env` or a disposable shell, then run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
+- Next concrete action is implement/review the missing exact single-order live cancel/readback path for LB6, with no cancel-all and no autonomous trading. After that is merged, run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
 - Mandatory hold: do not submit an order until the operator approves the new exact LB6 approval prompt text/hash.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
