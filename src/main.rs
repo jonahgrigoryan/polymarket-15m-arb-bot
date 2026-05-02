@@ -1997,12 +1997,28 @@ fn lb4_account_preflight(
         );
     };
     Ok(AccountPreflight {
-        clob_host: config.polymarket.clob_rest_url.clone(),
+        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
         chain_id: 137,
         wallet_address: account.wallet_address.clone(),
         funder_address: account.funder_address.clone(),
         signature_type,
     })
+}
+
+fn normalize_lb4_clob_host(url: &str) -> String {
+    let trimmed = url.trim();
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return trimmed.trim_end_matches('/').to_string();
+    };
+    if parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return trimmed.trim_end_matches('/').to_string();
+    }
+    parsed.to_string().trim_end_matches('/').to_string()
 }
 
 fn lb4_l2_credentials_from_env(
@@ -2336,6 +2352,47 @@ mod tests {
             .expect("approved runtime prerequisites can pass LB4 preflight");
 
         assert_eq!(report.status, "passed");
+    }
+
+    #[test]
+    fn lb4_account_preflight_normalizes_clob_host_before_gate_evaluation() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.polymarket.clob_rest_url = " HTTPS://CLOB.POLYMARKET.COM:443/ ".to_string();
+        config.live_beta.readback_account.wallet_address =
+            "0x1111111111111111111111111111111111111111".to_string();
+        config.live_beta.readback_account.funder_address =
+            "0x1111111111111111111111111111111111111111".to_string();
+        config.live_beta.readback_account.signature_type = "eoa".to_string();
+
+        let account = lb4_account_preflight(&config).expect("account preflight builds");
+
+        assert_eq!(account.clob_host, live_beta_readback::CLOB_HOST);
+        let report = live_beta_readback::evaluate_readback_preflight(
+            &live_beta_readback::ReadbackPreflightInput {
+                prerequisites: ReadbackPrerequisites {
+                    lb3_hold_released: true,
+                    legal_access_approved: true,
+                    deployment_geoblock_passed: true,
+                },
+                account,
+                venue_state: live_beta_readback::VenueState::TradingEnabled,
+                collateral: live_beta_readback::BalanceAllowanceReadback {
+                    asset_type: live_beta_readback::AssetType::Collateral,
+                    token_id: None,
+                    balance_units: 25_000_000,
+                    allowance_units: 25_000_000,
+                },
+                open_orders: Vec::new(),
+                trades: Vec::new(),
+                heartbeat: live_beta_readback::HeartbeatReadiness::NotStartedNoOpenOrders,
+                required_collateral_allowance_units: 1_000_000,
+            },
+        )
+        .expect("report builds");
+
+        assert_eq!(report.status, "passed");
+        assert!(!report.block_reasons.contains(&"clob_host_mismatch"));
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {

@@ -40,6 +40,7 @@ The implementation also cross-checked the official V2 Python client HMAC fixture
 - PR #20 P1 review fix: authenticated LB4 preflight now queries read-only `GET /sampling-markets`, paginates it through `next_cursor`, and derives `venue_state` from live CLOB market fields instead of hardcoding `trading_enabled`. Empty, malformed, closed, archived, disabled, or non-accepting sampling-market state fails closed through `venue_state_not_open`.
 - PR #20 P1 review fix: authenticated `GET /data/orders` and `GET /trades` now fetch all pages using `next_cursor` before preflight evaluation. Empty and `LTE=` cursors terminate pagination; non-advancing cursors or more than 50 pages fail closed.
 - PR #20 P1 review fix: authenticated `GET /trades` now sends the configured funder/proxy address as required `maker_address`, keeping trade readback scoped to the account under preflight.
+- PR #20 P2 review fix: LB4 account preflight normalizes the configured CLOB REST host by trimming whitespace and trailing slashes before the canonical `https://clob.polymarket.com` gate check, avoiding false `clob_host_mismatch` blocks for equivalent local config formatting.
 - Kept `validate --local-only --live-readback-preflight` on the existing synthetic fixture path.
 
 No order post method, cancel method, cancel-all method, generalized trading-capable client, wallet private-key handling, or strategy-to-live routing was added.
@@ -232,6 +233,7 @@ PR #20 P1 review fix checks:
 - Trade pagination regression: `readback_trade_pagination_can_surface_later_page_blocker` confirms a disqualifying failed trade beyond page 1 still blocks preflight.
 - Trade query regression: `trade_readback_query_requires_maker_address_filter` confirms the authenticated `GET /trades` request includes required `maker_address`.
 - Sampling-market pagination regression: `sampling_markets_pages_can_surface_later_accepting_market` confirms later sampling-market pages can produce `trading_enabled` instead of blocking purely due to first-page ordering.
+- CLOB host normalization regression: `lb4_account_preflight_normalizes_clob_host_before_gate_evaluation` confirms a trailing-slash/whitespace CLOB host config normalizes before LB4 gate evaluation.
 
 ## Safety And No-Secret Scan
 
