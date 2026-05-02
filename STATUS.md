@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb6-one-order-canary`
-- Base commit: `32586c2` or newer from updated `main` after PR #21/LB5 merge.
-- Worktree status: LB6 one-order canary mechanism implementation in progress. No live order was submitted in this run. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
+- Branch: `main`
+- Current commit: `cc5d965a98cbc07b63027cdcd31ac9a56e5e1431` (merged PR #22).
+- Worktree status: LB6 one-order canary mechanism is merged. No live order was submitted. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
 
 ## Milestones
 
 - Last completed milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum is PASS for offline readiness only. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB6 mechanism only. The operator authorized implementation of the one-order canary signing/submission mechanism, but explicitly did not authorize any order submission in this run.
+- Active milestone: LB6 fresh final recheck and one-order canary approval prompt. Order submission remains blocked until the operator approves a new exact prompt text/hash after all final gates pass.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: after this mechanism PR, a fresh immediate final recheck must produce a fresh market/order approval prompt. No order may be submitted until the operator approves the new exact prompt text/hash.
+- Next exit gate: set the missing local canary signing handle, run a fresh immediate final recheck, and produce a fresh market/order approval prompt only if all final gates pass. No order may be submitted until the operator approves the new exact prompt text/hash.
 
 ## M3 Scope Lock
 
@@ -340,13 +340,15 @@ PASS for offline cancel readiness and rollback/runbook minimum only.
 
 IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this run.
 - Evidence file: `verification/2026-05-02-live-beta-lb6-one-order-canary-mechanism.md`.
+- PR #22 merged to `main` at `cc5d965a98cbc07b63027cdcd31ac9a56e5e1431` on 2026-05-02.
 - Scope: one-order canary signing/submission mechanism only. No order was submitted and no live cancel was sent in this run.
 - Official docs rechecked for LB6 scope: CLOB authentication requires L1 private-key signing for order payloads plus L2 headers for posting signed orders; official SDK clients are recommended for signing/submission; `POST /order` creates one order; `DELETE /order` cancels one order; post-only is valid only with GTC/GTD and is rejected if marketable; CLOB rate limits still require fail-closed handling.
 - Added `src/live_beta_canary.rs` with exact approval text/hash gating, approval-expiry gating, atomic one-order cap reservation, post-only/GTD/maker-only checks, price/size/notional checks, book/reference freshness checks, side-aware non-marketable bid/ask checks, geoblock/LB4/open-order/LB5/secret/SDK checks, and an official `polymarket_client_sdk_v2` final submission path.
 - Added `live-canary` CLI path with `--dry-run` and `--human-approved --one-order` modes. Dry-run prints the final approval prompt/hash and never submits. The approval prompt includes run ID, host, geoblock result, wallet/funder, signature type, pUSD available/reserved state, order intent, book/reference age, heartbeat, cancel plan, and rollback command. Final gated mode blocks unless the exact approval text/hash, fresh expiry, zero open orders, LB4 preflight, geoblock PASS, LB5 rollback readiness, L2 handles, canary private-key handle, official SDK path, fresh book/reference ages, and one-order cap all pass.
 - Final mode validates non-empty/parseable local signing and L2 env values before reserving the one-order cap sentinel, so bad local credentials cannot consume the only canary attempt before any venue submission call.
 - Global `LIVE_ORDER_PLACEMENT_ENABLED=false` remains unchanged. LB6 uses a narrower compile-time canary gate, `LB6_ONE_ORDER_CANARY_SUBMISSION_ENABLED=true`, inside `src/live_beta_canary.rs`; this path is still unreachable without the exact final gates above.
-- Current Codex environment blocker at implementation time: `P15M_LIVE_BETA_CANARY_PRIVATE_KEY`, `P15M_LIVE_BETA_CLOB_L2_ACCESS`, `P15M_LIVE_BETA_CLOB_L2_CREDENTIAL`, and `P15M_LIVE_BETA_CLOB_L2_PASSPHRASE` were not present in this shell. Because the final gate was not ready, no fresh approval prompt for a live market was produced here.
+- Latest approved-host readback recheck after PR #22 merge: PASS from Mexico host/session with `geoblock_country=MX`, `geoblock_region=CHP`, `live_beta_readback_preflight_open_order_count=0`, `live_beta_readback_preflight_reserved_pusd_units=0`, `live_beta_readback_preflight_available_pusd_units=1614478`, `live_beta_readback_preflight_venue_state=trading_enabled`, and `live_beta_readback_preflight_heartbeat=not_started_no_open_orders`.
+- Current final gate blocker: the three L2 handles are present locally, but `P15M_LIVE_BETA_CANARY_PRIVATE_KEY` is missing. Because the final gate is not ready, no fresh approval prompt for a live market was produced here.
 - Safety result: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values in repo/logs/docs/chat, and no expired market approval reused.
 
 ## Blockers And Risks
@@ -367,11 +369,11 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb6-one-order-canary`.
+- Current branch is `main` at merged PR #22 commit `cc5d965a98cbc07b63027cdcd31ac9a56e5e1431`.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
-- Next concrete action is commit/push/open PR for the LB6 mechanism. After this mechanism is merged, run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
+- Next concrete action is set `P15M_LIVE_BETA_CANARY_PRIVATE_KEY` only in the ignored local `.env` or a disposable shell, then run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
 - Mandatory hold: do not submit an order until the operator approves the new exact LB6 approval prompt text/hash.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
