@@ -26,6 +26,10 @@ use polymarket_15m_arb_bot::{
         CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks,
     },
     live_beta_cancel,
+    live_beta_order_lifecycle::{
+        self, ExactCancelInput, ExactCancelRuntimeChecks, ExactOrderReadbackInput,
+        ExpectedCanaryOrder,
+    },
     live_beta_readback::{
         self, AccountPreflight, AuthenticatedReadbackInput, L2ReadbackCredentials,
         ReadbackPrerequisites, SignatureType,
@@ -217,6 +221,51 @@ enum Commands {
         )]
         order_cap_state: PathBuf,
     },
+    /// Read back and, with exact approval, cancel the one LB6 canary order.
+    LiveCancel {
+        #[arg(
+            long,
+            help = "Read back the exact order and evaluate cancel readiness only"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Final gated mode; may cancel only the exact one canary order"
+        )]
+        human_approved: bool,
+        #[arg(long, help = "Required in final gated mode to enforce one-order scope")]
+        one_order: bool,
+        #[arg(
+            long,
+            help = "Exact venue order ID written by the LB6 canary submission"
+        )]
+        order_id: String,
+        #[arg(
+            long,
+            help = "LB6 canary approval hash recorded in the one-order cap state"
+        )]
+        canary_approval_sha256: String,
+        #[arg(long, help = "Unix timestamp after which this cancel approval expires")]
+        approval_expires_at_unix: Option<u64>,
+        #[arg(long)]
+        condition_id: String,
+        #[arg(long)]
+        token_id: String,
+        #[arg(long)]
+        side: String,
+        #[arg(long)]
+        price: f64,
+        #[arg(long)]
+        size: f64,
+        #[arg(long, default_value = "GTD")]
+        order_type: String,
+        #[arg(
+            long,
+            default_value = "reports/live-beta-lb6-one-order-canary-state.json",
+            help = "Local non-secret sentinel written by the LB6 canary submission"
+        )]
+        order_cap_state: PathBuf,
+    },
 }
 
 impl Commands {
@@ -226,6 +275,7 @@ impl Commands {
             Commands::Paper { .. } => "paper",
             Commands::Replay { .. } => "replay",
             Commands::LiveCanary { .. } => "live-canary",
+            Commands::LiveCancel { .. } => "live-cancel",
         }
     }
 
@@ -235,6 +285,7 @@ impl Commands {
             Commands::Paper { .. } => RuntimeMode::Paper,
             Commands::Replay { .. } => RuntimeMode::Replay,
             Commands::LiveCanary { .. } => RuntimeMode::Validate,
+            Commands::LiveCancel { .. } => RuntimeMode::Validate,
         }
     }
 }
@@ -439,6 +490,39 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     reference_age_ms,
                     &order_cap_state,
                     &run_id,
+                )
+                .await?;
+            }
+            Commands::LiveCancel {
+                dry_run,
+                human_approved,
+                one_order,
+                order_id,
+                canary_approval_sha256,
+                approval_expires_at_unix,
+                condition_id,
+                token_id,
+                side,
+                price,
+                size,
+                order_type,
+                order_cap_state,
+            } => {
+                run_lb6_live_cancel(
+                    &config,
+                    dry_run,
+                    human_approved,
+                    one_order,
+                    order_id,
+                    canary_approval_sha256,
+                    approval_expires_at_unix,
+                    condition_id,
+                    token_id,
+                    side,
+                    price,
+                    size,
+                    order_type,
+                    &order_cap_state,
                 )
                 .await?;
             }
@@ -2217,6 +2301,9 @@ async fn run_lb6_live_canary(
             && cancel_report
                 .block_reasons
                 .contains(&"approved_canary_order_missing"),
+        lb6_exact_single_cancel_path_available:
+            live_beta_order_lifecycle::LB6_SINGLE_ORDER_CANCEL_NETWORK_ENABLED
+                && !live_beta_order_lifecycle::LB6_CANCEL_ALL_ENABLED,
         official_sdk_available: true,
         previous_canary_submission_attempted: prior_canary_submission_attempted,
     };
@@ -2322,6 +2409,167 @@ async fn run_lb6_live_canary(
         "live_beta_canary_submission_report={}",
         serde_json::to_string(&submission)?
     );
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_lb6_live_cancel(
+    config: &AppConfig,
+    dry_run: bool,
+    human_approved: bool,
+    one_order: bool,
+    order_id: String,
+    canary_approval_sha256: String,
+    approval_expires_at_unix: Option<u64>,
+    condition_id: String,
+    token_id: String,
+    side: String,
+    price: f64,
+    size: f64,
+    order_type: String,
+    order_cap_state: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if dry_run == human_approved {
+        return Err("live-cancel requires exactly one of --dry-run or --human-approved".into());
+    }
+    if human_approved && !one_order {
+        return Err("live-cancel --human-approved requires --one-order".into());
+    }
+    if human_approved && approval_expires_at_unix.is_none() {
+        return Err("live-cancel --human-approved requires --approval-expires-at-unix".into());
+    }
+    if let Some(expires_at) = approval_expires_at_unix {
+        if expires_at <= unix_time_secs() {
+            return Err("live-cancel approval has expired".into());
+        }
+    }
+
+    let side = parse_canary_side(&side)?;
+    let size_units = decimal_to_fixed6_units(size, "size")?;
+    let geoblock = run_geoblock_validation(config).await?;
+    let l2_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    let account = lb4_account_preflight(config)?;
+    let cap_state = read_canary_order_cap_state(order_cap_state)?;
+    let cap_matches =
+        canary_order_cap_matches(cap_state.as_ref(), &order_id, &canary_approval_sha256);
+
+    if human_approved {
+        let state = cap_state
+            .as_ref()
+            .ok_or("LB6 one-order canary cap state is missing; refusing live cancel")?;
+        if !state.submission_attempted {
+            return Err("LB6 one-order canary cap state has no submission attempt".into());
+        }
+        let recorded_order_id = state
+            .venue_order_id
+            .as_deref()
+            .ok_or("LB6 one-order canary cap state has no venue order ID")?;
+        if !recorded_order_id.eq_ignore_ascii_case(&order_id) {
+            return Err("live-cancel order ID does not match the recorded canary order ID".into());
+        }
+        if state.approval_sha256 != canary_approval_sha256 {
+            return Err("live-cancel approval hash does not match canary cap state".into());
+        }
+    }
+
+    let authenticated_readback_available = !geoblock.blocked && l2_secret_report.all_present();
+    if !authenticated_readback_available {
+        return Err("live-cancel requires geoblock PASS and all L2 secret handles present".into());
+    }
+
+    let expected = ExpectedCanaryOrder {
+        order_id: order_id.clone(),
+        approval_sha256: canary_approval_sha256,
+        funder_address: account.funder_address.clone(),
+        condition_id,
+        token_id,
+        side,
+        price: decimal_arg_label(price),
+        size_units,
+        order_type,
+    };
+    let checks = ExactCancelRuntimeChecks {
+        geoblock_passed: !geoblock.blocked,
+        authenticated_readback_available,
+        l2_secret_handles_present: l2_secret_report.all_present(),
+        human_cancel_approved: human_approved && one_order && cap_matches,
+        cancel_plan_acknowledged: true,
+        kill_switch_ready: config.live_beta.kill_switch_active
+            && !safety::LIVE_ORDER_PLACEMENT_ENABLED,
+        service_stop_ready: true,
+    };
+    let credentials = lb4_l2_credentials_from_env(&config.live_beta.secret_handles)?;
+
+    if dry_run {
+        let order = live_beta_order_lifecycle::read_exact_order(ExactOrderReadbackInput {
+            clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+            account,
+            credentials,
+            order_id: expected.order_id.clone(),
+            request_timeout_ms: config.polymarket.request_timeout_ms,
+        })
+        .await?;
+        let report =
+            live_beta_order_lifecycle::evaluate_exact_cancel_readiness(&order, &expected, &checks);
+        println!("live_beta_exact_cancel_status={}", report.status);
+        println!("live_beta_exact_cancel_mode=dry_run");
+        println!(
+            "live_beta_exact_cancel_live_network_enabled={}",
+            report.live_cancel_network_enabled
+        );
+        println!(
+            "live_beta_exact_cancel_cancel_all_enabled={}",
+            report.cancel_all_enabled
+        );
+        println!(
+            "live_beta_exact_cancel_block_reasons={}",
+            report.block_reasons.join(",")
+        );
+        println!(
+            "live_beta_exact_cancel_order_status={}",
+            report.pre_cancel_order_status
+        );
+        println!(
+            "live_beta_exact_cancel_report={}",
+            serde_json::to_string(&report)?
+        );
+        return Ok(());
+    }
+
+    let report = live_beta_order_lifecycle::cancel_exact_single_order(ExactCancelInput {
+        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+        account,
+        credentials,
+        expected,
+        checks,
+        request_timeout_ms: config.polymarket.request_timeout_ms,
+    })
+    .await?;
+    println!("live_beta_exact_cancel_status={}", report.status);
+    println!("live_beta_exact_cancel_mode=final_gated");
+    println!(
+        "live_beta_exact_cancel_cancel_attempted={}",
+        report.cancel_attempted
+    );
+    println!(
+        "live_beta_exact_cancel_block_reasons={}",
+        report.block_reasons.join(",")
+    );
+    println!(
+        "live_beta_exact_cancel_report={}",
+        serde_json::to_string(&report)?
+    );
+    if report.status != "canceled" {
+        return Err(format!(
+            "LB6 exact single-order cancel blocked: {}",
+            report.block_reasons.join(",")
+        )
+        .into());
+    }
 
     Ok(())
 }
@@ -2505,12 +2753,37 @@ fn lb6_host_label() -> String {
 }
 
 fn read_canary_order_cap_consumed(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    Ok(read_canary_order_cap_state(path)?
+        .map(|state| state.submission_attempted)
+        .unwrap_or(false))
+}
+
+fn read_canary_order_cap_state(
+    path: &Path,
+) -> Result<Option<CanaryOrderCapState>, Box<dyn std::error::Error>> {
     if !path.exists() {
-        return Ok(false);
+        return Ok(None);
     }
     let contents = fs::read_to_string(path)?;
-    let state = live_beta_canary::canary_order_cap_state_from_json(&contents)?;
-    Ok(state.submission_attempted)
+    Ok(Some(live_beta_canary::canary_order_cap_state_from_json(
+        &contents,
+    )?))
+}
+
+fn canary_order_cap_matches(
+    state: Option<&CanaryOrderCapState>,
+    order_id: &str,
+    approval_sha256: &str,
+) -> bool {
+    let Some(state) = state else {
+        return false;
+    };
+    state.submission_attempted
+        && state.approval_sha256 == approval_sha256
+        && state
+            .venue_order_id
+            .as_deref()
+            .is_some_and(|recorded| recorded.eq_ignore_ascii_case(order_id))
 }
 
 fn reserve_canary_order_cap(
@@ -2581,6 +2854,28 @@ fn ensure_canary_order_cap_parent(path: &Path) -> Result<(), Box<dyn std::error:
         fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+fn decimal_to_fixed6_units(value: f64, label: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("LB6 {label} must be positive and finite").into());
+    }
+    let units = (value * 1_000_000.0).round();
+    if units <= 0.0 || units > u64::MAX as f64 {
+        return Err(format!("LB6 {label} fixed-unit conversion overflowed").into());
+    }
+    Ok(units as u64)
+}
+
+fn decimal_arg_label(value: f64) -> String {
+    let mut rendered = format!("{value:.6}");
+    while rendered.contains('.') && rendered.ends_with('0') {
+        rendered.pop();
+    }
+    if rendered.ends_with('.') {
+        rendered.pop();
+    }
+    rendered
 }
 
 fn lb4_readback_prerequisites(

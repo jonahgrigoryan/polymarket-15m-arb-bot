@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `main`
-- Current commit: `cc5d965a98cbc07b63027cdcd31ac9a56e5e1431` (merged PR #22).
-- Worktree status: LB6 one-order canary mechanism is merged. No live order was submitted. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
+- Branch: `live-beta/lb6-single-cancel-readback`
+- Current commit: PR #23 branch head.
+- Worktree status: LB6 exact single-order cancel/readback patch is committed and pushed for PR review. No live order was submitted. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
 
 ## Milestones
 
 - Last completed milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum is PASS for offline readiness only. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB6 fresh final recheck and one-order canary approval prompt. Order submission remains blocked until the operator approves a new exact prompt text/hash after all final gates pass.
+- Active milestone: LB6 exact single-order cancel/readback patch after the first final canary attempt stopped fail-closed.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: add an approved exact single-order live cancel/readback path, then run a fresh immediate final recheck and produce a fresh market/order approval prompt only if all final gates pass. No order may be submitted until the operator approves the new exact prompt text/hash.
+- Next exit gate: review/merge PR #23 for the exact cancel/readback patch, then stop. After merge, run a fresh immediate final recheck and produce a fresh market/order approval prompt only if all final gates pass. No order may be submitted until the operator approves the new exact prompt text/hash.
 
 ## M3 Scope Lock
 
@@ -350,6 +350,10 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - Latest approved-host readback recheck after PR #22 merge: PASS from Mexico host/session with `geoblock_country=MX`, `geoblock_region=CHP`, `live_beta_readback_preflight_open_order_count=0`, `live_beta_readback_preflight_reserved_pusd_units=0`, `live_beta_readback_preflight_available_pusd_units=1614478`, `live_beta_readback_preflight_venue_state=trading_enabled`, and `live_beta_readback_preflight_heartbeat=not_started_no_open_orders`.
 - Latest LB6 dry-run generated approval hash `sha256:4f620792ae4c8c1579254b2873c9e9aae0e045c5bf5ba298fcf6fdf30b0877ea` for `eth-updown-15m-1777761000`; the operator approved that prompt in chat.
 - No order was submitted after approval. The immediate final safety check stopped fail-closed because the runtime still has no approved live single-order cancel network path: `live_beta_cancel_readiness_live_network_enabled=false`, `live_beta_cancel_readiness_cancel_all_enabled=false`, and `live_beta_cancel_readiness_request_constructable=false`. The one-order cap sentinel remains absent.
+- Follow-up patch in progress on `live-beta/lb6-single-cancel-readback`: adds `src/live_beta_order_lifecycle.rs`, exact authenticated `GET /order/{orderID}` readback, exact `DELETE /order` single-order cancel execution, `live-cancel` CLI dry-run/final-gated modes, and a canary readiness check that the exact single-order cancel path exists while cancel-all remains disabled.
+- `live-cancel --dry-run` is readback/readiness only. `live-cancel --human-approved --one-order` requires the local one-order cap sentinel to match the exact venue order ID and canary approval hash, a nonexpired approval timestamp, geoblock PASS, L2 handles, exact order readback, and an unmatched/live target order before sending any cancel. It can only send `DELETE /order` for that exact order ID and must read the order back afterward.
+- LB5 remains offline readiness only: `src/live_beta_cancel.rs` still reports `live_beta_cancel_readiness_live_network_enabled=false` and still has no network dispatch or secret-loading surface.
+- Evidence file for the follow-up patch: `verification/2026-05-02-live-beta-lb6-single-cancel-readback.md`.
 - Safety result: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values in repo/logs/docs/chat, and no expired market approval reused.
 
 ## Blockers And Risks
@@ -362,7 +366,7 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
 - LB5 is offline readiness only. It does not prove live cancellation because live cancel proof is intentionally deferred to LB6 after one approved tiny canary order exists.
-- LB6 mechanism is present, but current final submission remains blocked until an approved exact live single-order cancel/readback path exists and a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible market, side-aware non-marketable best bid/ask evidence, exact approval text/hash, and unused one-order cap.
+- LB6 canary submission mechanism is present. The exact live single-order cancel/readback path is implemented on `live-beta/lb6-single-cancel-readback` pending PR review/merge. Current final submission remains blocked until this patch is merged and a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible market, side-aware non-marketable best bid/ask evidence, exact approval text/hash, and unused one-order cap.
 
 ## Next Concrete Action
 
@@ -370,11 +374,11 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `main` at merged PR #22 commit `cc5d965a98cbc07b63027cdcd31ac9a56e5e1431`.
+- Current branch is `live-beta/lb6-single-cancel-readback` with PR #23 open for the LB6 exact single-order cancel/readback patch.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
-- Next concrete action is implement/review the missing exact single-order live cancel/readback path for LB6, with no cancel-all and no autonomous trading. After that is merged, run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
+- Next concrete action is review/merge PR #23 for the LB6 exact single-order live cancel/readback patch. After that PR is merged, run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
 - Mandatory hold: do not submit an order until the operator approves the new exact LB6 approval prompt text/hash.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
