@@ -1,5 +1,7 @@
 use std::env;
 use std::fmt;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -17,6 +19,10 @@ use polymarket_15m_arb_bot::{
         binance_combined_trade_url, coinbase_ticker_subscription, FeedConnectionConfig,
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
+    },
+    live_beta_canary::{
+        self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
+        CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks,
     },
     live_beta_cancel,
     live_beta_readback::{
@@ -83,6 +89,7 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Validate local config and M0 safety invariants.
     Validate {
@@ -140,6 +147,73 @@ enum Commands {
         #[arg(long, help = "Stored paper run ID to replay")]
         run_id: Option<String>,
     },
+    /// Evaluate or execute the exact one-order LB6 canary gate.
+    LiveCanary {
+        #[arg(long, help = "Evaluate the LB6 canary gate without submitting")]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Final gated mode; may submit only after all exact gates pass"
+        )]
+        human_approved: bool,
+        #[arg(
+            long,
+            help = "Required in final gated mode to enforce the one-order cap"
+        )]
+        one_order: bool,
+        #[arg(long, help = "Exact approval text matching the generated LB6 prompt")]
+        approval_text: Option<String>,
+        #[arg(long, help = "Expected sha256:<hex> hash of the exact approval text")]
+        approval_sha256: Option<String>,
+        #[arg(long, help = "Unix timestamp after which the approval expires")]
+        approval_expires_at_unix: Option<u64>,
+        #[arg(long)]
+        market_slug: String,
+        #[arg(long)]
+        condition_id: String,
+        #[arg(long)]
+        token_id: String,
+        #[arg(long)]
+        outcome: String,
+        #[arg(long)]
+        side: String,
+        #[arg(long)]
+        price: f64,
+        #[arg(long)]
+        size: f64,
+        #[arg(long)]
+        notional: f64,
+        #[arg(long, default_value = "GTD")]
+        order_type: String,
+        #[arg(long, default_value_t = true)]
+        post_only: bool,
+        #[arg(long, default_value_t = true)]
+        maker_only: bool,
+        #[arg(long, default_value_t = 0.01)]
+        tick_size: f64,
+        #[arg(long)]
+        gtd_expiry_unix: u64,
+        #[arg(long)]
+        market_end_unix: u64,
+        #[arg(long)]
+        best_ask: f64,
+        #[arg(
+            long,
+            help = "Age in milliseconds of the fresh book snapshot used for best ask"
+        )]
+        book_age_ms: u64,
+        #[arg(
+            long,
+            help = "Age in milliseconds of the reference feed value used for final check"
+        )]
+        reference_age_ms: u64,
+        #[arg(
+            long,
+            default_value = "reports/live-beta-lb6-one-order-canary-state.json",
+            help = "Local non-secret sentinel used to prevent a second LB6 canary attempt"
+        )]
+        order_cap_state: PathBuf,
+    },
 }
 
 impl Commands {
@@ -148,6 +222,7 @@ impl Commands {
             Commands::Validate { .. } => "validate",
             Commands::Paper { .. } => "paper",
             Commands::Replay { .. } => "replay",
+            Commands::LiveCanary { .. } => "live-canary",
         }
     }
 
@@ -156,6 +231,7 @@ impl Commands {
             Commands::Validate { .. } => RuntimeMode::Validate,
             Commands::Paper { .. } => RuntimeMode::Paper,
             Commands::Replay { .. } => RuntimeMode::Replay,
+            Commands::LiveCanary { .. } => RuntimeMode::Validate,
         }
     }
 }
@@ -304,6 +380,62 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let replay_run_id =
                     replay_run_id.ok_or("replay requires --run-id <stored paper run_id>")?;
                 run_replay_runtime(&config, &run_id, &replay_run_id).await?;
+            }
+            Commands::LiveCanary {
+                dry_run,
+                human_approved,
+                one_order,
+                approval_text,
+                approval_sha256,
+                approval_expires_at_unix,
+                market_slug,
+                condition_id,
+                token_id,
+                outcome,
+                side,
+                price,
+                size,
+                notional,
+                order_type,
+                post_only,
+                maker_only,
+                tick_size,
+                gtd_expiry_unix,
+                market_end_unix,
+                best_ask,
+                book_age_ms,
+                reference_age_ms,
+                order_cap_state,
+            } => {
+                run_lb6_live_canary(
+                    &config,
+                    dry_run,
+                    human_approved,
+                    one_order,
+                    approval_text,
+                    approval_sha256,
+                    approval_expires_at_unix,
+                    market_slug,
+                    condition_id,
+                    token_id,
+                    outcome,
+                    side,
+                    price,
+                    size,
+                    notional,
+                    order_type,
+                    post_only,
+                    maker_only,
+                    tick_size,
+                    gtd_expiry_unix,
+                    market_end_unix,
+                    best_ask,
+                    book_age_ms,
+                    reference_age_ms,
+                    &order_cap_state,
+                    &run_id,
+                )
+                .await?;
             }
         }
 
@@ -1936,6 +2068,257 @@ fn run_lb5_cancel_readiness_validation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_lb6_live_canary(
+    config: &AppConfig,
+    dry_run: bool,
+    human_approved: bool,
+    one_order: bool,
+    approval_text: Option<String>,
+    approval_sha256: Option<String>,
+    approval_expires_at_unix: Option<u64>,
+    market_slug: String,
+    condition_id: String,
+    token_id: String,
+    outcome: String,
+    side: String,
+    price: f64,
+    size: f64,
+    notional: f64,
+    order_type: String,
+    post_only: bool,
+    maker_only: bool,
+    tick_size: f64,
+    gtd_expiry_unix: u64,
+    market_end_unix: u64,
+    best_ask: f64,
+    book_age_ms: u64,
+    reference_age_ms: u64,
+    order_cap_state: &Path,
+    run_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if dry_run == human_approved {
+        return Err("live-canary requires exactly one of --dry-run or --human-approved".into());
+    }
+    if human_approved && !one_order {
+        return Err("live-canary --human-approved requires --one-order".into());
+    }
+
+    let mode = if human_approved {
+        CanaryMode::FinalGated
+    } else {
+        CanaryMode::DryRun
+    };
+    let side = parse_canary_side(&side)?;
+    let plan = CanaryOrderPlan {
+        market_slug,
+        condition_id,
+        token_id,
+        outcome,
+        side,
+        price,
+        size,
+        notional,
+        order_type,
+        post_only,
+        maker_only,
+        tick_size,
+        gtd_expiry_unix,
+        market_end_unix,
+        best_ask,
+    };
+
+    let geoblock = run_geoblock_validation(config).await?;
+    let geoblock_status = if geoblock.blocked {
+        CanaryGateStatus::Blocked
+    } else {
+        CanaryGateStatus::Passed
+    };
+    let l2_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    let canary_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.canary_secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+
+    let prerequisites = lb4_readback_prerequisites(
+        config,
+        safety::GeoblockGateStatus::from_blocked(geoblock.blocked),
+    );
+    let account = lb4_account_preflight(config)?;
+    let lb4_report = if prerequisites.lb3_hold_released
+        && prerequisites.legal_access_approved
+        && prerequisites.deployment_geoblock_passed
+        && l2_secret_report.all_present()
+    {
+        let credentials = lb4_l2_credentials_from_env(&config.live_beta.secret_handles)?;
+        live_beta_readback::authenticated_readback_preflight(AuthenticatedReadbackInput {
+            prerequisites,
+            account: account.clone(),
+            credentials,
+            required_collateral_allowance_units: config
+                .live_beta
+                .readback_account
+                .required_collateral_allowance_units,
+            request_timeout_ms: config.polymarket.request_timeout_ms,
+        })
+        .await?
+    } else {
+        live_beta_readback::sample_readback_preflight(prerequisites)?
+    };
+    let approval_context = CanaryApprovalContext {
+        run_id: run_id.to_string(),
+        host: lb6_host_label(),
+        geoblock_result: geoblock_result_label(&geoblock),
+        wallet_address: account.wallet_address.clone(),
+        funder_address: account.funder_address.clone(),
+        signature_type: account.signature_type.as_config_str().to_string(),
+        available_pusd_units: lb4_report.available_pusd_units,
+        reserved_pusd_units: lb4_report.reserved_pusd_units,
+        fee_estimate: "0.000000 pUSD maker-only estimate; reconcile if matched".to_string(),
+        book_age_ms,
+        reference_age_ms,
+        max_book_age_ms: config.risk.stale_book_ms,
+        max_reference_age_ms: config.risk.stale_reference_ms,
+        heartbeat: lb4_report.heartbeat.to_string(),
+        cancel_plan: "if still open after readback, cancel only this exact order ID; no cancel-all"
+            .to_string(),
+        rollback_command: "LIVE_ORDER_PLACEMENT_ENABLED=false; stop service if running".to_string(),
+    };
+    let cancel_report = live_beta_cancel::evaluate_cancel_readiness(
+        &live_beta_cancel::CancelReadinessInput::lb5_default(true),
+    );
+    let prior_canary_submission_attempted = read_canary_order_cap_consumed(order_cap_state)?;
+    let checks = CanaryRuntimeChecks {
+        canary_submission_enabled: live_beta_canary::LB6_ONE_ORDER_CANARY_SUBMISSION_ENABLED,
+        geoblock_status,
+        lb4_account_preflight_passed: lb4_report.passed() && lb4_report.live_network_enabled,
+        open_order_count: lb4_report.open_order_count,
+        canary_secret_handles_present: canary_secret_report.all_present(),
+        l2_secret_handles_present: l2_secret_report.all_present(),
+        lb5_rollback_ready: !cancel_report.block_reasons.iter().any(|reason| {
+            matches!(
+                *reason,
+                "cancel_plan_not_acknowledged" | "service_stop_not_ready" | "kill_switch_not_ready"
+            )
+        }),
+        lb5_cancel_readiness_blocks_until_canary_exists: !cancel_report
+            .cancel_request_constructable
+            && !cancel_report.live_cancel_network_enabled
+            && cancel_report
+                .block_reasons
+                .contains(&"approved_canary_order_missing"),
+        official_sdk_available: true,
+        previous_canary_submission_attempted: prior_canary_submission_attempted,
+    };
+
+    let approval = CanaryApprovalGuard {
+        approval_text,
+        expected_approval_sha256: approval_sha256,
+        approval_expires_at_unix,
+        now_unix: unix_time_secs(),
+    };
+    let report = live_beta_canary::evaluate_canary_readiness(
+        mode,
+        &plan,
+        &approval_context,
+        &approval,
+        &checks,
+    );
+
+    println!("live_beta_canary_status={}", report.status);
+    println!("live_beta_canary_mode={}", report.mode);
+    println!(
+        "live_beta_canary_submission_enabled={}",
+        report.canary_submission_enabled
+    );
+    println!(
+        "live_beta_canary_official_signing_client={}@{}",
+        report.official_signing_client, report.official_signing_client_version
+    );
+    println!(
+        "live_beta_canary_block_reasons={}",
+        report.block_reasons.join(",")
+    );
+    println!(
+        "live_beta_canary_approval_sha256={}",
+        report.approval_sha256
+    );
+    println!("live_beta_canary_not_submitted={}", report.not_submitted);
+    println!(
+        "live_beta_canary_one_order_cap_remaining={}",
+        report.one_order_cap_remaining
+    );
+    println!(
+        "live_beta_canary_lb4_preflight_passed={}",
+        checks.lb4_account_preflight_passed
+    );
+    println!(
+        "live_beta_canary_open_order_count={}",
+        checks.open_order_count
+    );
+    println!(
+        "live_beta_canary_lb5_cancel_blocks_until_canary={}",
+        checks.lb5_cancel_readiness_blocks_until_canary_exists
+    );
+    println!(
+        "live_beta_canary_canary_secret_handles_present={}",
+        checks.canary_secret_handles_present
+    );
+    println!(
+        "live_beta_canary_l2_secret_handles_present={}",
+        checks.l2_secret_handles_present
+    );
+    println!(
+        "live_beta_canary_final_approval_prompt=\n{}",
+        report.canonical_approval_text
+    );
+    println!(
+        "live_beta_canary_report={}",
+        serde_json::to_string(&report)?
+    );
+
+    if mode == CanaryMode::DryRun {
+        return Ok(());
+    }
+    if !report.ready_for_final_submission() {
+        return Err(format!(
+            "LB6 canary gate blocked: {}",
+            report.block_reasons.join(",")
+        )
+        .into());
+    }
+
+    let submit_input = live_beta_canary::CanarySubmitInput {
+        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+        signer_handle: config.live_beta.secret_handles.canary_private_key.clone(),
+        l2_access_handle: config.live_beta.secret_handles.clob_l2_access.clone(),
+        l2_secret_handle: config.live_beta.secret_handles.clob_l2_credential.clone(),
+        l2_passphrase_handle: config.live_beta.secret_handles.clob_l2_passphrase.clone(),
+        wallet_address: account.wallet_address,
+        funder_address: account.funder_address,
+        signature_type: account.signature_type,
+        plan,
+        approval_sha256: report.approval_sha256.clone(),
+    };
+    live_beta_canary::validate_canary_submit_input_without_network(&submit_input)?;
+    reserve_canary_order_cap(order_cap_state, &report.approval_sha256)?;
+    let submission = live_beta_canary::submit_one_canary_with_official_sdk(submit_input).await?;
+    update_canary_order_cap_with_order_id(
+        order_cap_state,
+        &report.approval_sha256,
+        &submission.order_id,
+    )?;
+    println!(
+        "live_beta_canary_submission_report={}",
+        serde_json::to_string(&submission)?
+    );
+
+    Ok(())
+}
+
 async fn run_lb4_readback_preflight_validation(
     config: &AppConfig,
     geoblock_gate_status: safety::GeoblockGateStatus,
@@ -2084,6 +2467,91 @@ fn lb4_l2_credentials_from_env(
         api_passphrase: env::var(&handles.clob_l2_passphrase)
             .map_err(|_| "LB4 clob_l2_passphrase handle is not present")?,
     })
+}
+
+fn parse_canary_side(value: &str) -> Result<Side, Box<dyn std::error::Error>> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "BUY" => Ok(Side::Buy),
+        "SELL" => Ok(Side::Sell),
+        _ => Err("LB6 canary side must be BUY or SELL".into()),
+    }
+}
+
+fn geoblock_result_label(geoblock: &GeoblockResponse) -> String {
+    let status = if geoblock.blocked {
+        "blocked"
+    } else {
+        "passed"
+    };
+    format!(
+        "status={},country={},region={}",
+        status,
+        geoblock.country.as_deref().unwrap_or("unknown"),
+        geoblock.region.as_deref().unwrap_or("unknown")
+    )
+}
+
+fn lb6_host_label() -> String {
+    env::var("HOSTNAME")
+        .or_else(|_| env::var("HOST"))
+        .unwrap_or_else(|_| "unknown-host".to_string())
+}
+
+fn read_canary_order_cap_consumed(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let contents = fs::read_to_string(path)?;
+    let state = live_beta_canary::canary_order_cap_state_from_json(&contents)?;
+    Ok(state.submission_attempted)
+}
+
+fn reserve_canary_order_cap(
+    path: &Path,
+    approval_sha256: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if read_canary_order_cap_consumed(path)? {
+        return Err("LB6 one-order canary cap is already consumed".into());
+    }
+    write_canary_order_cap_state(
+        path,
+        &CanaryOrderCapState {
+            submission_attempted: true,
+            approval_sha256: approval_sha256.to_string(),
+            reserved_at_unix: unix_time_secs(),
+            venue_order_id: None,
+        },
+    )
+}
+
+fn update_canary_order_cap_with_order_id(
+    path: &Path,
+    approval_sha256: &str,
+    venue_order_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_canary_order_cap_state(
+        path,
+        &CanaryOrderCapState {
+            submission_attempted: true,
+            approval_sha256: approval_sha256.to_string(),
+            reserved_at_unix: unix_time_secs(),
+            venue_order_id: Some(venue_order_id.to_string()),
+        },
+    )
+}
+
+fn write_canary_order_cap_state(
+    path: &Path,
+    state: &CanaryOrderCapState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, live_beta_canary::canary_order_cap_state_json(state)?)?;
+    Ok(())
 }
 
 fn lb4_readback_prerequisites(
@@ -2253,6 +2721,13 @@ fn unix_time_ms() -> i64 {
         .map(|duration| duration.as_millis())
         .ok()
         .and_then(|value| i64::try_from(value).ok())
+        .unwrap_or_default()
+}
+
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
         .unwrap_or_default()
 }
 

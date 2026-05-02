@@ -342,6 +342,16 @@ impl LiveBetaConfig {
             ],
         )
     }
+
+    pub fn canary_secret_inventory(&self) -> SecretInventory {
+        SecretInventory::new(
+            self.secret_handles.backend.clone(),
+            vec![SecretHandle::new(
+                "canary_private_key",
+                self.secret_handles.canary_private_key.clone(),
+            )],
+        )
+    }
 }
 
 fn default_live_beta_kill_switch_active() -> bool {
@@ -358,6 +368,8 @@ pub struct LiveBetaSecretHandlesConfig {
     pub clob_l2_credential: String,
     #[serde(default = "default_clob_l2_passphrase_handle")]
     pub clob_l2_passphrase: String,
+    #[serde(default = "default_canary_private_key_handle")]
+    pub canary_private_key: String,
 }
 
 impl Default for LiveBetaSecretHandlesConfig {
@@ -367,6 +379,7 @@ impl Default for LiveBetaSecretHandlesConfig {
             clob_l2_access: default_clob_l2_access_handle(),
             clob_l2_credential: default_clob_l2_credential_handle(),
             clob_l2_passphrase: default_clob_l2_passphrase_handle(),
+            canary_private_key: default_canary_private_key_handle(),
         }
     }
 }
@@ -385,6 +398,10 @@ fn default_clob_l2_credential_handle() -> String {
 
 fn default_clob_l2_passphrase_handle() -> String {
     "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE".to_string()
+}
+
+fn default_canary_private_key_handle() -> String {
+    "P15M_LIVE_BETA_CANARY_PRIVATE_KEY".to_string()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -710,6 +727,11 @@ fn require_live_beta_secret_handles_config(
         "live_beta.secret_handles.clob_l2_passphrase",
         &config.clob_l2_passphrase,
     );
+    require_env_handle_name(
+        errors,
+        "live_beta.secret_handles.canary_private_key",
+        &config.canary_private_key,
+    );
     let mut seen = BTreeSet::new();
     for (name, value) in [
         (
@@ -723,6 +745,10 @@ fn require_live_beta_secret_handles_config(
         (
             "live_beta.secret_handles.clob_l2_passphrase",
             &config.clob_l2_passphrase,
+        ),
+        (
+            "live_beta.secret_handles.canary_private_key",
+            &config.canary_private_key,
         ),
     ] {
         if !seen.insert(value) {
@@ -790,6 +816,10 @@ mod tests {
             config.live_beta.secret_handles.clob_l2_passphrase,
             "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE"
         );
+        assert_eq!(
+            config.live_beta.secret_handles.canary_private_key,
+            "P15M_LIVE_BETA_CANARY_PRIVATE_KEY"
+        );
         assert_eq!(config.reference_feed.provider, "none");
         assert!(!config.reference_feed.pyth_enabled);
         assert_eq!(
@@ -830,6 +860,7 @@ mod tests {
                     && !trimmed.starts_with("clob_l2_access")
                     && !trimmed.starts_with("clob_l2_credential")
                     && !trimmed.starts_with("clob_l2_passphrase")
+                    && !trimmed.starts_with("canary_private_key")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -841,6 +872,10 @@ mod tests {
         assert!(!config.live_beta.legal_access_approved);
         assert!(config.live_beta.kill_switch_active);
         assert_eq!(config.live_beta.secret_handles.backend, "env");
+        assert_eq!(
+            config.live_beta.secret_handles.canary_private_key,
+            "P15M_LIVE_BETA_CANARY_PRIVATE_KEY"
+        );
         config.validate().expect("legacy config validates");
     }
 

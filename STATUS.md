@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `main`
-- Current commit: `00e747690fc38c5a9154f47de49dffd716f0ea18` (merged PR #21).
-- Worktree status: LB5 cancel-readiness/runbook source, runbook, status, and verification updates are merged to `main`. No live order placement, live cancel proof, cancel-all, wallet key material, API-key value, secret value, geoblock bypass, strategy-to-live routing, or strategy/risk/freshness change was added.
+- Branch: `live-beta/lb6-one-order-canary`
+- Base commit: `32586c2` or newer from updated `main` after PR #21/LB5 merge.
+- Worktree status: LB6 one-order canary mechanism implementation in progress. No live order was submitted in this run. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
 
 ## Milestones
 
 - Last completed milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum is PASS for offline readiness only. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: mandatory hold before LB6. LB6 is not approved. The operator explicitly authorized LB5 only on 2026-05-02 after PR #20 merged to `main`; that authorization does not approve LB6, order posting, live cancel proof, cancel-all, autonomous live trading, or strategy-to-live routing.
+- Active milestone: LB6 mechanism only. The operator authorized implementation of the one-order canary signing/submission mechanism, but explicitly did not authorize any order submission in this run.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: LB6 may start only after explicit human/operator approval for the exact one-order canary plan. LB5 merge does not authorize any live order or live cancel proof.
+- Next exit gate: after this mechanism PR, a fresh immediate final recheck must produce a fresh market/order approval prompt. No order may be submitted until the operator approves the new exact prompt text/hash.
 
 ## M3 Scope Lock
 
@@ -336,6 +336,19 @@ PASS for offline cancel readiness and rollback/runbook minimum only.
 - LB5 safety result: no live order placement, order post, live cancel proof, cancel-all, wallet/private-key material, API-key value, secret value, authenticated order write client, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
 - Mandatory hold: stop after LB5. Do not start LB6 until the human/operator explicitly approves the exact one-order canary plan.
 
+## LB6 Mechanism Status
+
+IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this run.
+- Evidence file: `verification/2026-05-02-live-beta-lb6-one-order-canary-mechanism.md`.
+- Scope: one-order canary signing/submission mechanism only. No order was submitted and no live cancel was sent in this run.
+- Official docs rechecked for LB6 scope: CLOB authentication requires L1 private-key signing for order payloads plus L2 headers for posting signed orders; official SDK clients are recommended for signing/submission; `POST /order` creates one order; `DELETE /order` cancels one order; post-only is valid only with GTC/GTD and is rejected if marketable; CLOB rate limits still require fail-closed handling.
+- Added `src/live_beta_canary.rs` with exact approval text/hash gating, approval-expiry gating, one-order cap state, post-only/GTD/maker-only checks, price/size/notional checks, book/reference freshness checks, best-ask-above-bid check, geoblock/LB4/open-order/LB5/secret/SDK checks, and an official `polymarket_client_sdk_v2` final submission path.
+- Added `live-canary` CLI path with `--dry-run` and `--human-approved --one-order` modes. Dry-run prints the final approval prompt/hash and never submits. The approval prompt includes run ID, host, geoblock result, wallet/funder, signature type, pUSD available/reserved state, order intent, book/reference age, heartbeat, cancel plan, and rollback command. Final gated mode blocks unless the exact approval text/hash, fresh expiry, zero open orders, LB4 preflight, geoblock PASS, LB5 rollback readiness, L2 handles, canary private-key handle, official SDK path, fresh book/reference ages, and one-order cap all pass.
+- Final mode validates non-empty/parseable local signing and L2 env values before reserving the one-order cap sentinel, so bad local credentials cannot consume the only canary attempt before any venue submission call.
+- Global `LIVE_ORDER_PLACEMENT_ENABLED=false` remains unchanged. LB6 uses a narrower compile-time canary gate, `LB6_ONE_ORDER_CANARY_SUBMISSION_ENABLED=true`, inside `src/live_beta_canary.rs`; this path is still unreachable without the exact final gates above.
+- Current Codex environment blocker at implementation time: `P15M_LIVE_BETA_CANARY_PRIVATE_KEY`, `P15M_LIVE_BETA_CLOB_L2_ACCESS`, `P15M_LIVE_BETA_CLOB_L2_CREDENTIAL`, and `P15M_LIVE_BETA_CLOB_L2_PASSPHRASE` were not present in this shell. Because the final gate was not ready, no fresh approval prompt for a live market was produced here.
+- Safety result: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values in repo/logs/docs/chat, and no expired market approval reused.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -346,6 +359,7 @@ PASS for offline cancel readiness and rollback/runbook minimum only.
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
 - LB5 is offline readiness only. It does not prove live cancellation because live cancel proof is intentionally deferred to LB6 after one approved tiny canary order exists.
+- LB6 mechanism is present, but current final submission remains blocked until a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible market, non-marketable best ask above proposed bid, exact approval text/hash, and unused one-order cap.
 
 ## Next Concrete Action
 
@@ -353,12 +367,12 @@ PASS for offline cancel readiness and rollback/runbook minimum only.
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `main` at merged PR #21 commit `00e747690fc38c5a9154f47de49dffd716f0ea18`.
+- Current branch is `live-beta/lb6-one-order-canary`.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
-- Next concrete action is human/operator review of whether to authorize LB6. Do not start LB6 until the human explicitly authorizes the exact one-order canary plan.
-- Mandatory hold: LB6 remains blocked pending explicit human/operator authorization.
+- Next concrete action is commit/push/open PR for the LB6 mechanism. After this mechanism is merged, run a fresh immediate final recheck and produce a new exact canary approval prompt only if all final gates pass.
+- Mandatory hold: do not submit an order until the operator approves the new exact LB6 approval prompt text/hash.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
