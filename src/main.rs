@@ -2462,15 +2462,18 @@ async fn discover_preauthorized_envelope_binding(
         config.polymarket.market_discovery_max_pages,
         config.polymarket.request_timeout_ms,
     )?;
-    let discovery_run = discovery.discover_crypto_15m_markets().await?;
-    let Some(market) = discovery_run.markets.iter().find(|market| {
-        market.slug == plan.market_slug
-            && market.asset == Asset::Eth
-            && market.lifecycle_state == MarketLifecycleState::Active
-            && market.ineligibility_reason.is_none()
-    }) else {
+    let Some(market) = discovery
+        .discover_crypto_15m_market_by_slug(&plan.market_slug)
+        .await?
+    else {
         return Ok(None);
     };
+    if market.asset != Asset::Eth
+        || market.lifecycle_state != MarketLifecycleState::Active
+        || market.ineligibility_reason.is_some()
+    {
+        return Ok(None);
+    }
     let Some(up_token) = market
         .outcomes
         .iter()
