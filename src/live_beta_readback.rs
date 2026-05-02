@@ -475,6 +475,7 @@ pub async fn authenticated_readback_preflight(
     let client = ReadOnlyClobReadbackClient::new(
         input.account.clob_host.clone(),
         input.account.wallet_address.clone(),
+        input.account.funder_address.clone(),
         input.credentials,
         input.request_timeout_ms,
     )?;
@@ -518,6 +519,7 @@ struct ReadOnlyClobReadbackClient {
     http: reqwest::Client,
     host: String,
     address: String,
+    maker_address: String,
     credentials: L2ReadbackCredentials,
 }
 
@@ -525,6 +527,7 @@ impl ReadOnlyClobReadbackClient {
     fn new(
         host: String,
         address: String,
+        maker_address: String,
         credentials: L2ReadbackCredentials,
         timeout_ms: u64,
     ) -> LiveBetaReadbackResult<Self> {
@@ -540,6 +543,7 @@ impl ReadOnlyClobReadbackClient {
             http,
             host: host.trim_end_matches('/').to_string(),
             address,
+            maker_address,
             credentials,
         })
     }
@@ -587,7 +591,7 @@ impl ReadOnlyClobReadbackClient {
         let mut trades = Vec::new();
         for _ in 0..MAX_READBACK_PAGES {
             let body = self
-                .get_text(TRADES_PATH, &[("next_cursor", cursor.clone())])
+                .get_text(TRADES_PATH, &trades_query(&cursor, &self.maker_address))
                 .await?;
             let page = parse_trades_page_with_cursor(&body)?;
             trades.extend(page.data);
@@ -602,13 +606,25 @@ impl ReadOnlyClobReadbackClient {
     }
 
     async fn get_venue_state(&self) -> LiveBetaReadbackResult<VenueState> {
-        let body = self
-            .get_text(
-                SAMPLING_MARKETS_PATH,
-                &[("next_cursor", INITIAL_CURSOR.to_string())],
-            )
-            .await?;
-        parse_sampling_markets_venue_state(&body)
+        let mut cursor = INITIAL_CURSOR.to_string();
+        let mut markets = Vec::new();
+        for _ in 0..MAX_READBACK_PAGES {
+            let body = self
+                .get_text(SAMPLING_MARKETS_PATH, &[("next_cursor", cursor.clone())])
+                .await?;
+            let page = parse_sampling_markets_page_with_cursor(&body)?;
+            if derive_venue_state_from_sampling_markets(&page.data)? == VenueState::TradingEnabled {
+                return Ok(VenueState::TradingEnabled);
+            }
+            markets.extend(page.data);
+            let Some(next_cursor) = next_readback_cursor(&cursor, &page.next_cursor)? else {
+                return derive_venue_state_from_sampling_markets(&markets);
+            };
+            cursor = next_cursor;
+        }
+        Err(LiveBetaReadbackError::Validation(format!(
+            "{SAMPLING_MARKETS_PATH} pagination exceeded {MAX_READBACK_PAGES} pages"
+        )))
     }
 
     async fn get_text(
@@ -784,9 +800,18 @@ pub fn parse_venue_state(json: &str) -> LiveBetaReadbackResult<VenueState> {
 }
 
 pub fn parse_sampling_markets_venue_state(json: &str) -> LiveBetaReadbackResult<VenueState> {
+    derive_venue_state_from_sampling_markets(&parse_sampling_markets_page_with_cursor(json)?.data)
+}
+
+fn parse_sampling_markets_page_with_cursor(
+    json: &str,
+) -> LiveBetaReadbackResult<ReadbackPage<SamplingMarketWire>> {
     let wire: SamplingMarketsPageWire =
         serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
-    derive_venue_state_from_sampling_markets(&wire.data)
+    Ok(ReadbackPage {
+        data: wire.data,
+        next_cursor: wire.next_cursor,
+    })
 }
 
 pub fn parse_readback_error_response(
@@ -898,6 +923,7 @@ struct VenueStateWire {
 
 #[derive(Debug, Deserialize)]
 struct SamplingMarketsPageWire {
+    next_cursor: String,
     data: Vec<SamplingMarketWire>,
 }
 
@@ -1075,6 +1101,13 @@ fn next_readback_cursor(
         ));
     }
     Ok(Some(trimmed.to_string()))
+}
+
+fn trades_query(cursor: &str, maker_address: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("next_cursor", cursor.to_string()),
+        ("maker_address", maker_address.to_string()),
+    ]
 }
 
 fn derive_venue_state_from_sampling_markets(
@@ -1573,9 +1606,26 @@ mod tests {
     }
 
     #[test]
+    fn trade_readback_query_requires_maker_address_filter() {
+        let query = trades_query("MTAw", "0x1111111111111111111111111111111111111111");
+
+        assert_eq!(
+            query,
+            vec![
+                ("next_cursor", "MTAw".to_string()),
+                (
+                    "maker_address",
+                    "0x1111111111111111111111111111111111111111".to_string()
+                )
+            ]
+        );
+    }
+
+    #[test]
     fn sampling_markets_derive_trading_enabled_from_accepting_orderbook_market() {
         let state = parse_sampling_markets_venue_state(
             r#"{
+                "next_cursor": "",
                 "data": [{
                     "enable_order_book": true,
                     "active": true,
@@ -1594,6 +1644,7 @@ mod tests {
     fn sampling_markets_fail_closed_when_no_market_accepts_orders() {
         let state = parse_sampling_markets_venue_state(
             r#"{
+                "next_cursor": "",
                 "data": [{
                     "enable_order_book": true,
                     "active": true,
@@ -1612,6 +1663,48 @@ mod tests {
         assert_eq!(state, VenueState::CancelOnly);
         assert_eq!(report.status, "blocked");
         assert!(report.block_reasons.contains(&"venue_state_not_open"));
+    }
+
+    #[test]
+    fn sampling_markets_pages_can_surface_later_accepting_market() {
+        let first_page = parse_sampling_markets_page_with_cursor(
+            r#"{
+                "next_cursor": "MTAw",
+                "data": [{
+                    "enable_order_book": true,
+                    "active": true,
+                    "closed": false,
+                    "archived": false,
+                    "accepting_orders": false
+                }]
+            }"#,
+        )
+        .expect("first sampling page parses");
+        let second_page = parse_sampling_markets_page_with_cursor(
+            r#"{
+                "next_cursor": "",
+                "data": [{
+                    "enable_order_book": true,
+                    "active": true,
+                    "closed": false,
+                    "archived": false,
+                    "accepting_orders": true
+                }]
+            }"#,
+        )
+        .expect("second sampling page parses");
+        let mut markets = first_page.data;
+        markets.extend(second_page.data);
+
+        assert_eq!(
+            next_readback_cursor(INITIAL_CURSOR, &first_page.next_cursor)
+                .expect("sampling cursor advances"),
+            Some("MTAw".to_string())
+        );
+        assert_eq!(
+            derive_venue_state_from_sampling_markets(&markets).expect("venue state derives"),
+            VenueState::TradingEnabled
+        );
     }
 
     #[test]

@@ -22,8 +22,8 @@ The same approval explicitly does not approve order posting, canceling, cancel-a
 - `https://docs.polymarket.com/api-reference/introduction`: CLOB API base is `https://clob.polymarket.com`; authenticated CLOB endpoints require authentication.
 - `https://docs.polymarket.com/api-reference/authentication`: L2 headers are `POLY_ADDRESS`, `POLY_SIGNATURE`, `POLY_TIMESTAMP`, `POLY_API_KEY`, and `POLY_PASSPHRASE`; `POLY_SIGNATURE` is an HMAC-SHA256 signature using the L2 secret value.
 - `https://docs.polymarket.com/api-reference/trade/get-user-orders`: open-order readback is `GET /data/orders`, returns paginated results, and exposes `next_cursor`.
-- `https://docs.polymarket.com/api-reference/trade/get-trades`: trade readback is `GET /trades`, returns paginated results, and exposes `next_cursor`.
-- `https://docs.polymarket.com/api-reference/markets/get-sampling-markets`: read-only CLOB sampling markets expose `enable_order_book`, `active`, `closed`, `archived`, and `accepting_orders`, which are used as the LB4 live venue-state signal.
+- `https://docs.polymarket.com/api-reference/trade/get-trades`: trade readback is `GET /trades`, requires `maker_address`, returns paginated results, and exposes `next_cursor`.
+- `https://docs.polymarket.com/api-reference/markets/get-sampling-markets`: read-only CLOB sampling markets expose `enable_order_book`, `active`, `closed`, `archived`, `accepting_orders`, and paginated `next_cursor`, which are used as the LB4 live venue-state signal.
 - `https://docs.polymarket.com/trading/orders/overview`: balances, allowances, order reservations, trade lifecycle statuses, transaction hashes, and heartbeat behavior remain required LB4 preflight evidence.
 - `https://docs.polymarket.com/resources/error-codes`: auth failure, rate limit, trading-disabled, cancel-only, malformed, delayed, unmatched, and other venue errors must fail closed. The current docs state `GET /balance-allowance` `signature_type` must be `EOA`, `POLY_PROXY`, or `GNOSIS_SAFE`, but the official `py_clob_client_v2` sends numeric values `0`, `1`, and `2`; the readback client follows the official v2 client after approved-host SDK comparison.
 
@@ -37,8 +37,9 @@ The implementation also cross-checked the official V2 Python client HMAC fixture
 - Changed `validate --live-readback-preflight` so the online LB4 path runs geoblock plus readback preflight without invoking the older M2 Postgres market-discovery persistence path.
 - Changed `GET /balance-allowance` to match the official v2 Python client numeric signature-type query values (`0`, `1`, `2`) and added a regression test for that mapping.
 - Updated `GET /balance-allowance` parsing to accept both documented singular `allowance` and live plural `allowances` map responses. Plural maps use the lowest returned allowance for the readiness threshold so the gate remains fail-closed when any returned spender allowance is low or malformed.
-- PR #20 P1 review fix: authenticated LB4 preflight now queries read-only `GET /sampling-markets` and derives `venue_state` from live CLOB market fields instead of hardcoding `trading_enabled`. Empty, malformed, closed, archived, disabled, or non-accepting sampling-market state fails closed through `venue_state_not_open`.
+- PR #20 P1 review fix: authenticated LB4 preflight now queries read-only `GET /sampling-markets`, paginates it through `next_cursor`, and derives `venue_state` from live CLOB market fields instead of hardcoding `trading_enabled`. Empty, malformed, closed, archived, disabled, or non-accepting sampling-market state fails closed through `venue_state_not_open`.
 - PR #20 P1 review fix: authenticated `GET /data/orders` and `GET /trades` now fetch all pages using `next_cursor` before preflight evaluation. Empty and `LTE=` cursors terminate pagination; non-advancing cursors or more than 50 pages fail closed.
+- PR #20 P1 review fix: authenticated `GET /trades` now sends the configured funder/proxy address as required `maker_address`, keeping trade readback scoped to the account under preflight.
 - Kept `validate --local-only --live-readback-preflight` on the existing synthetic fixture path.
 
 No order post method, cancel method, cancel-all method, generalized trading-capable client, wallet private-key handling, or strategy-to-live routing was added.
@@ -208,7 +209,7 @@ None for LB4. The run reported `trade_count=3` and passed, so trade status and c
 ## Verification
 
 - `cargo fmt --check`: PASS.
-- `cargo test --offline readback`: PASS, 26 lib tests and 1 main test after the PR #20 P1 fixes for sampling-market venue-state derivation and paginated order/trade readback. Earlier plural `allowances` parser correction passed 22 lib tests and 1 main test.
+- `cargo test --offline readback`: PASS, 28 lib tests and 1 main test after the PR #20 fixes for required trade `maker_address`, sampling-market pagination, sampling-market venue-state derivation, and paginated order/trade readback. Earlier plural `allowances` parser correction passed 22 lib tests and 1 main test.
 - `cargo test --offline balance`: PASS, 4 lib tests.
 - `cargo test --offline allowance`: PASS, 5 lib tests after the plural `allowances` parser correction.
 - `cargo test --offline heartbeat`: PASS, 2 lib tests.
@@ -217,7 +218,7 @@ None for LB4. The run reported `trade_count=3` and passed, so trade status and c
 - `cargo run --offline -- --config config/default.toml validate --local-only`: PASS.
 - Historical pre-population `cargo run --offline -- --config config/local.toml validate --local-only --validate-secret-handles`: expected BLOCKED result because approved env handles were absent in that shell.
 - Historical pre-population `cargo run --offline -- --config config/local.toml validate --live-readback-preflight`: expected BLOCKED result after geoblock PASS because approved env handles were absent in that shell.
-- `cargo test --offline`: PASS, 173 lib tests and 6 main tests.
+- `cargo test --offline`: PASS, 175 lib tests and 6 main tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - trailing whitespace scan on edited markdown/source: PASS, no hits.
@@ -229,6 +230,8 @@ PR #20 P1 review fix checks:
 - Venue fail-closed regression: `sampling_markets_fail_closed_when_no_market_accepts_orders` confirms active order-book markets with `accepting_orders=false` block preflight with `venue_state_not_open`.
 - Order pagination regression: `readback_order_pages_preserve_next_cursor_for_complete_fetches` confirms nonterminal cursors advance and terminal cursors stop pagination.
 - Trade pagination regression: `readback_trade_pagination_can_surface_later_page_blocker` confirms a disqualifying failed trade beyond page 1 still blocks preflight.
+- Trade query regression: `trade_readback_query_requires_maker_address_filter` confirms the authenticated `GET /trades` request includes required `maker_address`.
+- Sampling-market pagination regression: `sampling_markets_pages_can_surface_later_accepting_market` confirms later sampling-market pages can produce `trading_enabled` instead of blocking purely due to first-page ordering.
 
 ## Safety And No-Secret Scan
 
