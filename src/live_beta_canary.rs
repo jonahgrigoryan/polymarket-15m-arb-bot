@@ -68,6 +68,14 @@ pub struct CanaryApprovalContext {
     pub heartbeat: String,
     pub cancel_plan: String,
     pub rollback_command: String,
+    pub preauthorized_envelope_binding: Option<PreauthorizedEnvelopeBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreauthorizedEnvelopeBinding {
+    pub market_slug: String,
+    pub condition_id: String,
+    pub up_token_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -262,6 +270,9 @@ pub fn evaluate_canary_readiness(
     }
     if mode == CanaryMode::PreauthorizedEnvelope && !LB6_PREAUTHORIZED_CANARY_ENVELOPE_ENABLED {
         block_reasons.push("preauthorized_envelope_disabled");
+    }
+    if mode == CanaryMode::PreauthorizedEnvelope {
+        validate_preauthorized_envelope_binding(plan, context, &mut block_reasons);
     }
 
     if !checks.canary_submission_enabled {
@@ -627,6 +638,29 @@ fn validate_preauthorized_envelope(
     }
     if !float_eq(plan.tick_size, LB6_PREAUTHORIZED_TICK_SIZE) {
         block_reasons.push("preauthorized_envelope_tick_size_mismatch");
+    }
+}
+
+fn validate_preauthorized_envelope_binding(
+    plan: &CanaryOrderPlan,
+    context: &CanaryApprovalContext,
+    block_reasons: &mut Vec<&'static str>,
+) {
+    let Some(binding) = context.preauthorized_envelope_binding.as_ref() else {
+        block_reasons.push("preauthorized_envelope_binding_missing");
+        return;
+    };
+    if binding.market_slug != plan.market_slug {
+        block_reasons.push("preauthorized_envelope_binding_slug_mismatch");
+    }
+    if !binding
+        .condition_id
+        .eq_ignore_ascii_case(&plan.condition_id)
+    {
+        block_reasons.push("preauthorized_envelope_condition_id_mismatch");
+    }
+    if binding.up_token_id.trim() != plan.token_id.trim() {
+        block_reasons.push("preauthorized_envelope_up_token_id_mismatch");
     }
 }
 
@@ -1029,6 +1063,80 @@ mod tests {
     }
 
     #[test]
+    fn canary_preauthorized_envelope_requires_fresh_market_binding() {
+        let mut context = valid_context();
+        context.preauthorized_envelope_binding = None;
+        let plan = valid_plan();
+        let report = evaluate_canary_readiness(
+            CanaryMode::PreauthorizedEnvelope,
+            &plan,
+            &context,
+            &CanaryApprovalGuard {
+                approval_text: None,
+                expected_approval_sha256: None,
+                approval_expires_at_unix: None,
+                now_unix: 1_777_755_700,
+            },
+            &passing_checks(),
+        );
+
+        assert!(report
+            .block_reasons
+            .contains(&"preauthorized_envelope_binding_missing"));
+    }
+
+    #[test]
+    fn canary_preauthorized_envelope_rejects_mismatched_binding() {
+        for (binding, expected_reason) in [
+            (
+                PreauthorizedEnvelopeBinding {
+                    market_slug: "eth-updown-15m-1777756500".to_string(),
+                    ..valid_preauthorized_binding()
+                },
+                "preauthorized_envelope_binding_slug_mismatch",
+            ),
+            (
+                PreauthorizedEnvelopeBinding {
+                    condition_id:
+                        "0x1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_string(),
+                    ..valid_preauthorized_binding()
+                },
+                "preauthorized_envelope_condition_id_mismatch",
+            ),
+            (
+                PreauthorizedEnvelopeBinding {
+                    up_token_id: "1".to_string(),
+                    ..valid_preauthorized_binding()
+                },
+                "preauthorized_envelope_up_token_id_mismatch",
+            ),
+        ] {
+            let mut context = valid_context();
+            context.preauthorized_envelope_binding = Some(binding);
+            let plan = valid_plan();
+            let report = evaluate_canary_readiness(
+                CanaryMode::PreauthorizedEnvelope,
+                &plan,
+                &context,
+                &CanaryApprovalGuard {
+                    approval_text: None,
+                    expected_approval_sha256: None,
+                    approval_expires_at_unix: None,
+                    now_unix: 1_777_755_700,
+                },
+                &passing_checks(),
+            );
+
+            assert!(
+                report.block_reasons.contains(&expected_reason),
+                "expected {expected_reason}, got {:?}",
+                report.block_reasons
+            );
+        }
+    }
+
+    #[test]
     fn canary_fails_closed_when_secret_handles_are_missing() {
         let report = report_with_checks(CanaryRuntimeChecks {
             canary_secret_handles_present: false,
@@ -1317,6 +1425,16 @@ mod tests {
                     .to_string(),
             rollback_command: "LIVE_ORDER_PLACEMENT_ENABLED=false; stop service if running"
                 .to_string(),
+            preauthorized_envelope_binding: Some(valid_preauthorized_binding()),
+        }
+    }
+
+    fn valid_preauthorized_binding() -> PreauthorizedEnvelopeBinding {
+        let plan = valid_plan();
+        PreauthorizedEnvelopeBinding {
+            market_slug: plan.market_slug,
+            condition_id: plan.condition_id,
+            up_token_id: plan.token_id,
         }
     }
 

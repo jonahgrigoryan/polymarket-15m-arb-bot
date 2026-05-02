@@ -23,7 +23,7 @@ use polymarket_15m_arb_bot::{
     },
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
-        CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks,
+        CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks, PreauthorizedEnvelopeBinding,
     },
     live_beta_cancel,
     live_beta_order_lifecycle::{
@@ -2244,12 +2244,16 @@ async fn run_lb6_live_canary(
         best_bid,
         best_ask,
     };
-
     let geoblock = run_geoblock_validation(config).await?;
     let geoblock_status = if geoblock.blocked {
         CanaryGateStatus::Blocked
     } else {
         CanaryGateStatus::Passed
+    };
+    let preauthorized_envelope_binding = if preauthorized_envelope && !geoblock.blocked {
+        discover_preauthorized_envelope_binding(config, &plan).await?
+    } else {
+        None
     };
     let l2_secret_report = secret_handling::validate_secret_presence(
         &config.live_beta.secret_inventory(),
@@ -2303,6 +2307,7 @@ async fn run_lb6_live_canary(
         cancel_plan: "if still open after readback, cancel only this exact order ID; no cancel-all"
             .to_string(),
         rollback_command: "LIVE_ORDER_PLACEMENT_ENABLED=false; stop service if running".to_string(),
+        preauthorized_envelope_binding,
     };
     let cancel_report = live_beta_cancel::evaluate_cancel_readiness(
         &live_beta_cancel::CancelReadinessInput::lb5_default(true),
@@ -2444,6 +2449,41 @@ async fn run_lb6_live_canary(
     );
 
     Ok(())
+}
+
+async fn discover_preauthorized_envelope_binding(
+    config: &AppConfig,
+    plan: &CanaryOrderPlan,
+) -> Result<Option<PreauthorizedEnvelopeBinding>, Box<dyn std::error::Error>> {
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    let Some(market) = discovery_run.markets.iter().find(|market| {
+        market.slug == plan.market_slug
+            && market.asset == Asset::Eth
+            && market.lifecycle_state == MarketLifecycleState::Active
+            && market.ineligibility_reason.is_none()
+    }) else {
+        return Ok(None);
+    };
+    let Some(up_token) = market
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.outcome.eq_ignore_ascii_case("Up"))
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(PreauthorizedEnvelopeBinding {
+        market_slug: market.slug.clone(),
+        condition_id: market.condition_id.clone(),
+        up_token_id: up_token.token_id.clone(),
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]

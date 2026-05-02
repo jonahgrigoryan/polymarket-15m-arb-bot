@@ -32,8 +32,15 @@ The pre-authorized mode is intentionally narrower than general LB6:
 - Book and reference ages must remain under configured stale thresholds.
 - Reserved pUSD must be zero.
 - Available pUSD must exceed the canary notional.
+- Fresh market discovery must bind the supplied `condition_id` and `Up` `token_id` to the supplied ETH 15-minute market slug before the pre-authorized mode can submit.
 
-The runtime still requires geoblock PASS, LB4 authenticated readback/account preflight PASS, zero open orders, L2 handles present, canary private-key handle present, LB5 rollback readiness, the LB6 exact single-order cancel path, official SDK availability, and an unused local one-order cap sentinel.
+The runtime still requires geoblock PASS, LB4 authenticated readback/account preflight PASS, zero open orders, L2 handles present, canary private-key handle present, LB5 rollback readiness, the LB6 exact single-order cancel path, official SDK availability, an unused local one-order cap sentinel, and the fresh discovery binding.
+
+## PR Review Fix
+
+- Addressed P1 review finding: `--preauthorized-envelope` no longer relies on caller-supplied `condition_id` and `token_id` alone.
+- Added readiness blocking when the fresh discovery binding is missing, the discovered slug differs, the discovered condition ID differs, or the discovered `Up` token ID differs.
+- Wired `live-canary --preauthorized-envelope --one-order` to fetch current market discovery before evaluating readiness and pass the discovered binding into the safety module.
 
 ## Safety Result
 
@@ -47,15 +54,15 @@ The runtime still requires geoblock PASS, LB4 authenticated readback/account pre
 ## Verification
 
 - `cargo fmt --check` PASS.
-- `cargo test --offline canary` PASS: 20 focused canary/cancel/lifecycle tests, including pre-authorized envelope fixed-shape/current-window checks.
+- `cargo test --offline canary` PASS: 22 focused canary/cancel/lifecycle tests, including pre-authorized envelope fixed-shape/current-window and discovery-binding mismatch checks.
 - `cargo test --offline lifecycle` PASS.
 - `cargo test --offline cancel` PASS.
 - `cargo test --offline readback` PASS.
 - `cargo test --offline secret` PASS.
 - `cargo test --offline redaction` PASS.
-- `cargo run --offline -- --config config/default.toml validate --local-only` PASS, run_id `18abe22cc1df5cc0-1115c-0`.
-- `cargo run --offline -- --config config/default.toml validate --local-only --live-cancel-readiness` PASS, run_id `18abe22f2c7d3500-11211-0`; cancel readiness remains fail-closed without an approved canary order.
-- `cargo test --offline` PASS: 213 lib tests + 8 main tests.
+- `cargo run --offline -- --config config/default.toml validate --local-only` PASS, run_id `18abe3239ba60d40-13fdd-0`.
+- `cargo run --offline -- --config config/default.toml validate --local-only --live-cancel-readiness` PASS, run_id `18abe3239a6b81d0-13fdc-0`; cancel readiness remains fail-closed without an approved canary order.
+- `cargo test --offline` PASS: 215 lib tests + 8 main tests.
 - `cargo clippy --offline -- -D warnings` PASS.
 - `git diff --check` PASS.
 - Safety scans PASS with expected hits only: existing gated canary `post_order` path, exact single-order cancel/readback path, paper order/cancel simulation paths, disabled live-order gate strings, public condition/feed IDs, and secret handle names.
