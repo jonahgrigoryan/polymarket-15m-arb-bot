@@ -1,6 +1,7 @@
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -196,10 +197,12 @@ enum Commands {
         #[arg(long)]
         market_end_unix: u64,
         #[arg(long)]
+        best_bid: f64,
+        #[arg(long)]
         best_ask: f64,
         #[arg(
             long,
-            help = "Age in milliseconds of the fresh book snapshot used for best ask"
+            help = "Age in milliseconds of the fresh book snapshot used for best bid/ask"
         )]
         book_age_ms: u64,
         #[arg(
@@ -402,6 +405,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 tick_size,
                 gtd_expiry_unix,
                 market_end_unix,
+                best_bid,
                 best_ask,
                 book_age_ms,
                 reference_age_ms,
@@ -429,6 +433,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     tick_size,
                     gtd_expiry_unix,
                     market_end_unix,
+                    best_bid,
                     best_ask,
                     book_age_ms,
                     reference_age_ms,
@@ -2091,6 +2096,7 @@ async fn run_lb6_live_canary(
     tick_size: f64,
     gtd_expiry_unix: u64,
     market_end_unix: u64,
+    best_bid: f64,
     best_ask: f64,
     book_age_ms: u64,
     reference_age_ms: u64,
@@ -2125,6 +2131,7 @@ async fn run_lb6_live_canary(
         tick_size,
         gtd_expiry_unix,
         market_end_unix,
+        best_bid,
         best_ask,
     };
 
@@ -2510,18 +2517,13 @@ fn reserve_canary_order_cap(
     path: &Path,
     approval_sha256: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if read_canary_order_cap_consumed(path)? {
-        return Err("LB6 one-order canary cap is already consumed".into());
-    }
-    write_canary_order_cap_state(
-        path,
-        &CanaryOrderCapState {
-            submission_attempted: true,
-            approval_sha256: approval_sha256.to_string(),
-            reserved_at_unix: unix_time_secs(),
-            venue_order_id: None,
-        },
-    )
+    let state = CanaryOrderCapState {
+        submission_attempted: true,
+        approval_sha256: approval_sha256.to_string(),
+        reserved_at_unix: unix_time_secs(),
+        venue_order_id: None,
+    };
+    write_new_canary_order_cap_state(path, &state)
 }
 
 fn update_canary_order_cap_with_order_id(
@@ -2544,13 +2546,40 @@ fn write_canary_order_cap_state(
     path: &Path,
     state: &CanaryOrderCapState,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_canary_order_cap_parent(path)?;
+    fs::write(path, live_beta_canary::canary_order_cap_state_json(state)?)?;
+    Ok(())
+}
+
+fn write_new_canary_order_cap_state(
+    path: &Path,
+    state: &CanaryOrderCapState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_canary_order_cap_parent(path)?;
+    let contents = live_beta_canary::canary_order_cap_state_json(state)?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err("LB6 one-order canary cap is already reserved or consumed".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn ensure_canary_order_cap_parent(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, live_beta_canary::canary_order_cap_state_json(state)?)?;
     Ok(())
 }
 
@@ -2920,6 +2949,34 @@ mod tests {
 
         assert_eq!(report.status, "passed");
         assert!(!report.block_reasons.contains(&"clob_host_mismatch"));
+    }
+
+    #[test]
+    fn lb6_order_cap_reservation_fails_closed_when_state_exists() {
+        let path = std::env::temp_dir().join(format!(
+            "p15m-lb6-cap-{}-{}.json",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+
+        reserve_canary_order_cap(&path, "sha256:first").expect("first reservation succeeds");
+        let first_state = live_beta_canary::canary_order_cap_state_from_json(
+            &fs::read_to_string(&path).expect("reserved state reads"),
+        )
+        .expect("reserved state parses");
+        let second_error = reserve_canary_order_cap(&path, "sha256:second")
+            .expect_err("second reservation fails closed")
+            .to_string();
+        let final_state = live_beta_canary::canary_order_cap_state_from_json(
+            &fs::read_to_string(&path).expect("final state reads"),
+        )
+        .expect("final state parses");
+
+        assert!(second_error.contains("already reserved or consumed"));
+        assert_eq!(first_state.approval_sha256, "sha256:first");
+        assert_eq!(final_state, first_state);
+
+        fs::remove_file(path).expect("test cap state removed");
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {

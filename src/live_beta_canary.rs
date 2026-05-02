@@ -39,6 +39,7 @@ pub struct CanaryOrderPlan {
     pub tick_size: f64,
     pub gtd_expiry_unix: u64,
     pub market_end_unix: u64,
+    pub best_bid: f64,
     pub best_ask: f64,
 }
 
@@ -179,6 +180,8 @@ pub fn canonical_approval_text(plan: &CanaryOrderPlan, context: &CanaryApprovalC
             "Notional: {} pUSD\n",
             "GTD expiry unix: {}\n",
             "Market end unix: {}\n",
+            "Best bid: {}\n",
+            "Best ask: {}\n",
             "Fee estimate: {}\n",
             "Current book age ms: {}\n",
             "Reference age ms: {}\n",
@@ -204,6 +207,8 @@ pub fn canonical_approval_text(plan: &CanaryOrderPlan, context: &CanaryApprovalC
         decimal_label(plan.notional),
         plan.gtd_expiry_unix,
         plan.market_end_unix,
+        decimal_label(plan.best_bid),
+        decimal_label(plan.best_ask),
         context.fee_estimate,
         context.book_age_ms,
         context.reference_age_ms,
@@ -481,8 +486,20 @@ fn validate_plan<'a>(
     if !plan.tick_size.is_finite() || plan.tick_size <= 0.0 || plan.tick_size > 1.0 {
         block_reasons.push("tick_size_invalid");
     }
-    if plan.best_ask <= plan.price {
-        block_reasons.push("best_ask_not_above_bid");
+    if !valid_price(plan.best_bid) {
+        block_reasons.push("best_bid_invalid");
+    }
+    if !valid_price(plan.best_ask) {
+        block_reasons.push("best_ask_invalid");
+    }
+    match plan.side {
+        Side::Buy if valid_price(plan.best_ask) && plan.best_ask <= plan.price => {
+            block_reasons.push("best_ask_not_above_bid");
+        }
+        Side::Sell if valid_price(plan.best_bid) && plan.best_bid >= plan.price => {
+            block_reasons.push("best_bid_not_below_sell_price");
+        }
+        _ => {}
     }
     if plan.gtd_expiry_unix <= approval.now_unix + MIN_GTD_SECURITY_BUFFER_SECS {
         block_reasons.push("gtd_expiry_missing_security_buffer");
@@ -888,6 +905,40 @@ mod tests {
     }
 
     #[test]
+    fn canary_uses_best_bid_for_sell_marketability() {
+        let mut plan = valid_plan();
+        plan.side = Side::Sell;
+        plan.price = 0.05;
+        plan.notional = 0.25;
+        plan.best_bid = 0.03;
+        plan.best_ask = 0.04;
+
+        let report = report_for_plan(plan);
+
+        assert_eq!(report.status, "ready_for_one_order_canary");
+        assert!(!report.block_reasons.contains(&"best_ask_not_above_bid"));
+        assert!(!report
+            .block_reasons
+            .contains(&"best_bid_not_below_sell_price"));
+    }
+
+    #[test]
+    fn canary_fails_closed_when_best_bid_would_make_sell_marketable() {
+        let mut plan = valid_plan();
+        plan.side = Side::Sell;
+        plan.price = 0.05;
+        plan.notional = 0.25;
+        plan.best_bid = plan.price;
+        plan.best_ask = 0.50;
+
+        let report = report_for_plan(plan);
+
+        assert!(report
+            .block_reasons
+            .contains(&"best_bid_not_below_sell_price"));
+    }
+
+    #[test]
     fn canary_fails_closed_when_second_order_would_be_attempted() {
         let report = report_with_checks(CanaryRuntimeChecks {
             previous_canary_submission_attempted: true,
@@ -993,6 +1044,7 @@ mod tests {
             tick_size: 0.01,
             gtd_expiry_unix: 1_777_756_200,
             market_end_unix: 1_777_756_600,
+            best_bid: 0.49,
             best_ask: 0.50,
         }
     }

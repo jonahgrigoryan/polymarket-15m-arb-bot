@@ -32,16 +32,16 @@ No order was submitted in this run. No live cancel was sent in this run.
   - Exact canonical approval text generation.
   - Approval `sha256:<hex>` guard.
   - Approval expiry guard.
-  - One-order cap state type for local non-secret sentinel storage.
+  - Atomic one-order cap reservation using local non-secret sentinel storage.
   - GTD/post-only/maker-only checks.
   - Price, size, notional, tick alignment, and LB6 notional cap checks.
-  - Best-ask-above-bid check for the post-only maker canary.
+  - Side-aware non-marketable bid/ask check for the post-only maker canary.
   - Geoblock, LB4 preflight, zero-open-orders, LB5 rollback, secret-handle, and official-SDK readiness checks.
   - Official `polymarket_client_sdk_v2` final signing/submission path for exactly one order.
 - Added `live-canary` CLI path.
   - `--dry-run`: evaluates gates and prints the fresh final approval prompt/hash without submitting.
   - `--human-approved --one-order`: final gated mode; blocks unless exact approval text/hash and every pre-submit gate pass.
-  - The approval prompt includes run ID, host, geoblock result, wallet/funder, signature type, pUSD available/reserved state, market slug, condition ID, token ID, outcome, side, price, size, notional, order type, GTD expiry, market end, fee estimate, book age, reference age, heartbeat, cancel plan, and rollback command.
+  - The approval prompt includes run ID, host, geoblock result, wallet/funder, signature type, pUSD available/reserved state, market slug, condition ID, token ID, outcome, side, price, size, notional, order type, GTD expiry, market end, best bid, best ask, fee estimate, book age, reference age, heartbeat, cancel plan, and rollback command.
   - Final mode validates non-empty/parseable local signing and L2 env values before reserving the one-order cap sentinel, so bad local credentials cannot consume the only canary attempt before any venue submission call.
 - Added canary private-key handle metadata:
   - `P15M_LIVE_BETA_CANARY_PRIVATE_KEY`
@@ -116,7 +116,7 @@ All required verification above passed. Safety/no-secret scan hits were expected
 Negative dry-run check:
 
 ```bash
-cargo run --offline -- --config config/default.toml live-canary --dry-run --market-slug eth-updown-15m-demo --condition-id 0x0000000000000000000000000000000000000000000000000000000000000001 --token-id 1 --outcome Up --side BUY --price 0.01 --size 5 --notional 0.05 --gtd-expiry-unix 1777762400 --market-end-unix 1777763000 --best-ask 0.50 --book-age-ms 250 --reference-age-ms 250
+cargo run --offline -- --config config/default.toml live-canary --dry-run --market-slug eth-updown-15m-demo --condition-id 0x0000000000000000000000000000000000000000000000000000000000000001 --token-id 1 --outcome Up --side BUY --price 0.01 --size 5 --notional 0.05 --gtd-expiry-unix 1777762400 --market-end-unix 1777763000 --best-bid 0.49 --best-ask 0.50 --book-age-ms 250 --reference-age-ms 250
 ```
 
 Expected result: failed closed before any canary evaluation because `config/default.toml` intentionally has no approved LB4 readback account signature type. No order was submitted.
