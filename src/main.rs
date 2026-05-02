@@ -163,6 +163,11 @@ enum Commands {
         human_approved: bool,
         #[arg(
             long,
+            help = "Use the reviewed LB6 pre-authorized ETH one-order canary envelope"
+        )]
+        preauthorized_envelope: bool,
+        #[arg(
+            long,
             help = "Required in final gated mode to enforce the one-order cap"
         )]
         one_order: bool,
@@ -438,6 +443,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             Commands::LiveCanary {
                 dry_run,
                 human_approved,
+                preauthorized_envelope,
                 one_order,
                 approval_text,
                 approval_sha256,
@@ -466,6 +472,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &config,
                     dry_run,
                     human_approved,
+                    preauthorized_envelope,
                     one_order,
                     approval_text,
                     approval_sha256,
@@ -2162,6 +2169,7 @@ async fn run_lb6_live_canary(
     config: &AppConfig,
     dry_run: bool,
     human_approved: bool,
+    preauthorized_envelope: bool,
     one_order: bool,
     approval_text: Option<String>,
     approval_sha256: Option<String>,
@@ -2187,15 +2195,33 @@ async fn run_lb6_live_canary(
     order_cap_state: &Path,
     run_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if dry_run == human_approved {
-        return Err("live-canary requires exactly one of --dry-run or --human-approved".into());
+    let selected_mode_count = [dry_run, human_approved, preauthorized_envelope]
+        .iter()
+        .filter(|selected| **selected)
+        .count();
+    if selected_mode_count != 1 {
+        return Err(
+            "live-canary requires exactly one of --dry-run, --human-approved, or --preauthorized-envelope"
+                .into(),
+        );
     }
-    if human_approved && !one_order {
-        return Err("live-canary --human-approved requires --one-order".into());
+    if (human_approved || preauthorized_envelope) && !one_order {
+        return Err("live-canary final modes require --one-order to enforce the canary cap".into());
+    }
+    if preauthorized_envelope
+        && (approval_text.is_some()
+            || approval_sha256.is_some()
+            || approval_expires_at_unix.is_some())
+    {
+        return Err(
+            "live-canary --preauthorized-envelope does not accept exact approval flags".into(),
+        );
     }
 
     let mode = if human_approved {
         CanaryMode::FinalGated
+    } else if preauthorized_envelope {
+        CanaryMode::PreauthorizedEnvelope
     } else {
         CanaryMode::DryRun
     };
@@ -2365,10 +2391,17 @@ async fn run_lb6_live_canary(
         "live_beta_canary_l2_secret_handles_present={}",
         checks.l2_secret_handles_present
     );
-    println!(
-        "live_beta_canary_final_approval_prompt=\n{}",
-        report.canonical_approval_text
-    );
+    match mode {
+        CanaryMode::DryRun | CanaryMode::FinalGated => {
+            println!(
+                "live_beta_canary_final_approval_prompt=\n{}",
+                report.canonical_approval_text
+            );
+        }
+        CanaryMode::PreauthorizedEnvelope => {
+            println!("live_beta_canary_preauthorized_envelope_enabled=true");
+        }
+    }
     println!(
         "live_beta_canary_report={}",
         serde_json::to_string(&report)?
