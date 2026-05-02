@@ -183,6 +183,11 @@ pub fn parse_single_cancel_response(
         .canceled
         .iter()
         .any(|canceled_id| canceled_id == order_id);
+    let target_canceled_count = response
+        .canceled
+        .iter()
+        .filter(|canceled_id| *canceled_id == order_id)
+        .count();
     let unexpected_canceled_order = response
         .canceled
         .iter()
@@ -195,6 +200,9 @@ pub fn parse_single_cancel_response(
 
     if unexpected_canceled_order {
         block_reasons.push("unexpected_canceled_order_ids");
+    }
+    if target_canceled_count > 1 {
+        block_reasons.push("duplicate_canceled_order_ids");
     }
     if unexpected_not_canceled_order {
         block_reasons.push("unexpected_not_canceled_order_ids");
@@ -457,6 +465,22 @@ mod tests {
         assert!(report
             .block_reasons
             .contains(&"unexpected_canceled_order_ids"));
+    }
+
+    #[test]
+    fn cancel_response_fails_closed_for_duplicate_canceled_order_ids() {
+        let report = parse_single_cancel_response(
+            ORDER_ID,
+            &format!(r#"{{"canceled":["{ORDER_ID}","{ORDER_ID}"],"not_canceled":{{}}}}"#),
+            0,
+        )
+        .expect("response parses");
+
+        assert_eq!(report.status, "blocked");
+        assert_eq!(report.canceled_count, 2);
+        assert!(report
+            .block_reasons
+            .contains(&"duplicate_canceled_order_ids"));
     }
 
     #[test]
