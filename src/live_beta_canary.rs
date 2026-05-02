@@ -98,6 +98,7 @@ pub struct CanaryRuntimeChecks {
     pub l2_secret_handles_present: bool,
     pub lb5_rollback_ready: bool,
     pub lb5_cancel_readiness_blocks_until_canary_exists: bool,
+    pub lb6_exact_single_cancel_path_available: bool,
     pub official_sdk_available: bool,
     pub previous_canary_submission_attempted: bool,
 }
@@ -276,6 +277,9 @@ pub fn evaluate_canary_readiness(
     }
     if !checks.lb5_cancel_readiness_blocks_until_canary_exists {
         block_reasons.push("lb5_cancel_readiness_not_fail_closed_before_canary");
+    }
+    if !checks.lb6_exact_single_cancel_path_available {
+        block_reasons.push("lb6_exact_single_cancel_path_missing");
     }
     if !checks.official_sdk_available {
         block_reasons.push("official_signing_sdk_unavailable");
@@ -956,6 +960,7 @@ mod tests {
         let report = report_with_checks(CanaryRuntimeChecks {
             lb5_rollback_ready: false,
             lb5_cancel_readiness_blocks_until_canary_exists: false,
+            lb6_exact_single_cancel_path_available: false,
             official_sdk_available: false,
             ..passing_checks()
         });
@@ -964,6 +969,9 @@ mod tests {
         assert!(report
             .block_reasons
             .contains(&"lb5_cancel_readiness_not_fail_closed_before_canary"));
+        assert!(report
+            .block_reasons
+            .contains(&"lb6_exact_single_cancel_path_missing"));
         assert!(report
             .block_reasons
             .contains(&"official_signing_sdk_unavailable"));
@@ -1083,6 +1091,7 @@ mod tests {
             l2_secret_handles_present: true,
             lb5_rollback_ready: true,
             lb5_cancel_readiness_blocks_until_canary_exists: true,
+            lb6_exact_single_cancel_path_available: true,
             official_sdk_available: true,
             previous_canary_submission_attempted: false,
         }

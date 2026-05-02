@@ -759,6 +759,11 @@ pub fn parse_user_orders_page(json: &str) -> LiveBetaReadbackResult<Vec<OpenOrde
     Ok(parse_user_orders_page_with_cursor(json)?.data)
 }
 
+pub fn parse_single_order(json: &str) -> LiveBetaReadbackResult<OpenOrderReadback> {
+    let wire: OpenOrderWire = serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
+    OpenOrderReadback::try_from(wire)
+}
+
 fn parse_user_orders_page_with_cursor(
     json: &str,
 ) -> LiveBetaReadbackResult<ReadbackPage<OpenOrderReadback>> {
