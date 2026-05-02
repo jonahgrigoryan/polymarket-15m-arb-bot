@@ -1,6 +1,6 @@
 # Project Status Handoff
 
-Last updated: 2026-04-30
+Last updated: 2026-05-01
 
 ## Purpose
 
@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb4-readback-account-preflight`
-- Base short commit: `664c4cb`
-- Worktree status: scoped LB4 local readback/account-preflight source, runtime prerequisite config, status, and verification updates are present. No live order placement, network order submission, live cancel, cancel-all, wallet key material, API-key value, secret value, geoblock bypass, or strategy/risk/freshness change was added.
+- Branch: `live-beta/lb4-approved-host-readback`
+- Base commit: `a4a54d2d1a3876435be73cd7935f80d1d0928549` (merged PR #19 on `main`).
+- Worktree status: scoped LB4 approved-host read-only CLOB readback code, status, and verification updates are present. No live order placement, order post, cancel, cancel-all, wallet key material, API-key value, secret value, geoblock bypass, strategy-to-live routing, or strategy/risk/freshness change was added.
 
 ## Milestones
 
-- Last completed milestone: LB3 - Signing Dry Run, No Network Post is PASS for dry-run payload construction. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB4 - Authenticated Readback And Account Preflight. The LB3 hold release was explicitly approved by the operator on 2026-04-30 for branch `live-beta/lb4-readback-account-preflight`.
+- Last completed milestone: LB4 - Authenticated Readback And Account Preflight is PASS for the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
+- Active milestone: LB4 - Authenticated Readback And Account Preflight. The LB3 hold release was explicitly approved by the operator on 2026-04-30 for branch `live-beta/lb4-readback-account-preflight`; the approved-host readback attempt was explicitly approved on 2026-04-30 for this Mexico host/session only.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: LB4 can exit only after approved-host authenticated readback/account preflight passes with recorded legal/access approval and deployment geoblock PASS. Until then, LB4 remains blocked for live-host checks and must not add order submission, cancel submission, cancel-all, or live trading.
+- Next exit gate: LB4 is PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. LB5/LB6 must not start until the human explicitly authorizes the next phase.
 
 ## M3 Scope Lock
 
@@ -290,21 +290,35 @@ PASS for dry-run payload construction.
 - Non-secret config cleanup: `config/default.toml`, `config/example.local.toml`, and `config/pyth-proxy.example.toml` now use `https://clob.polymarket.com`, matching the already-recorded post-cutover endpoint evidence.
 - LB3 checks passed: `cargo test --offline safety`, `cargo test --offline compliance`, `cargo test --offline secret`, `cargo test --offline redaction`, `cargo test --offline signing`, `cargo test --offline dry_run`, `cargo run --offline -- --config config/default.toml validate --local-only`, LB3 dry-run validate, `cargo fmt --check`, `cargo test --offline` (147 lib tests, 5 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, required safety/no-secret scans, and `.env` guard.
 - LB3 safety result: no live order placement, network order submission, live cancel, authenticated readback, authenticated CLOB client, production signing, wallet key material, API-key value, secret value, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
-- Mandatory hold: stop before LB4 until explicit human/operator approval is recorded.
+- Historical hold: LB3 stopped before LB4 until explicit human/operator approval was recorded; that hold was released for LB4 on 2026-04-30.
 
 ## LB4 Verification Status
 
-LOCAL SCAFFOLDING PASS; FULL LB4 EXIT BLOCKED pending approved-host prerequisites.
-- Evidence file: `verification/2026-04-30-live-beta-lb4-readback-account-preflight.md`.
+PASS for approved-host authenticated readback/account preflight.
+- Evidence files: `verification/2026-04-30-live-beta-lb4-readback-account-preflight.md` and `verification/2026-04-30-live-beta-lb4-approved-host-readback.md`.
 - Operator approval to release the LB3 hold and start LB4 was recorded on 2026-04-30 for branch `live-beta/lb4-readback-account-preflight`.
+- Operator approval for LB4 approved-host authenticated readback/account preflight from the current Mexico host/session was recorded on 2026-04-30. The same approval explicitly did not authorize order posting, canceling, cancel-all, live trading, LB5, or LB6.
 - LB4 added local readback/account-preflight parsing and fail-closed evaluation for runtime-derived LB4 prerequisites, pUSD balance/allowance, reserved balance from open orders using fixed-unit open-order sizes, open-order status, trade lifecycle status and transaction hash presence, venue state, heartbeat readiness, CLOB host, chain ID, nonzero case-insensitive wallet/funder consistency, EOA wallet/funder equality, and redacted endpoint-error classification.
+- LB4 approved-host continuation adds a read-only authenticated CLOB preflight path for `GET /balance-allowance`, `GET /data/orders`, and `GET /trades`, with L2 HMAC headers loaded only from approved env handles and never printed.
+- PR #20 P1 review fix: the authenticated LB4 path now also queries read-only `GET /sampling-markets`, paginates it through `next_cursor`, and derives venue state from live CLOB market fields instead of hardcoding `trading_enabled`. Missing, malformed, empty, non-accepting, closed, archived, or disabled sampling-market state fails closed through `venue_state_not_open`.
+- PR #20 P1 review fix: authenticated `GET /data/orders` and `GET /trades` now paginate through `next_cursor` until the terminal cursor/empty cursor before computing open-order and trade lifecycle gates. Non-advancing cursors or more than 50 readback pages fail closed.
+- PR #20 P1 review fix: authenticated `GET /trades` now sends the configured funder/proxy address as required `maker_address`, keeping trade readback scoped to the account under preflight.
+- PR #20 P2 review fix: LB4 account preflight normalizes the configured CLOB REST host by trimming whitespace and trailing slashes before the canonical `https://clob.polymarket.com` gate check, avoiding false `clob_host_mismatch` blocks for equivalent local config formatting.
+- `GET /balance-allowance` parsing accepts both documented singular `allowance` responses and live plural `allowances` maps. Plural maps are aggregated by the lowest returned allowance so the gate remains fail-closed if any returned spender allowance is below the configured threshold. Very large allowance values saturate to `u64::MAX` for threshold comparison only.
+- Polymarket error docs currently say `GET /balance-allowance` `signature_type` must be `EOA`, `POLY_PROXY`, or `GNOSIS_SAFE`, but the official `py_clob_client_v2` sends numeric values `0`, `1`, or `2`. The approved-host SDK check with `signature_type=1` returned `balance=45091977` and max allowances for the configured signer/funder, so LB4 readback now matches the official v2 client numeric query shape and tests that mapping.
 - Local validate flag: `cargo run --offline -- --config config/default.toml validate --local-only --live-readback-preflight`.
 - Local fail-closed output confirmed `live_beta_readback_preflight_lb3_hold_released=true`, `live_beta_readback_preflight_legal_access_approved=false`, `live_beta_readback_preflight_deployment_geoblock_passed=false`, `live_beta_readback_preflight_status=blocked`, `live_beta_readback_preflight_live_network_enabled=false`, and block reasons `deployment_geoblock_not_recorded,legal_access_not_recorded`.
-- Live-host/authenticated readback checks were NOT RUN because `verification/2026-04-29-live-beta-lb0-approval-scope-lock.md` still records legal/access as pending formal confirmation, and no deployment-host geoblock PASS record exists.
-- Real wallet/funder/proxy address, signature type, pUSD balance, available/reserved balance, open orders, allowances, trade readback status, and heartbeat status remain pending approved-host evidence. Fixture values in tests and local validation are non-secret placeholders only.
+- Approved-host geoblock check from this Mexico session returned `geoblock_blocked=false`, `geoblock_country=MX`, `geoblock_region=CHP`, and `live_beta_geoblock_gate=passed`.
+- Initial approved-host command `cargo run --offline -- --config config/local.toml validate --live-readback-preflight` recorded legal/access and deployment geoblock prerequisites as true, then failed closed before authenticated endpoint calls because the three approved env handles were not present in that shell.
+- Follow-up operator-shell run recorded `live_beta_secret_presence_status=ok`, all three approved handles as `present=true`, `geoblock_country=MX`, `geoblock_region=CMX`, and `live_beta_geoblock_gate=passed`, then failed closed while parsing the authenticated `GET /balance-allowance` success body because the live response used plural `allowances` instead of singular `allowance`.
+- Approved-host rerun after the plural `allowances` parser correction completed authenticated read-only CLOB network readback with `live_beta_readback_preflight_live_network_enabled=true`, `open_order_count=0`, `trade_count=0`, `reserved_pusd_units=0`, `available_pusd_units=0`, `venue_state=trading_enabled`, and `heartbeat=not_started_no_open_orders`, then failed closed with block reasons `allowance_below_required,balance_below_required`.
+- The apparent LB4 account-state blockers were traced to a request-shape mismatch: Rust used named `signature_type=POLY_PROXY`, while the official v2 client uses numeric `signature_type=1`. Operator-side official SDK readback for the same signer/funder returned funded account state: `balance=45091977` with effectively unlimited allowances. No order posting, canceling, cancel-all, live trading, or secret value handling was introduced.
+- Approved-host rerun after aligning Rust with the official v2 client numeric `signature_type` query shape passed naturally with `live_beta_readback_preflight_status=passed`, `live_beta_readback_preflight_live_network_enabled=true`, empty `live_beta_readback_preflight_block_reasons`, `open_order_count=0`, `trade_count=3`, `reserved_pusd_units=0`, `available_pusd_units=45091977`, `venue_state=trading_enabled`, `heartbeat=not_started_no_open_orders`, and runtime shutdown `command_status=ok`.
 - LB4 local checks passed: `cargo test --offline readback`, `cargo test --offline balance`, `cargo test --offline allowance`, `cargo test --offline heartbeat`, `cargo run --offline -- --config config/default.toml validate --local-only`, expected fail-closed LB4 preflight validate, `cargo fmt --check`, `cargo test --offline` (164 lib tests, 6 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, required safety/no-secret scans, and `.env` guard.
+- LB4 approved-host continuation checks passed: `cargo fmt --check`, `cargo test --offline readback`, `cargo test --offline balance`, `cargo test --offline allowance`, `cargo test --offline heartbeat`, `cargo test --offline secret`, `cargo test --offline redaction`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo test --offline` (169 lib tests, 6 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, trailing-whitespace scan, required safety/no-secret scans, and `.env` guard. The plural `allowances` parser correction passed `cargo fmt --check`, `cargo test --offline readback`, `cargo test --offline balance`, and `cargo test --offline allowance`. The PR #20 review fixes passed `cargo test --offline readback` with 28 lib tests and 1 main test covering venue-state readback derivation, paginated readback blockers, required trade `maker_address`, and paginated sampling-market venue classification; `cargo test --offline lb4_account_preflight_normalizes_clob_host_before_gate_evaluation`; then `cargo test --offline` with 175 lib tests and 7 main tests.
+- Final LB4 PASS closeout checks passed after the approved-host success evidence: `git diff --check`, `cargo fmt --check`, `cargo test --offline` (175 lib tests, 7 main tests), `cargo clippy --offline -- -D warnings`, required safety/no-secret scans excluding ignored `.env` and `config/local.toml`, and gitignore guards for `.env` and `config/local.toml`.
 - LB4 safety result: no live order placement, order post, live cancel, cancel-all, wallet/private-key material, API-key value, secret value, authenticated order write client, geoblock bypass, live-trading path, or strategy/risk/freshness weakening was added.
-- Do not start LB5 until a reviewer/human decides how to handle the blocked approved-host LB4 evidence.
+- Mandatory hold: do not start LB5 or LB6 until the human explicitly authorizes the next phase.
 
 ## Blockers And Risks
 
@@ -322,10 +336,11 @@ LOCAL SCAFFOLDING PASS; FULL LB4 EXIT BLOCKED pending approved-host prerequisite
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb4-readback-account-preflight`, based on the LB3 merge commit `664c4cb` from `origin/main`.
-- LB4 local readback/account-preflight scaffolding is implemented and locally verified, but live-host/authenticated readback checks are blocked until legal/access approval and deployment geoblock PASS are recorded.
-- Next concrete action is reviewer/human review of `verification/2026-04-30-live-beta-lb4-readback-account-preflight.md` and the LB4 PR, with a decision on whether to record the missing approved-host prerequisites and run the live-readback preflight from the approved host.
-- Do not start LB5 or LB6 until the LB4 evidence blocker is resolved by explicit human/operator direction.
+- Current branch is `live-beta/lb4-approved-host-readback`, based on merged PR #19 commit `a4a54d2d1a3876435be73cd7935f80d1d0928549`.
+- LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
+- LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
+- Next concrete action is to finish LB4 branch verification/PR closeout. Do not start LB5 or LB6 until the human explicitly authorizes the next phase.
+- Mandatory hold: LB5/LB6 remain blocked pending explicit human authorization.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist

@@ -308,6 +308,8 @@ pub struct LiveBetaConfig {
     pub kill_switch_active: bool,
     #[serde(default)]
     pub secret_handles: LiveBetaSecretHandlesConfig,
+    #[serde(default)]
+    pub readback_account: LiveBetaReadbackAccountConfig,
 }
 
 impl Default for LiveBetaConfig {
@@ -318,6 +320,7 @@ impl Default for LiveBetaConfig {
             legal_access_approved: false,
             kill_switch_active: true,
             secret_handles: LiveBetaSecretHandlesConfig::default(),
+            readback_account: LiveBetaReadbackAccountConfig::default(),
         }
     }
 }
@@ -382,6 +385,18 @@ fn default_clob_l2_credential_handle() -> String {
 
 fn default_clob_l2_passphrase_handle() -> String {
     "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE".to_string()
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LiveBetaReadbackAccountConfig {
+    #[serde(default)]
+    pub wallet_address: String,
+    #[serde(default)]
+    pub funder_address: String,
+    #[serde(default)]
+    pub signature_type: String,
+    #[serde(default)]
+    pub required_collateral_allowance_units: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
