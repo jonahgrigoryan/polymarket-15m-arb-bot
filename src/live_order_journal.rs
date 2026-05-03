@@ -163,6 +163,7 @@ pub struct LiveJournalState {
     pub orders: BTreeMap<String, LiveOrderJournalState>,
     pub trades: BTreeSet<String>,
     pub trade_order_ids: BTreeSet<String>,
+    pub trade_order_ids_by_trade: BTreeMap<String, String>,
     pub partially_filled_orders: BTreeSet<String>,
     pub canceled_orders: BTreeSet<String>,
     pub balance_tracker: LiveBalanceTracker,
@@ -179,10 +180,14 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
         if let Some(intent_id) = payload_string(&event.payload, "intent_id") {
             state.intents.insert(intent_id);
         }
+        if event.event_type.creates_or_updates_venue_order_state() {
+            if let Some(order_id) = &event_order_id {
+                let order_state = state.orders.entry(order_id.clone()).or_default();
+                order_state.event_count += 1;
+                order_state.latest_status = Some(event.event_type);
+            }
+        }
         if let Some(order_id) = &event_order_id {
-            let order_state = state.orders.entry(order_id.clone()).or_default();
-            order_state.event_count += 1;
-            order_state.latest_status = Some(event.event_type);
             match event.event_type {
                 LiveJournalEventType::LiveOrderPartiallyFilled => {
                     state.partially_filled_orders.insert(order_id.clone());
@@ -194,10 +199,13 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
             }
         }
         if let Some(trade_id) = payload_string(&event.payload, "trade_id") {
-            state.trades.insert(trade_id);
             if let Some(order_id) = &event_order_id {
                 state.trade_order_ids.insert(order_id.clone());
+                state
+                    .trade_order_ids_by_trade
+                    .insert(trade_id.clone(), order_id.clone());
             }
+            state.trades.insert(trade_id);
         }
         if event.event_type == LiveJournalEventType::LiveBalanceSnapshot {
             if let Ok(snapshot) =
@@ -225,6 +233,28 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
     }
 
     state
+}
+
+impl LiveJournalEventType {
+    fn creates_or_updates_venue_order_state(self) -> bool {
+        matches!(
+            self,
+            Self::LiveOrderSubmitAccepted
+                | Self::LiveOrderReadbackObserved
+                | Self::LiveOrderPartiallyFilled
+                | Self::LiveOrderFilled
+                | Self::LiveOrderCancelRequested
+                | Self::LiveOrderCancelAccepted
+                | Self::LiveOrderCancelRejected
+                | Self::LiveOrderCanceled
+                | Self::LiveOrderExpired
+                | Self::LiveTradeObserved
+                | Self::LiveTradeMatched
+                | Self::LiveTradeMined
+                | Self::LiveTradeConfirmed
+                | Self::LiveTradeFailed
+        )
+    }
 }
 
 pub fn redact_payload(payload: Value) -> (Value, RedactionStatus) {
@@ -381,7 +411,36 @@ mod tests {
         assert!(state.orders.contains_key("order-1"));
         assert!(state.trades.contains("trade-1"));
         assert!(state.trade_order_ids.contains("order-1"));
+        assert_eq!(
+            state.trade_order_ids_by_trade.get("trade-1"),
+            Some(&"order-1".to_string())
+        );
         assert_eq!(state.balance_tracker.snapshot_count(), 1);
+    }
+
+    #[test]
+    fn live_order_journal_reducer_omits_rejected_submission_orders() {
+        let events = vec![
+            LiveJournalEvent::new(
+                "run-1",
+                "event-1",
+                LiveJournalEventType::LiveOrderSubmitRequested,
+                1,
+                serde_json::json!({"order_id":"order-1","intent_id":"intent-1"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-2",
+                LiveJournalEventType::LiveOrderSubmitRejected,
+                2,
+                serde_json::json!({"order_id":"order-1","intent_id":"intent-1","reason":"risk"}),
+            ),
+        ];
+
+        let state = reduce_live_journal_events(&events);
+
+        assert!(state.intents.contains("intent-1"));
+        assert!(!state.orders.contains_key("order-1"));
     }
 
     #[test]

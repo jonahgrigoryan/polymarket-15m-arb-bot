@@ -13,6 +13,7 @@ pub struct LocalLiveState {
     pub partially_filled_orders: BTreeSet<String>,
     pub known_trades: BTreeSet<String>,
     pub trade_order_ids: BTreeSet<String>,
+    pub trade_order_ids_by_trade: BTreeMap<String, String>,
     pub balance: Option<LiveBalanceSnapshot>,
     pub positions: LivePositionBook,
     pub rust_readback_fingerprint: Option<String>,
@@ -27,6 +28,7 @@ impl Default for LocalLiveState {
             partially_filled_orders: BTreeSet::new(),
             known_trades: BTreeSet::new(),
             trade_order_ids: BTreeSet::new(),
+            trade_order_ids_by_trade: BTreeMap::new(),
             balance: None,
             positions: LivePositionBook::new(),
             rust_readback_fingerprint: None,
@@ -43,6 +45,7 @@ impl From<&LiveJournalState> for LocalLiveState {
             partially_filled_orders: state.partially_filled_orders.clone(),
             known_trades: state.trades.clone(),
             trade_order_ids: state.trade_order_ids.clone(),
+            trade_order_ids_by_trade: state.trade_order_ids_by_trade.clone(),
             balance: state.balance_tracker.latest().cloned(),
             positions: state.position_book.clone(),
             rust_readback_fingerprint: None,
@@ -124,6 +127,7 @@ pub enum LiveReconciliationMismatch {
     PositionMismatch,
     UnknownVenueTradeStatus,
     TradeStatusFailed,
+    TradeOrderMismatch,
     SdkRustDisagreement,
 }
 
@@ -141,6 +145,7 @@ impl LiveReconciliationMismatch {
             Self::PositionMismatch => "position_mismatch",
             Self::UnknownVenueTradeStatus => "unknown_venue_trade_status",
             Self::TradeStatusFailed => "trade_status_failed",
+            Self::TradeOrderMismatch => "trade_order_mismatch",
             Self::SdkRustDisagreement => "sdk_rust_disagreement",
         }
     }
@@ -227,6 +232,13 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
     for trade in input.venue.trades.values() {
         if !input.local.known_trades.contains(&trade.trade_id) {
             mismatches.insert(LiveReconciliationMismatch::UnexpectedFill);
+        } else if input
+            .local
+            .trade_order_ids_by_trade
+            .get(&trade.trade_id)
+            .is_none_or(|order_id| order_id != &trade.order_id)
+        {
+            mismatches.insert(LiveReconciliationMismatch::TradeOrderMismatch);
         }
         if trade.status == VenueTradeStatus::Unknown {
             mismatches.insert(LiveReconciliationMismatch::UnknownVenueTradeStatus);
@@ -449,6 +461,21 @@ mod tests {
     }
 
     #[test]
+    fn live_reconciliation_trade_order_mismatch_halts_fail_closed() {
+        let mut input = matching_input();
+        input.venue.trades.insert(
+            "trade-1".to_string(),
+            VenueTradeState {
+                trade_id: "trade-1".to_string(),
+                order_id: "order-2".to_string(),
+                status: VenueTradeStatus::Confirmed,
+            },
+        );
+
+        assert_mismatch(input, LiveReconciliationMismatch::TradeOrderMismatch);
+    }
+
+    #[test]
     fn live_reconciliation_sdk_rust_disagreement_halts_fail_closed() {
         let mut input = matching_input();
         input.venue.rust_readback_fingerprint = Some("rust-a".to_string());
@@ -484,6 +511,9 @@ mod tests {
         local.known_orders.insert("order-1".to_string());
         local.known_trades.insert("trade-1".to_string());
         local.trade_order_ids.insert("order-1".to_string());
+        local
+            .trade_order_ids_by_trade
+            .insert("trade-1".to_string(), "order-1".to_string());
         local.balance = Some(balance(10.0, 0.0, 10.0));
         local
             .positions

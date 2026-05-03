@@ -35,7 +35,7 @@ Validation run:
 cargo run --offline -- --config config/default.toml validate --local-only
 ```
 
-Result: PASS. Latest run ID `18ac2714bf2dfa90-7f20-0`.
+Result: PASS. Latest run ID `18ac321a869fbba8-b037-0`.
 
 ## Gate Decision Examples
 
@@ -49,6 +49,7 @@ Covered examples:
 
 - default Live Alpha gate blocks;
 - missing compile-time/default global placement gates block;
+- modes that cannot place live orders, including `shadow`, remain blocked through `LiveAlphaMode::can_place_live_orders()`;
 - reconciliation failure blocks.
 
 ## Execution Intent Shape
@@ -86,14 +87,17 @@ Durability behavior:
 Replay/reducer behavior reconstructs:
 
 - known intents;
-- known orders;
+- venue-known orders;
 - known trades;
+- exact trade ID to order ID mappings;
 - partially filled orders;
 - canceled orders;
 - latest live balance snapshot;
 - live positions;
 - reconciliation mismatch count;
 - risk halt state.
+
+Regression coverage confirms rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state.
 
 Focused journal tests passed:
 
@@ -135,6 +139,7 @@ Mismatch fixtures halt fail-closed for:
 - `position_mismatch`;
 - `unknown_venue_trade_status`;
 - `trade_status_failed`;
+- `trade_order_mismatch`;
 - `sdk_rust_disagreement`.
 
 Regression coverage also confirms Rust/SDK readback fingerprints are compared only within the same source snapshot. A local-only Rust fingerprint and venue-only SDK fingerprint do not create `sdk_rust_disagreement`.
@@ -169,7 +174,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 255 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 258 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 
@@ -177,7 +182,7 @@ Commands:
 
 ```text
 rg -n -i "(submit.*order|post.*order|place.*order|create.*order|createAndPostOrder|createAndPostMarketOrder|postOrder|postOrders|cancel.*order|cancelOrder|cancelOrders|cancelAll|/order|/orders|/cancel|FOK|FAK)" src Cargo.toml config
-rg -n -i "(private[_ -]?key|secret|passphrase|mnemonic|seed|POLY_API_KEY|POLY_SECRET|POLY_PASSPHRASE|0x[0-9a-fA-F]{64})" src Cargo.toml config runbooks verification *.md
+rg -n -i --hidden -g '!.git' -g '!target' -g '!.env' -g '!config/local.toml' "(POLY_API_KEY|POLY_SECRET|POLY_PASSPHRASE|private[_ -]?key|seed phrase|mnemonic|0x[0-9a-fA-F]{64})" .
 ```
 
 Expected hits only:
@@ -187,6 +192,7 @@ Expected hits only:
 - existing paper order/cancel simulation paths;
 - existing readback/auth secret-handle names and L2 header names, not values;
 - new LA1 inert config/gate/order-intent/journal/reconciliation definitions;
+- new LA1 reducer and reconciliation tests for rejected submissions and exact trade/order mapping;
 - safety scan command text in docs and verification notes;
 - public fixture IDs, public Pyth/Chainlink feed IDs, public condition/order IDs already recorded in prior evidence.
 

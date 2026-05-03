@@ -125,7 +125,7 @@ pub fn evaluate_live_alpha_gate(input: LiveAlphaGateInput) -> LiveAlphaGateDecis
     if !input.live_alpha_enabled {
         block_reasons.push(LiveAlphaBlockReason::LiveAlphaDisabled);
     }
-    if input.live_alpha_mode == LiveAlphaMode::Disabled {
+    if !input.live_alpha_mode.can_place_live_orders() {
         block_reasons.push(LiveAlphaBlockReason::ModeDisabled);
     }
     if !input.config_intent_enabled {
@@ -238,6 +238,31 @@ mod tests {
         assert!(decision
             .block_reasons
             .contains(&LiveAlphaBlockReason::LiveOrderPlacementDisabled));
+        assert!(decision
+            .block_reasons
+            .contains(&LiveAlphaBlockReason::ModeDisabled));
+    }
+
+    #[test]
+    fn live_alpha_gate_blocks_modes_that_cannot_place_live_orders() {
+        let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
+            live_alpha_enabled: true,
+            live_alpha_mode: LiveAlphaMode::Shadow,
+            config_intent_enabled: true,
+            cli_intent_enabled: true,
+            kill_switch_active: false,
+            geoblock_status: GeoblockGateStatus::Passed,
+            account_preflight_status: LiveAlphaReadinessStatus::Passed,
+            heartbeat_status: LiveAlphaReadinessStatus::Passed,
+            reconciliation_status: LiveAlphaReadinessStatus::Passed,
+            approval_status: LiveAlphaReadinessStatus::Passed,
+            phase_status: LiveAlphaReadinessStatus::Passed,
+        });
+
+        assert!(!decision.allowed);
+        assert!(decision
+            .block_reasons
+            .contains(&LiveAlphaBlockReason::ModeDisabled));
     }
 
     #[test]
