@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-alpha/la0-approval-scope`
-- Current commit: branch work from `main` after PR #27 merge commit `26144dc`.
-- Worktree status: LA0 Live Alpha approval/scope documentation only. No source code, config, live order, live cancel, cancel-all, autonomous live trading, strategy-to-live routing, secret value, API-key value, seed phrase, or wallet/private-key material is authorized or added.
+- Branch: `live-alpha/la1-gates-journal-reconciliation`
+- Current commit: branch work from `main` after PR #28 merge commit `3bf2048`.
+- Worktree status: LA1 Live Alpha gates, inert config, journal, balance/position tracking, reconciliation, and metrics only. No live order, live cancel expansion, cancel-all, controlled fill canary, maker autonomy, strategy-selected live trading, secret value, API-key value, seed phrase, raw L2 credential, or wallet/private-key material is authorized or added.
 
 ## Milestones
 
-- Last completed milestone: LB7 runbook, observability, rollback hardening, incident workflow, and STATUS handoff are complete and merged to `main` via PR #27. LB6 one-order canary execution and closeout remain complete via PR #26: exactly one reviewed live canary order was submitted, that exact order was canceled, no fill occurred, post-cancel readback showed zero open orders and zero reserved pUSD, and the local one-order cap is consumed. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: Live Alpha LA0 approval and scope lock.
+- Last completed milestone: LA0 approval and scope lock are complete and merged to `main` via PR #28. LB7 runbook, observability, rollback hardening, incident workflow, and STATUS handoff remain complete and merged via PR #27. LB6 one-order canary execution and closeout remain complete via PR #26: exactly one reviewed live canary order was submitted, that exact order was canceled, no fill occurred, post-cancel readback showed zero open orders and zero reserved pUSD, and the local one-order cap is consumed. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
+- Active milestone: Live Alpha LA1 gates, journal, and reconciliation foundation.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: review/merge the LA0 Live Alpha approval/scope PR, then stop for human/operator approval before LA1. LA0 does not authorize live orders, live cancels, cancel-all, strategy-selected live trading, or resetting/bypassing the consumed LB6 one-order cap.
+- Next exit gate: review/merge the LA1 Live Alpha gates/journal/reconciliation PR, then stop for human/operator approval before LA2. LA1 does not authorize live orders, live cancels, cancel-all, controlled fill canaries, maker autonomy, strategy-selected live trading, or resetting/bypassing the consumed LB6 one-order cap.
 
 ## M3 Scope Lock
 
@@ -434,6 +434,19 @@ PASS for approval and scope lock only.
 - LA0 checks passed: `cargo fmt --check`, `cargo test --offline` (220 lib tests + 8 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, and safety/no-secret scans.
 - Exact next action after LA0 PR merge: stop and obtain explicit human/operator approval to start LA1 from fresh updated `main`.
 
+## Live Alpha LA1 Status
+
+PASS for gates, journal, and reconciliation foundation only.
+- Branch: `live-alpha/la1-gates-journal-reconciliation`.
+- Evidence file: `verification/2026-05-03-live-alpha-la1-journal-reconciliation.md`.
+- Scope: inert Live Alpha config defaults, Live Alpha gate evaluation, compile-time feature scaffold default-off, execution intent shape, append-only live journal with redaction/replay/reducers, live balance tracker, live position book, reconciliation engine, and reconciliation-health metrics.
+- Default validation result: `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_compile_time_orders_enabled=false`, `live_alpha_gate_status=blocked`.
+- Gate block reasons by default: `live_order_placement_disabled,compile_time_live_disabled,live_alpha_disabled,mode_disabled,missing_config_intent,missing_cli_intent,kill_switch_active,geoblock_unknown,account_preflight_unknown,heartbeat_unknown,reconciliation_unknown,approval_missing,phase_not_approved`.
+- Reconciliation mismatch fixtures halt fail-closed for unknown open order, missing venue order, unexpected fill, unexpected partial fill, cancel not confirmed, reserved balance mismatch, balance delta mismatch, position mismatch, trade status failed, and SDK/Rust disagreement.
+- LA1 checks passed: focused LA1 filters, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo fmt --check`, `cargo test --offline` (250 lib tests + 8 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, and safety/no-secret scans.
+- LA1 does not authorize live order placement, live canceling, cancel-all, controlled fill canaries, maker autonomy, strategy-selected live trading, resetting/bypassing the consumed LB6 one-order cap, enabling `LIVE_ORDER_PLACEMENT_ENABLED=true` globally, or starting LA2/LA3 work.
+- Exact next action after LA1 PR merge: stop and obtain explicit human/operator approval to start LA2 from fresh updated `main`.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -454,12 +467,14 @@ PASS for approval and scope lock only.
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- LB7 is complete and merged via PR #27 at `26144dc`; current branch is `live-alpha/la0-approval-scope` for LA0 approval/scope documentation only.
+- LB7 is complete and merged via PR #27 at `26144dc`.
+- LA0 is complete and merged via PR #28 at `3bf2048`.
+- Current branch is `live-alpha/la1-gates-journal-reconciliation` for LA1 gates/journal/reconciliation foundation only.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only; LB6 has now proven one exact live canary submission and exact single-order cancel closeout.
-- Next concrete action is review/merge the LA0 Live Alpha approval/scope PR, then stop for human/operator approval to start LA1 from fresh updated `main`.
-- Mandatory boundary: LA0 does not authorize any live order, live cancel, cancel-all, one-order cap reset/bypass, strategy-selected live trading, wider live trading, repeated canary, live strategy routing, or production rollout.
+- Next concrete action is review/merge the LA1 Live Alpha gates/journal/reconciliation PR, then stop for human/operator approval to start LA2 from fresh updated `main`.
+- Mandatory boundary: LA1 does not authorize any live order, live cancel, cancel-all, controlled fill canary, maker autonomy, one-order cap reset/bypass, strategy-selected live trading, wider live trading, repeated canary, live strategy routing, or production rollout.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist

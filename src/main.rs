@@ -21,6 +21,7 @@ use polymarket_15m_arb_bot::{
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
+    live_alpha_gate::{self, LiveAlphaGateInput, LiveAlphaReadinessStatus},
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
         CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks, PreauthorizedEnvelopeBinding,
@@ -348,6 +349,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "live_order_placement_enabled={}",
                     safety::LIVE_ORDER_PLACEMENT_ENABLED
                 );
+                let live_alpha_summary = config.live_alpha.inert_summary();
+                println!("live_alpha_enabled={}", live_alpha_summary.enabled);
+                println!("live_alpha_mode={}", live_alpha_summary.mode.as_str());
+                println!(
+                    "live_alpha_fill_canary_enabled={}",
+                    live_alpha_summary.fill_canary_enabled
+                );
+                println!(
+                    "live_alpha_shadow_executor_enabled={}",
+                    live_alpha_summary.shadow_executor_enabled
+                );
+                println!(
+                    "live_alpha_maker_micro_enabled={}",
+                    live_alpha_summary.maker_micro_enabled
+                );
+                println!(
+                    "live_alpha_taker_enabled={}",
+                    live_alpha_summary.taker_enabled
+                );
+                println!(
+                    "live_alpha_scale_enabled={}",
+                    live_alpha_summary.scale_enabled
+                );
                 println!(
                     "live_beta_config_intent_enabled={}",
                     config.live_beta.intent_enabled
@@ -388,6 +412,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!(
                     "live_beta_gate_block_reasons={}",
                     live_beta_gate.reason_list()
+                );
+                let live_alpha_gate =
+                    live_alpha_gate::evaluate_live_alpha_gate(LiveAlphaGateInput {
+                        live_alpha_enabled: config.live_alpha.enabled,
+                        live_alpha_mode: config.live_alpha.mode,
+                        config_intent_enabled: config.live_alpha.enabled,
+                        cli_intent_enabled: false,
+                        kill_switch_active: config.live_beta.kill_switch_active,
+                        geoblock_status: geoblock_gate_status,
+                        account_preflight_status: LiveAlphaReadinessStatus::Unknown,
+                        heartbeat_status: LiveAlphaReadinessStatus::Unknown,
+                        reconciliation_status: LiveAlphaReadinessStatus::Unknown,
+                        approval_status: LiveAlphaReadinessStatus::Unknown,
+                        phase_status: LiveAlphaReadinessStatus::Unknown,
+                    });
+                println!(
+                    "live_alpha_compile_time_orders_enabled={}",
+                    live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED
+                );
+                println!("live_alpha_gate_status={}", live_alpha_gate.status());
+                println!(
+                    "live_alpha_gate_block_reasons={}",
+                    live_alpha_gate.reason_list()
                 );
                 if live_beta_intent && !live_beta_gate.allowed {
                     return Err(format!(
