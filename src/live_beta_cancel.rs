@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const MODULE: &str = "live_beta_cancel";
 pub const SINGLE_CANCEL_PATH: &str = "/order";
-pub const SINGLE_ORDER_READBACK_PATH_PREFIX: &str = "/order/";
+pub const SINGLE_ORDER_READBACK_PATH_PREFIX: &str = "/data/order/";
 pub const HTTP_DELETE: &str = "DELETE";
 pub const LIVE_CANCEL_NETWORK_ENABLED: bool = false;
 

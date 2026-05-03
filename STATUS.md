@@ -1,6 +1,6 @@
 # Project Status Handoff
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03
 
 ## Purpose
 
@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb6-preauthorized-slug-binding`
-- Current commit: branch work in progress from `main` after PR #24 merge commit `c8d0bfc`.
-- Worktree status: LB6 pre-authorized slug-binding fix is being prepared for PR review. No live order was submitted. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
+- Branch: `live-beta/lb6-canary-live-closeout`
+- Current commit: branch work in progress from `main` after PR #25 merge commit `1d0f40a`.
+- Worktree status: LB6 one-order canary was submitted and canceled. Closeout branch records the evidence and fixes the exact single-order readback path/parser found during cancel closeout. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, API-key value, seed phrase, or wallet/private-key material was added.
 
 ## Milestones
 
-- Last completed milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum is PASS for offline readiness only. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB6 pre-authorized one-order canary envelope slug-binding fix after PR #24 merge.
+- Last completed milestone: LB6 one-order canary execution is complete: exactly one reviewed live canary order was submitted, then canceled, with post-cancel readback showing zero open orders and zero reserved pUSD. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
+- Active milestone: LB6 closeout evidence and exact single-order readback parser/path fix.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: review/merge the LB6 pre-authorized slug-binding fix, then stop. After merge, a fresh live-canary run may use `--preauthorized-envelope --one-order` only if all runtime gates pass naturally.
+- Next exit gate: review/merge the LB6 canary execution closeout and exact readback fix. Do not submit another canary; the local one-order cap is consumed.
 
 ## M3 Scope Lock
 
@@ -380,6 +380,33 @@ IMPLEMENTED for PR review only; no live order or cancel was submitted in this ru
 - Verification passed: `cargo fmt --check`, `cargo test --offline market_discovery`, `cargo test --offline canary`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo test --offline` (217 lib tests + 8 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, safety/no-secret scans, ignored-local guards, and one-order cap absent check.
 - Safety result for this patch: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values, and no private-key material added to repo/docs/tests.
 
+## LB6 One-Order Canary Execution Status
+
+EXECUTED; closeout branch in progress after PR #25 merged to `main` at `1d0f40a` on 2026-05-03 UTC.
+- Evidence file: `verification/2026-05-03-live-beta-lb6-one-order-canary-execution.md`.
+- Branch: `live-beta/lb6-canary-live-closeout`.
+- Pre-submit LB4 readback PASS run ID `18abe5ab4bdc0780-16cec-0`: geoblock `MX/CMX`, open orders `0`, reserved pUSD `0`, available pUSD units `1614478`, venue `trading_enabled`, heartbeat `not_started_no_open_orders`.
+- `live-canary --preauthorized-envelope --one-order` passed all runtime gates with run ID `18abe606c2c70218-17c1f-0` and submitted exactly one order:
+  - Market slug `eth-updown-15m-1777767300`.
+  - Condition ID `0x6455382f705a0cb742cab86603f6ade14a67442bd0cd7debcef18fb3f8bae8b1`.
+  - Up token ID `108754796712694987030496168190461335721943804518169337367002311107585620439355`.
+  - Side `BUY`, price `0.01`, size `5`, notional `0.05 pUSD`, GTD expiry `1777768020`.
+  - Best bid `0.35`, best ask `0.37`, book age `0 ms`, reference age `987 ms`.
+  - Approval hash `sha256:04fe06d40a0e7e1b348878207c75bf1d5cb325c14ba8db7885fdf8e5b716a7ef`.
+  - Venue order ID `0x978bc4ba61cb0d4fefb55fd08ce594245ccc2678605ed17a3a4f593e4e89acdf`, venue status `LIVE`, success `true`, submitted order count `1`.
+- Initial Rust `live-cancel --dry-run` did not cancel. It failed at exact readback because the Rust path still used `GET /order/{orderID}`, which returned HTTP `404` for this live order.
+- Official `py_clob_client_v2` exact readback confirmed the canary order was `LIVE`, matched size `0`, and matched the approved market/token/side/price/size/order-type envelope.
+- Official `py_clob_client_v2` exact single-order cancel was used for only this order ID. Result: canceled `[0x978bc4ba61cb0d4fefb55fd08ce594245ccc2678605ed17a3a4f593e4e89acdf]`, `not_canceled={}`. No cancel-all was used.
+- Post-cancel official readback showed order status `CANCELED`, matched size `0`, and no open orders for the canary token.
+- Post-cancel LB4 readback PASS run ID `18abe61f679e9770-17f1b-0`: geoblock `MX/CMX`, open orders `0`, reserved pUSD `0`, available pUSD units `1614478`, trade count `14`, venue `trading_enabled`, heartbeat `not_started_no_open_orders`.
+- Closeout patch fixes the Rust exact readback surface:
+  - Single-order readback path is now `/data/order/{orderID}`, matching the official client behavior observed live.
+  - Single-order parser accepts current live SDK status strings such as `LIVE` and `CANCELED`.
+  - Single-order parser treats single-order `original_size` / `size_matched` as human decimal sizes; paginated open-order readback keeps the existing fixed-unit parser.
+- Post-fix Rust `live-cancel --dry-run` against the canceled canary order passed transport/parsing and blocked correctly with run ID `18abe64ecbbe5270-262-0`: `human_cancel_approval_missing,order_already_canceled`, order status `canceled`, readback path `/data/order/0x978bc4ba61cb0d4fefb55fd08ce594245ccc2678605ed17a3a4f593e4e89acdf`.
+- Current outcome: LB6 one-order canary is complete, the canary order is canceled, no fill occurred, post-cancel open orders are zero, post-cancel reserved pUSD is zero, and the local one-order cap sentinel is consumed.
+- Safety result: no second order was attempted, no cancel-all was used, no autonomous live trading was added, no strategy-to-live route was added, and no secret values were committed or printed.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -389,8 +416,8 @@ IMPLEMENTED for PR review only; no live order or cancel was submitted in this ru
 - CLOB V2 post-cutover endpoint was rechecked on 2026-04-28; use `https://clob.polymarket.com` for CLOB REST unless official docs/live read-only checks change again.
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
-- LB5 is offline readiness only. It does not prove live cancellation because live cancel proof is intentionally deferred to LB6 after one approved tiny canary order exists.
-- LB6 canary submission mechanism is present. The exact live single-order cancel/readback path and PR #24 pre-authorized envelope are merged. Current branch fixes the pre-authorized slug binding lookup; live submission remains unavailable until this patch is reviewed/merged and a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible ETH market, side-aware non-marketable best ask evidence, fresh reference evidence, exact slug binding, and unused one-order cap.
+- LB5 was offline readiness only; LB6 now has one live canary/cancel proof for the exact reviewed canary envelope. This does not authorize autonomous trading, repeated canaries, strategy-to-live routing, wider order sizes, cancel-all, or production live trading.
+- The local one-order cap sentinel is consumed for LB6. Do not submit another canary unless a new explicit milestone/gate resets the cap policy and records a new approval scope.
 
 ## Next Concrete Action
 
@@ -398,12 +425,12 @@ IMPLEMENTED for PR review only; no live order or cancel was submitted in this ru
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb6-preauthorized-slug-binding` for the LB6 pre-authorized exact slug-binding fix.
+- Current branch is `live-beta/lb6-canary-live-closeout` for LB6 execution evidence and the exact single-order readback parser/path fix.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
-- LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
-- Next concrete action is review/merge the LB6 pre-authorized slug-binding fix. After merge, run a fresh immediate final recheck and use `live-canary --preauthorized-envelope --one-order` only if all final gates pass naturally.
-- Mandatory hold: do not submit any order outside the reviewed pre-authorized envelope or exact approval path.
+- LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only; LB6 has now proven one exact live canary submission and exact single-order cancel closeout.
+- Next concrete action is review/merge the LB6 canary execution closeout and exact readback fix. Do not submit another order from this branch.
+- Mandatory hold: stop after LB6 closeout. Do not start any wider live trading, repeated canary, live strategy routing, or production rollout without a new explicit human/operator authorization and a new milestone scope.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
