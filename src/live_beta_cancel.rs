@@ -624,6 +624,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rollback_runbook_contains_lb7_closeout_lessons() {
+        let runbook = include_str!("../runbooks/live-beta-lb5-rollback-runbook.md");
+        for required in [
+            "GET /data/order/{orderID}",
+            "DELETE /order",
+            "Rust readback and official SDK readback disagree",
+            "the local one-order cap is consumed",
+            "This is lifecycle evidence only, not profitability evidence.",
+        ] {
+            assert!(
+                runbook.contains(required),
+                "runbook missing LB7 closeout lesson {required}"
+            );
+        }
+    }
+
     fn lb6_ready_input() -> CancelReadinessInput {
         CancelReadinessInput {
             lb4_preflight_passed: true,

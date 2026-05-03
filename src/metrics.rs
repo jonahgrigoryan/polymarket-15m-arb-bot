@@ -561,4 +561,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn observability_runbook_covers_live_beta_handoff_signals() {
+        let runbook = include_str!("../docs/m8-observability-runbook.md");
+        for required in [
+            "LIVE_ORDER_PLACEMENT_ENABLED",
+            "geoblock status",
+            "kill-switch state",
+            "heartbeat state",
+            "attempted order count",
+            "accepted order count",
+            "rejected order count",
+            "DELETE /order",
+            "/data/order/{orderID}",
+            "readback mismatch",
+            "reserved pUSD",
+            "open notional",
+            "realized P&L",
+            "settlement P&L",
+        ] {
+            assert!(
+                runbook.contains(required),
+                "observability runbook missing live-beta signal {required}"
+            );
+        }
+    }
 }
