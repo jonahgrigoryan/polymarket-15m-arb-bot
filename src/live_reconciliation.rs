@@ -68,10 +68,7 @@ pub struct VenueOrderState {
 
 impl VenueOrderState {
     pub fn is_open(&self) -> bool {
-        matches!(
-            self.status,
-            VenueOrderStatus::Live | VenueOrderStatus::PartiallyFilled
-        )
+        matches!(self.status, VenueOrderStatus::Live | VenueOrderStatus::PartiallyFilled)
     }
 }
 
@@ -201,10 +198,7 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
     }
     for order in input.venue.orders.values() {
         if order.status == VenueOrderStatus::PartiallyFilled
-            && !input
-                .local
-                .partially_filled_orders
-                .contains(&order.order_id)
+            && !input.local.partially_filled_orders.contains(&order.order_id)
         {
             mismatches.insert(LiveReconciliationMismatch::UnexpectedPartialFill);
         }
@@ -284,7 +278,7 @@ mod tests {
     use super::*;
     use crate::domain::{Asset, Side};
     use crate::live_balance_tracker::LiveBalanceSnapshot;
-    use crate::live_position_book::LivePositionKey;
+    use crate::live_position_book::{LivePositionBook, LivePositionKey};
 
     #[test]
     fn live_reconciliation_passes_when_local_and_venue_state_match() {
