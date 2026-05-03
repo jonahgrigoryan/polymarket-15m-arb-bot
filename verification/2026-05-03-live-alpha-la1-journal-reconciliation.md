@@ -125,6 +125,8 @@ Mismatch fixtures halt fail-closed for:
 - `trade_status_failed`;
 - `sdk_rust_disagreement`.
 
+Regression coverage also confirms Rust/SDK readback fingerprints are compared only within the same source snapshot. A local-only Rust fingerprint and venue-only SDK fingerprint do not create `sdk_rust_disagreement`.
+
 ## Focused LA1 Tests
 
 All focused LA1 filters passed:
@@ -155,7 +157,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 251 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 252 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 

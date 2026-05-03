@@ -248,18 +248,7 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
     if !input.local.positions.matches(&input.venue.positions) {
         mismatches.insert(LiveReconciliationMismatch::PositionMismatch);
     }
-    if readback_fingerprints_disagree(
-        input
-            .local
-            .rust_readback_fingerprint
-            .as_deref()
-            .or(input.venue.rust_readback_fingerprint.as_deref()),
-        input
-            .local
-            .sdk_readback_fingerprint
-            .as_deref()
-            .or(input.venue.sdk_readback_fingerprint.as_deref()),
-    ) {
+    if readback_fingerprints_disagree(&input.local, &input.venue) {
         mismatches.insert(LiveReconciliationMismatch::SdkRustDisagreement);
     }
 
@@ -277,7 +266,17 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
     }
 }
 
-fn readback_fingerprints_disagree(rust: Option<&str>, sdk: Option<&str>) -> bool {
+fn readback_fingerprints_disagree(local: &LocalLiveState, venue: &VenueLiveState) -> bool {
+    readback_fingerprint_pair_disagrees(
+        local.rust_readback_fingerprint.as_deref(),
+        local.sdk_readback_fingerprint.as_deref(),
+    ) || readback_fingerprint_pair_disagrees(
+        venue.rust_readback_fingerprint.as_deref(),
+        venue.sdk_readback_fingerprint.as_deref(),
+    )
+}
+
+fn readback_fingerprint_pair_disagrees(rust: Option<&str>, sdk: Option<&str>) -> bool {
     match (rust, sdk) {
         (Some(rust), Some(sdk)) => rust != sdk,
         _ => false,
@@ -423,6 +422,18 @@ mod tests {
         input.venue.sdk_readback_fingerprint = Some("sdk-b".to_string());
 
         assert_mismatch(input, LiveReconciliationMismatch::SdkRustDisagreement);
+    }
+
+    #[test]
+    fn live_reconciliation_readback_fingerprints_do_not_mix_sources() {
+        let mut input = matching_input();
+        input.local.rust_readback_fingerprint = Some("rust-a".to_string());
+        input.venue.sdk_readback_fingerprint = Some("sdk-b".to_string());
+
+        let result = reconcile_live_state(input);
+
+        assert_eq!(result.status(), "passed");
+        assert!(result.mismatches().is_empty());
     }
 
     fn assert_mismatch(input: LiveReconciliationInput, expected: LiveReconciliationMismatch) {
