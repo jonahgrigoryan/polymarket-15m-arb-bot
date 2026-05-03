@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb6-preauthorized-canary-envelope`
-- Current commit: branch head for the LB6 pre-authorized canary envelope PR.
-- Worktree status: LB6 pre-authorized canary envelope patch is committed for PR review. No live order was submitted. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
+- Branch: `live-beta/lb6-preauthorized-slug-binding`
+- Current commit: branch work in progress from `main` after PR #24 merge commit `c8d0bfc`.
+- Worktree status: LB6 pre-authorized slug-binding fix is being prepared for PR review. No live order was submitted. No live cancel was sent. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, wallet key material, or expired approval reuse was added.
 
 ## Milestones
 
 - Last completed milestone: LB5 - Cancel Path Readiness And Rollback/Runbook Minimum is PASS for offline readiness only. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB6 pre-authorized one-order canary envelope after the exact prompt/approval loop proved too slow for 15-minute market timing.
+- Active milestone: LB6 pre-authorized one-order canary envelope slug-binding fix after PR #24 merge.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: review/merge the LB6 pre-authorized canary envelope patch, then stop. After merge, a fresh live-canary run may use `--preauthorized-envelope --one-order` only if all runtime gates pass naturally.
+- Next exit gate: review/merge the LB6 pre-authorized slug-binding fix, then stop. After merge, a fresh live-canary run may use `--preauthorized-envelope --one-order` only if all runtime gates pass naturally.
 
 ## M3 Scope Lock
 
@@ -358,13 +358,26 @@ IMPLEMENTED for mechanism only; final canary submission remains BLOCKED in this 
 
 ## LB6 Pre-Authorized Canary Envelope Status
 
-IMPLEMENTED for PR review only; no live order or cancel was submitted in this run.
+IMPLEMENTED; PR #24 merged to `main` at `c8d0bfc` on 2026-05-02. No live order or cancel was submitted in this run.
 - Evidence file: `verification/2026-05-02-live-beta-lb6-preauthorized-canary-envelope.md`.
 - Branch: `live-beta/lb6-preauthorized-canary-envelope`.
 - Scope: adds `live-canary --preauthorized-envelope --one-order` as a reviewed alternative to the exact prompt/hash loop for time-sensitive 15-minute markets.
 - The pre-authorized envelope is intentionally narrow: ETH 15-minute market slug only, current market window only, `Outcome=Up`, `Side=BUY`, `Order type=GTD`, post-only maker-only, `Price=0.01`, `Size=5`, `Notional=0.05 pUSD`, `tick_size=0.01`, GTD expiry before the final market minute, side-aware non-marketable best ask, fresh book/reference ages, zero reserved pUSD, and available pUSD above the canary notional.
 - The runtime still requires geoblock PASS, LB4 approved-host account preflight PASS, zero open orders, L2 handles present, canary private-key handle present, LB5 rollback readiness, exact LB6 single-order cancel path availability, official SDK availability, an unused local one-order cap sentinel, and fresh discovery binding that proves the supplied condition ID and Up token ID belong to the supplied ETH 15-minute slug.
 - Existing `live-canary --human-approved --one-order` exact prompt/hash gating remains available and unchanged for non-envelope approvals.
+- Safety result for this patch: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values, and no private-key material added to repo/docs/tests.
+
+## LB6 Pre-Authorized Slug Binding Fix Status
+
+IMPLEMENTED for PR review only; no live order or cancel was submitted in this run.
+- Evidence file: `verification/2026-05-02-live-beta-lb6-preauthorized-slug-binding.md`.
+- Branch: `live-beta/lb6-preauthorized-slug-binding`.
+- After PR #24 merge, local `main` was fast-forwarded to `c8d0bfc`.
+- Approved-host LB4 readback PASS was reconfirmed with run ID `18abe3d240c43b40-15285-0`: geoblock `MX/CMX`, open orders `0`, reserved pUSD `0`, available pUSD units `1614478`, venue `trading_enabled`, heartbeat `not_started_no_open_orders`.
+- A pre-authorized canary command failed closed before any order call with run ID `18abe4137d932ef0-15382-0`: `best_ask_not_above_bid,reference_stale`, `live_beta_canary_not_submitted=true`, and `live_beta_canary_one_order_cap_remaining=true`.
+- The next ETH market existed at Gamma's direct slug endpoint, but PR #24's pre-authorized binding used paged keyset discovery and could miss the exact current ETH slug within configured page limits.
+- This patch adds an exact Gamma `/markets/slug/<slug>` lookup for the LB6 pre-authorized binding while keeping broad keyset discovery unchanged. A 404 from the slug endpoint is treated as a missing binding, not a fatal discovery error, so stale/typo slugs still fail closed through normal readiness reporting.
+- Verification passed: `cargo fmt --check`, `cargo test --offline market_discovery`, `cargo test --offline canary`, `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo test --offline` (217 lib tests + 8 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, safety/no-secret scans, ignored-local guards, and one-order cap absent check.
 - Safety result for this patch: no live order submitted, no live cancel sent, no cancel-all path, no autonomous live trading, no strategy-to-live route, no secret values, and no private-key material added to repo/docs/tests.
 
 ## Blockers And Risks
@@ -377,7 +390,7 @@ IMPLEMENTED for PR review only; no live order or cancel was submitted in this ru
 - Polymarket RTDS Chainlink reference ingestion is now the first path for settlement-source paper validation. Direct authenticated Chainlink Data Streams remains a fallback only if RTDS is unavailable, delayed, insufficiently precise, or not accepted as settlement-source evidence.
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
 - LB5 is offline readiness only. It does not prove live cancellation because live cancel proof is intentionally deferred to LB6 after one approved tiny canary order exists.
-- LB6 canary submission mechanism is present. The exact live single-order cancel/readback path is merged. Current branch adds a pre-authorized envelope path for one ETH canary only; live submission remains unavailable until this patch is reviewed/merged and a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible ETH market, side-aware non-marketable best ask evidence, and unused one-order cap.
+- LB6 canary submission mechanism is present. The exact live single-order cancel/readback path and PR #24 pre-authorized envelope are merged. Current branch fixes the pre-authorized slug binding lookup; live submission remains unavailable until this patch is reviewed/merged and a fresh approved-host recheck has geoblock PASS, LB4 account preflight PASS, zero open orders, required secret handles present, fresh eligible ETH market, side-aware non-marketable best ask evidence, fresh reference evidence, exact slug binding, and unused one-order cap.
 
 ## Next Concrete Action
 
@@ -385,11 +398,11 @@ IMPLEMENTED for PR review only; no live order or cancel was submitted in this ru
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb6-preauthorized-canary-envelope` for the LB6 pre-authorized canary envelope patch.
+- Current branch is `live-beta/lb6-preauthorized-slug-binding` for the LB6 pre-authorized exact slug-binding fix.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only.
-- Next concrete action is review/merge the LB6 pre-authorized canary envelope patch. After merge, run a fresh immediate final recheck and use `live-canary --preauthorized-envelope --one-order` only if all final gates pass naturally.
+- Next concrete action is review/merge the LB6 pre-authorized slug-binding fix. After merge, run a fresh immediate final recheck and use `live-canary --preauthorized-envelope --one-order` only if all final gates pass naturally.
 - Mandatory hold: do not submit any order outside the reviewed pre-authorized envelope or exact approval path.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
