@@ -69,6 +69,39 @@ A local Prometheus/Grafana dashboard should stay operational and audit-oriented:
 
 Recommended panels are current feed latency by source, stale book/reference gauges by market or asset, signal candidate versus skip counts, risk halt counts by reason, paper P&L by market/asset, and replay determinism failures over time. Alert candidates are stale book/reference age above risk thresholds, any storage write failure, any replay determinism failure, sustained feed message rate of zero during an expected session, and any geoblock or storage-related risk halt.
 
+## Live Beta Observability Addendum
+
+LB7 does not expand live trading. It records the observability contract any future approved live-beta milestone must satisfy before another live action is considered. The LB6 canary was an order-lifecycle probe only and is not profitability evidence.
+
+Required live-beta status fields:
+
+- Live mode: `LIVE_ORDER_PLACEMENT_ENABLED`, live beta gate status, canary submission gate status, and whether the one-order cap is available or consumed.
+- Compliance: geoblock status, country/region, approval scope, and host/session identifier.
+- Safety controls: kill-switch state, service stop result, human approval hash, post-only/GTD/maker-only checks, one-open-order cap, and cancel-all disabled state.
+- Heartbeat: latest heartbeat state, age when available, failure count, and whether heartbeat ambiguity blocked a maker order.
+- Orders: attempted order count, accepted order count, rejected order count, venue order ID, market/condition ID, token ID, side, price, size, notional, order type, expiry, and venue status.
+- Cancels: exact cancel attempt count, exact canceled order ID, `DELETE /order` response summary, `not_canceled` count, and proof that cancel-all was not used.
+- Fills and trades: fill count, matched size, trade statuses, transaction hashes for matched/confirmed trades, fees, and whether settlement follow-up is required.
+- Readback integrity: exact single-order readback path `/data/order/{orderID}`, open-order list, Rust readback status, official SDK readback status when used, and any readback mismatch.
+- Account state: available pUSD, reserved pUSD, balance/reserved mismatch, allowances, open notional, and post-action balance delta.
+- P&L: realized P&L for fills and settlement P&L after market resolution. A single canary with no fill has no strategy-performance inference.
+
+Alert candidates for any future live-beta dashboard:
+
+- live order placement enabled outside an approved milestone window.
+- geoblock blocked, unknown, malformed, stale, or unreachable.
+- kill switch inactive when a rollback is in progress.
+- heartbeat unhealthy, stale, missing, or ambiguous while an order is open.
+- any order attempt without the expected human approval hash or one-order cap.
+- any accepted order count above the approved cap.
+- any cancel-all path or multi-order cancel path becoming reachable.
+- any readback mismatch between Rust and the official SDK.
+- reserved pUSD nonzero after cancel/readback closeout.
+- open notional above the approved cap.
+- any fill without terminal trade status, transaction hash handling, fee capture, and settlement follow-up.
+
+Live-beta artifacts should include the validate/preflight output, dry-run approval output, canary submission output if approved, exact single-order readback output, exact cancel output if approved, post-cancel readback output, trade/balance/allowance readback, heartbeat state, runbook incident note if any blocker occurred, and safety/no-secret scan output.
+
 ## Structured Logs
 
 Logs should be JSON and include enough fields to reconstruct a run:

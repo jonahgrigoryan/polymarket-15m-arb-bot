@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb6-canary-live-closeout`
-- Current commit: branch work in progress from `main` after PR #25 merge commit `1d0f40a`.
-- Worktree status: LB6 one-order canary was submitted and canceled. Closeout branch records the evidence and fixes the exact single-order readback path/parser found during cancel closeout. No cancel-all, autonomous live trading, strategy-to-live routing, secret value, API-key value, seed phrase, or wallet/private-key material was added.
+- Branch: `live-beta/lb7-runbook-handoff`
+- Current commit: branch work in progress from `main` after PR #26 merge commit `2031332`.
+- Worktree status: LB7 runbook, observability, rollback hardening, incident workflow, and handoff work only. No new live order, live cancel, cancel-all, autonomous live trading, strategy-to-live routing, secret value, API-key value, seed phrase, or wallet/private-key material is authorized or added.
 
 ## Milestones
 
-- Last completed milestone: LB6 one-order canary execution is complete: exactly one reviewed live canary order was submitted, then canceled, with post-cancel readback showing zero open orders and zero reserved pUSD. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB6 closeout evidence and exact single-order readback parser/path fix.
+- Last completed milestone: LB6 one-order canary execution and closeout are complete and merged to `main` via PR #26. Exactly one reviewed live canary order was submitted, that exact order was canceled, no fill occurred, post-cancel readback showed zero open orders and zero reserved pUSD, and the local one-order cap is consumed. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
+- Active milestone: LB7 runbook, observability, rollback hardening, incident workflow, and handoff.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: review/merge the LB6 canary execution closeout and exact readback fix. Do not submit another canary; the local one-order cap is consumed.
+- Next exit gate: review/merge the LB7 handoff PR. Do not submit another canary, cancel any live order, broaden markets/assets, add strategy-selected live trading, or reset the one-order cap without a new explicit approval record and milestone scope.
 
 ## M3 Scope Lock
 
@@ -382,9 +382,10 @@ IMPLEMENTED for PR review only; no live order or cancel was submitted in this ru
 
 ## LB6 One-Order Canary Execution Status
 
-EXECUTED; closeout branch in progress after PR #25 merged to `main` at `1d0f40a` on 2026-05-03 UTC.
+EXECUTED and merged to `main` via PR #26 at `2031332` on 2026-05-03 UTC.
 - Evidence file: `verification/2026-05-03-live-beta-lb6-one-order-canary-execution.md`.
 - Branch: `live-beta/lb6-canary-live-closeout`.
+- PR: #26 `Record LB6 canary execution closeout`.
 - Pre-submit LB4 readback PASS run ID `18abe5ab4bdc0780-16cec-0`: geoblock `MX/CMX`, open orders `0`, reserved pUSD `0`, available pUSD units `1614478`, venue `trading_enabled`, heartbeat `not_started_no_open_orders`.
 - `live-canary --preauthorized-envelope --one-order` passed all runtime gates with run ID `18abe606c2c70218-17c1f-0` and submitted exactly one order:
   - Market slug `eth-updown-15m-1777767300`.
@@ -407,6 +408,20 @@ EXECUTED; closeout branch in progress after PR #25 merged to `main` at `1d0f40a`
 - Current outcome: LB6 one-order canary is complete, the canary order is canceled, no fill occurred, post-cancel open orders are zero, post-cancel reserved pUSD is zero, and the local one-order cap sentinel is consumed.
 - Safety result: no second order was attempted, no cancel-all was used, no autonomous live trading was added, no strategy-to-live route was added, and no secret values were committed or printed.
 
+## LB7 Handoff Status
+
+PASS for runbook, observability, rollback hardening, incident workflow, and STATUS handoff only.
+- Branch: `live-beta/lb7-runbook-handoff`.
+- Evidence file: `verification/2026-05-03-live-beta-lb7-runbook-handoff.md`.
+- Scope: updated the handoff after merged PR #26, folded LB6 closeout lessons into the rollback runbook, reviewed live-beta observability coverage, and preserved the next approval gate.
+- Runbook update: exact single-order readback path is `GET /data/order/{orderID}`, exact cancel path remains `DELETE /order`, official `py_clob_client_v2` closeout behavior is recorded, and Rust/SDK readback disagreement now halts live action pending human review.
+- Observability update: `docs/m8-observability-runbook.md` now lists live-beta coverage for live mode, geoblock, kill switch, heartbeat age/failures, order attempts/accepts/rejects, cancels, fills, readback mismatches, balance/reserved mismatches, open notional, realized P&L, and settlement P&L.
+- Tests added: `live_beta_cancel::tests::rollback_runbook_contains_lb7_closeout_lessons` and `metrics::tests::observability_runbook_covers_live_beta_handoff_signals`.
+- LB7 checks passed: `cargo test --offline metrics` (5 lib tests), `cargo test --offline reporting` (5 lib tests), `cargo test --offline rollback` (3 lib tests), `cargo run --offline -- --config config/default.toml validate --local-only`, `cargo fmt --check`, `cargo test --offline` (220 lib tests + 8 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, trailing-whitespace scan, safety/no-secret scans, and ignored-local guards for `.env` and `config/local.toml`.
+- Safety result: no new live order, live cancel, cancel-all, secret value, API-key value, seed phrase, wallet/private-key material, geoblock bypass, strategy-to-live route, broader order type, multi-order path, cap increase, or market/asset expansion was added.
+- LB7 does not authorize another canary, live cancel, cancel-all, strategy-selected live trading, taker/FOK/FAK/marketable limit paths, multi-order paths, higher caps, broader markets/assets, or profitability claims from the LB6 canary.
+- Required handoff facts from LB6: one canary submitted, exact order canceled, no fill, post-cancel open orders `0`, post-cancel reserved pUSD `0`, and local one-order cap consumed.
+
 ## Blockers And Risks
 
 - M4 API verification sections 3, 5, and 10 are complete for M4 scope.
@@ -418,6 +433,7 @@ EXECUTED; closeout branch in progress after PR #25 merged to `main` at `1d0f40a`
 - More bounded RTDS Chainlink paper sessions across additional market windows are useful before claiming strategy robustness, but M9 paper/replay evidence now covers current-window selection, natural risk-reviewed paper fills, deterministic replay, and post-market settlement reconciliation.
 - LB5 was offline readiness only; LB6 now has one live canary/cancel proof for the exact reviewed canary envelope. This does not authorize autonomous trading, repeated canaries, strategy-to-live routing, wider order sizes, cancel-all, or production live trading.
 - The local one-order cap sentinel is consumed for LB6. Do not submit another canary unless a new explicit milestone/gate resets the cap policy and records a new approval scope.
+- LB7 is a handoff/runbook/observability phase only. It must not expand the beta or convert the LB6 lifecycle probe into strategy performance evidence.
 
 ## Next Concrete Action
 
@@ -425,12 +441,12 @@ EXECUTED; closeout branch in progress after PR #25 merged to `main` at `1d0f40a`
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb6-canary-live-closeout` for LB6 execution evidence and the exact single-order readback parser/path fix.
+- Current branch is `live-beta/lb7-runbook-handoff` for LB7 runbook, observability, rollback hardening, incident workflow, and STATUS handoff only.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only; LB6 has now proven one exact live canary submission and exact single-order cancel closeout.
-- Next concrete action is review/merge the LB6 canary execution closeout and exact readback fix. Do not submit another order from this branch.
-- Mandatory hold: stop after LB6 closeout. Do not start any wider live trading, repeated canary, live strategy routing, or production rollout without a new explicit human/operator authorization and a new milestone scope.
+- Next concrete action is review/merge the LB7 handoff PR. Do not submit another order, send a live cancel, reset the one-order cap, or start another live-beta phase from this branch.
+- Mandatory boundary: any expansion after LB7 requires a new explicit human/operator authorization and a new milestone scope. Do not start any wider live trading, repeated canary, live strategy routing, or production rollout.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
