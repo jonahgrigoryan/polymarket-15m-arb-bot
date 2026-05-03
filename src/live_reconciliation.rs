@@ -115,12 +115,14 @@ pub struct LiveReconciliationInput {
 pub enum LiveReconciliationMismatch {
     UnknownOpenOrder,
     MissingVenueOrder,
+    UnknownVenueOrderStatus,
     UnexpectedFill,
     UnexpectedPartialFill,
     CancelNotConfirmed,
     ReservedBalanceMismatch,
     BalanceDeltaMismatch,
     PositionMismatch,
+    UnknownVenueTradeStatus,
     TradeStatusFailed,
     SdkRustDisagreement,
 }
@@ -130,12 +132,14 @@ impl LiveReconciliationMismatch {
         match self {
             Self::UnknownOpenOrder => "unknown_open_order",
             Self::MissingVenueOrder => "missing_venue_order",
+            Self::UnknownVenueOrderStatus => "unknown_venue_order_status",
             Self::UnexpectedFill => "unexpected_fill",
             Self::UnexpectedPartialFill => "unexpected_partial_fill",
             Self::CancelNotConfirmed => "cancel_not_confirmed",
             Self::ReservedBalanceMismatch => "reserved_balance_mismatch",
             Self::BalanceDeltaMismatch => "balance_delta_mismatch",
             Self::PositionMismatch => "position_mismatch",
+            Self::UnknownVenueTradeStatus => "unknown_venue_trade_status",
             Self::TradeStatusFailed => "trade_status_failed",
             Self::SdkRustDisagreement => "sdk_rust_disagreement",
         }
@@ -203,6 +207,9 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
         }
     }
     for order in input.venue.orders.values() {
+        if order.status == VenueOrderStatus::Unknown {
+            mismatches.insert(LiveReconciliationMismatch::UnknownVenueOrderStatus);
+        }
         if order.status == VenueOrderStatus::PartiallyFilled
             && !input
                 .local
@@ -220,6 +227,9 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
     for trade in input.venue.trades.values() {
         if !input.local.known_trades.contains(&trade.trade_id) {
             mismatches.insert(LiveReconciliationMismatch::UnexpectedFill);
+        }
+        if trade.status == VenueTradeStatus::Unknown {
+            mismatches.insert(LiveReconciliationMismatch::UnknownVenueTradeStatus);
         }
         if trade.status == VenueTradeStatus::Failed {
             mismatches.insert(LiveReconciliationMismatch::TradeStatusFailed);
@@ -323,6 +333,14 @@ mod tests {
     }
 
     #[test]
+    fn live_reconciliation_unknown_venue_order_status_halts_fail_closed() {
+        let mut input = matching_input();
+        input.venue.orders.get_mut("order-1").expect("order").status = VenueOrderStatus::Unknown;
+
+        assert_mismatch(input, LiveReconciliationMismatch::UnknownVenueOrderStatus);
+    }
+
+    #[test]
     fn live_reconciliation_unexpected_fill_halts_fail_closed() {
         let mut input = matching_input();
         input.venue.trades.insert(
@@ -413,6 +431,21 @@ mod tests {
         );
 
         assert_mismatch(input, LiveReconciliationMismatch::TradeStatusFailed);
+    }
+
+    #[test]
+    fn live_reconciliation_unknown_venue_trade_status_halts_fail_closed() {
+        let mut input = matching_input();
+        input.venue.trades.insert(
+            "trade-1".to_string(),
+            VenueTradeState {
+                trade_id: "trade-1".to_string(),
+                order_id: "order-1".to_string(),
+                status: VenueTradeStatus::Unknown,
+            },
+        );
+
+        assert_mismatch(input, LiveReconciliationMismatch::UnknownVenueTradeStatus);
     }
 
     #[test]

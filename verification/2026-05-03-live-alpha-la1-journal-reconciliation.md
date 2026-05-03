@@ -115,6 +115,7 @@ Mismatch fixtures halt fail-closed for:
 
 - `unknown_open_order`;
 - `missing_venue_order`;
+- `unknown_venue_order_status`;
 - `unexpected_fill`;
 - `filled_order_without_matching_local_trade_order`;
 - `unexpected_partial_fill`;
@@ -122,6 +123,7 @@ Mismatch fixtures halt fail-closed for:
 - `reserved_balance_mismatch`;
 - `balance_delta_mismatch`;
 - `position_mismatch`;
+- `unknown_venue_trade_status`;
 - `trade_status_failed`;
 - `sdk_rust_disagreement`.
 
@@ -157,7 +159,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 252 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 254 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 
