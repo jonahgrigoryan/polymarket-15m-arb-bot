@@ -12,7 +12,7 @@ pub const BALANCE_ALLOWANCE_PATH: &str = "/balance-allowance";
 pub const USER_ORDERS_PATH: &str = "/data/orders";
 pub const TRADES_PATH: &str = "/trades";
 pub const SAMPLING_MARKETS_PATH: &str = "/sampling-markets";
-pub const SINGLE_ORDER_PATH_PREFIX: &str = "/order/";
+pub const SINGLE_ORDER_PATH_PREFIX: &str = "/data/order/";
 const HTTP_GET: &str = "GET";
 const INITIAL_CURSOR: &str = "MA==";
 const END_CURSOR: &str = "LTE=";
@@ -151,12 +151,14 @@ pub enum OrderReadbackStatus {
 
 impl OrderReadbackStatus {
     pub fn from_wire(value: &str) -> Self {
-        match value {
-            "ORDER_STATUS_LIVE" => Self::Live,
-            "ORDER_STATUS_INVALID" => Self::Invalid,
-            "ORDER_STATUS_CANCELED_MARKET_RESOLVED" => Self::CanceledMarketResolved,
-            "ORDER_STATUS_CANCELED" => Self::Canceled,
-            "ORDER_STATUS_MATCHED" => Self::Matched,
+        match value.trim().to_ascii_uppercase().as_str() {
+            "ORDER_STATUS_LIVE" | "LIVE" => Self::Live,
+            "ORDER_STATUS_INVALID" | "INVALID" => Self::Invalid,
+            "ORDER_STATUS_CANCELED_MARKET_RESOLVED" | "CANCELED_MARKET_RESOLVED" => {
+                Self::CanceledMarketResolved
+            }
+            "ORDER_STATUS_CANCELED" | "CANCELED" => Self::Canceled,
+            "ORDER_STATUS_MATCHED" | "MATCHED" => Self::Matched,
             _ => Self::Unknown,
         }
     }
@@ -761,7 +763,7 @@ pub fn parse_user_orders_page(json: &str) -> LiveBetaReadbackResult<Vec<OpenOrde
 
 pub fn parse_single_order(json: &str) -> LiveBetaReadbackResult<OpenOrderReadback> {
     let wire: OpenOrderWire = serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
-    OpenOrderReadback::try_from(wire)
+    wire.into_readback(parse_decimal_to_fixed6)
 }
 
 fn parse_user_orders_page_with_cursor(
@@ -880,21 +882,30 @@ impl TryFrom<OpenOrderWire> for OpenOrderReadback {
     type Error = LiveBetaReadbackError;
 
     fn try_from(value: OpenOrderWire) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: value.id,
-            status: OrderReadbackStatus::from_wire(&value.status),
-            maker_address: value.maker_address,
-            market: value.market,
-            asset_id: value.asset_id,
-            side: value.side,
-            original_size_units: parse_u64_units(&value.original_size, "original_size")?,
-            size_matched_units: parse_u64_units(&value.size_matched, "size_matched")?,
-            price: value.price,
-            outcome: value.outcome,
-            expiration: value.expiration,
-            order_type: value.order_type,
-            associate_trades: value.associate_trades,
-            created_at: value.created_at,
+        value.into_readback(parse_u64_units)
+    }
+}
+
+impl OpenOrderWire {
+    fn into_readback(
+        self,
+        parse_size_units: fn(&str, &'static str) -> LiveBetaReadbackResult<u64>,
+    ) -> LiveBetaReadbackResult<OpenOrderReadback> {
+        Ok(OpenOrderReadback {
+            id: self.id,
+            status: OrderReadbackStatus::from_wire(&self.status),
+            maker_address: self.maker_address,
+            market: self.market,
+            asset_id: self.asset_id,
+            side: self.side,
+            original_size_units: parse_size_units(&self.original_size, "original_size")?,
+            size_matched_units: parse_size_units(&self.size_matched, "size_matched")?,
+            price: self.price,
+            outcome: self.outcome,
+            expiration: self.expiration,
+            order_type: self.order_type,
+            associate_trades: self.associate_trades,
+            created_at: self.created_at,
         })
     }
 }
@@ -1411,6 +1422,39 @@ mod tests {
         assert_eq!(
             reserved_pusd_units(&orders).expect("reserved balance calculates"),
             37_500_000
+        );
+    }
+
+    #[test]
+    fn readback_parses_single_order_live_sdk_shape() {
+        let order = parse_single_order(
+            r#"{
+                "id": "order-1",
+                "status": "CANCELED",
+                "maker_address": "0x1111111111111111111111111111111111111111",
+                "market": "condition-1",
+                "asset_id": "token-1",
+                "side": "BUY",
+                "original_size": "5",
+                "size_matched": "0",
+                "price": "0.01",
+                "outcome": "Up",
+                "expiration": "1777768020",
+                "order_type": "GTD",
+                "associate_trades": [],
+                "created_at": 1777767400
+            }"#,
+        )
+        .expect("single order parses");
+
+        assert_eq!(order.status, OrderReadbackStatus::Canceled);
+        assert_eq!(order.original_size_units, 5_000_000);
+        assert_eq!(order.size_matched_units, 0);
+        assert_eq!(
+            order
+                .reserved_pusd_units()
+                .expect("reserved balance calculates"),
+            50_000
         );
     }
 
