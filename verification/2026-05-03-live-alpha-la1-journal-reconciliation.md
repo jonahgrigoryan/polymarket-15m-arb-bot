@@ -35,7 +35,7 @@ Validation run:
 cargo run --offline -- --config config/default.toml validate --local-only
 ```
 
-Result: PASS. Latest run ID `18ac1e55bdc36d10-3368-0`.
+Result: PASS. Latest run ID `18ac2714bf2dfa90-7f20-0`.
 
 ## Gate Decision Examples
 
@@ -50,6 +50,16 @@ Covered examples:
 - default Live Alpha gate blocks;
 - missing compile-time/default global placement gates block;
 - reconciliation failure blocks.
+
+## Execution Intent Shape
+
+Focused execution-intent tests passed:
+
+```text
+cargo test --offline execution_intent
+```
+
+Coverage includes rejection when `notional` disagrees with `price * size` outside the small shape-validation tolerance.
 
 ## Journal Path And Replay
 
@@ -159,7 +169,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 254 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 255 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 

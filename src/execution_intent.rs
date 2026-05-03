@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{Asset, Side};
 
 pub const MODULE: &str = "execution_intent";
+const NOTIONAL_TOLERANCE: f64 = 0.000_001;
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ExecutionIntent {
@@ -62,6 +63,16 @@ impl ExecutionIntent {
         if !self.notional.is_finite() || self.notional <= 0.0 {
             errors.push("notional_invalid");
         }
+        if self.price.is_finite()
+            && self.price > 0.0
+            && self.size.is_finite()
+            && self.size > 0.0
+            && self.notional.is_finite()
+            && self.notional > 0.0
+            && (self.price * self.size - self.notional).abs() > NOTIONAL_TOLERANCE
+        {
+            errors.push("notional_mismatch");
+        }
         if !self.fair_probability.is_finite() || !(0.0..=1.0).contains(&self.fair_probability) {
             errors.push("fair_probability_invalid");
         }
@@ -101,6 +112,18 @@ mod tests {
 
         assert!(errors.contains(&"price_invalid"));
         assert!(errors.contains(&"fair_probability_invalid"));
+    }
+
+    #[test]
+    fn execution_intent_rejects_notional_that_disagrees_with_price_times_size() {
+        let mut intent = sample_intent();
+        intent.notional = 0.01;
+
+        let errors = intent
+            .validate_shape()
+            .expect_err("notional mismatch should fail");
+
+        assert!(errors.contains(&"notional_mismatch"));
     }
 
     pub fn sample_intent() -> ExecutionIntent {
