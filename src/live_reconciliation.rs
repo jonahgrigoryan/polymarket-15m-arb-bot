@@ -12,6 +12,7 @@ pub struct LocalLiveState {
     pub canceled_orders: BTreeSet<String>,
     pub partially_filled_orders: BTreeSet<String>,
     pub known_trades: BTreeSet<String>,
+    pub trade_order_ids: BTreeSet<String>,
     pub balance: Option<LiveBalanceSnapshot>,
     pub positions: LivePositionBook,
     pub rust_readback_fingerprint: Option<String>,
@@ -25,6 +26,7 @@ impl Default for LocalLiveState {
             canceled_orders: BTreeSet::new(),
             partially_filled_orders: BTreeSet::new(),
             known_trades: BTreeSet::new(),
+            trade_order_ids: BTreeSet::new(),
             balance: None,
             positions: LivePositionBook::new(),
             rust_readback_fingerprint: None,
@@ -40,6 +42,7 @@ impl From<&LiveJournalState> for LocalLiveState {
             canceled_orders: state.canceled_orders.clone(),
             partially_filled_orders: state.partially_filled_orders.clone(),
             known_trades: state.trades.clone(),
+            trade_order_ids: state.trade_order_ids.clone(),
             balance: state.balance_tracker.latest().cloned(),
             positions: state.position_book.clone(),
             rust_readback_fingerprint: None,
@@ -68,7 +71,10 @@ pub struct VenueOrderState {
 
 impl VenueOrderState {
     pub fn is_open(&self) -> bool {
-        matches!(self.status, VenueOrderStatus::Live | VenueOrderStatus::PartiallyFilled)
+        matches!(
+            self.status,
+            VenueOrderStatus::Live | VenueOrderStatus::PartiallyFilled
+        )
     }
 }
 
@@ -198,11 +204,16 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
     }
     for order in input.venue.orders.values() {
         if order.status == VenueOrderStatus::PartiallyFilled
-            && !input.local.partially_filled_orders.contains(&order.order_id)
+            && !input
+                .local
+                .partially_filled_orders
+                .contains(&order.order_id)
         {
             mismatches.insert(LiveReconciliationMismatch::UnexpectedPartialFill);
         }
-        if order.status == VenueOrderStatus::Filled && input.local.known_trades.is_empty() {
+        if order.status == VenueOrderStatus::Filled
+            && !input.local.trade_order_ids.contains(&order.order_id)
+        {
             mismatches.insert(LiveReconciliationMismatch::UnexpectedFill);
         }
     }
@@ -278,7 +289,7 @@ mod tests {
     use super::*;
     use crate::domain::{Asset, Side};
     use crate::live_balance_tracker::LiveBalanceSnapshot;
-    use crate::live_position_book::{LivePositionBook, LivePositionKey};
+    use crate::live_position_book::LivePositionKey;
 
     #[test]
     fn live_reconciliation_passes_when_local_and_venue_state_match() {
@@ -321,6 +332,23 @@ mod tests {
                 trade_id: "trade-2".to_string(),
                 order_id: "order-1".to_string(),
                 status: VenueTradeStatus::Confirmed,
+            },
+        );
+
+        assert_mismatch(input, LiveReconciliationMismatch::UnexpectedFill);
+    }
+
+    #[test]
+    fn live_reconciliation_filled_order_requires_matching_local_trade_order() {
+        let mut input = matching_input();
+        input.local.known_orders.insert("order-2".to_string());
+        input.venue.orders.insert(
+            "order-2".to_string(),
+            VenueOrderState {
+                order_id: "order-2".to_string(),
+                status: VenueOrderStatus::Filled,
+                matched_size: 5.0,
+                remaining_size: 0.0,
             },
         );
 
@@ -411,6 +439,7 @@ mod tests {
         let mut local = LocalLiveState::default();
         local.known_orders.insert("order-1".to_string());
         local.known_trades.insert("trade-1".to_string());
+        local.trade_order_ids.insert("order-1".to_string());
         local.balance = Some(balance(10.0, 0.0, 10.0));
         local
             .positions

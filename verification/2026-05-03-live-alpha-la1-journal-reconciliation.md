@@ -116,6 +116,7 @@ Mismatch fixtures halt fail-closed for:
 - `unknown_open_order`;
 - `missing_venue_order`;
 - `unexpected_fill`;
+- `filled_order_without_matching_local_trade_order`;
 - `unexpected_partial_fill`;
 - `cancel_not_confirmed`;
 - `reserved_balance_mismatch`;
@@ -154,7 +155,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 250 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 251 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 

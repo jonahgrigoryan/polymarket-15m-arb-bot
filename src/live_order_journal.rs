@@ -162,6 +162,7 @@ pub struct LiveJournalState {
     pub intents: BTreeSet<String>,
     pub orders: BTreeMap<String, LiveOrderJournalState>,
     pub trades: BTreeSet<String>,
+    pub trade_order_ids: BTreeSet<String>,
     pub partially_filled_orders: BTreeSet<String>,
     pub canceled_orders: BTreeSet<String>,
     pub balance_tracker: LiveBalanceTracker,
@@ -174,25 +175,29 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
     let mut state = LiveJournalState::default();
 
     for event in events {
+        let event_order_id = payload_string(&event.payload, "order_id");
         if let Some(intent_id) = payload_string(&event.payload, "intent_id") {
             state.intents.insert(intent_id);
         }
-        if let Some(order_id) = payload_string(&event.payload, "order_id") {
+        if let Some(order_id) = &event_order_id {
             let order_state = state.orders.entry(order_id.clone()).or_default();
             order_state.event_count += 1;
             order_state.latest_status = Some(event.event_type);
             match event.event_type {
                 LiveJournalEventType::LiveOrderPartiallyFilled => {
-                    state.partially_filled_orders.insert(order_id);
+                    state.partially_filled_orders.insert(order_id.clone());
                 }
                 LiveJournalEventType::LiveOrderCanceled => {
-                    state.canceled_orders.insert(order_id);
+                    state.canceled_orders.insert(order_id.clone());
                 }
                 _ => {}
             }
         }
         if let Some(trade_id) = payload_string(&event.payload, "trade_id") {
             state.trades.insert(trade_id);
+            if let Some(order_id) = &event_order_id {
+                state.trade_order_ids.insert(order_id.clone());
+            }
         }
         if event.event_type == LiveJournalEventType::LiveBalanceSnapshot {
             if let Ok(snapshot) =
@@ -354,18 +359,28 @@ mod tests {
                 "source": "fixture"
             }),
         );
+        let trade_event = LiveJournalEvent::new(
+            "run-1",
+            "event-3",
+            LiveJournalEventType::LiveTradeConfirmed,
+            3,
+            serde_json::json!({"order_id":"order-1","trade_id":"trade-1","status":"confirmed"}),
+        );
 
         journal.append(&order_event).expect("order event appends");
         journal
             .append(&balance_event)
             .expect("balance event appends");
+        journal.append(&trade_event).expect("trade event appends");
 
         let events = journal.replay().expect("journal replays");
         let state = reduce_live_journal_events(&events);
 
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         assert!(state.intents.contains("intent-1"));
         assert!(state.orders.contains_key("order-1"));
+        assert!(state.trades.contains("trade-1"));
+        assert!(state.trade_order_ids.contains("order-1"));
         assert_eq!(state.balance_tracker.snapshot_count(), 1);
     }
 
