@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-beta/lb7-runbook-handoff`
-- Current commit: branch work in progress from `main` after PR #26 merge commit `2031332`.
-- Worktree status: LB7 runbook, observability, rollback hardening, incident workflow, and handoff work only. No new live order, live cancel, cancel-all, autonomous live trading, strategy-to-live routing, secret value, API-key value, seed phrase, or wallet/private-key material is authorized or added.
+- Branch: `live-alpha/la0-approval-scope`
+- Current commit: branch work from `main` after PR #27 merge commit `26144dc`.
+- Worktree status: LA0 Live Alpha approval/scope documentation only. No source code, config, live order, live cancel, cancel-all, autonomous live trading, strategy-to-live routing, secret value, API-key value, seed phrase, or wallet/private-key material is authorized or added.
 
 ## Milestones
 
-- Last completed milestone: LB6 one-order canary execution and closeout are complete and merged to `main` via PR #26. Exactly one reviewed live canary order was submitted, that exact order was canceled, no fill occurred, post-cancel readback showed zero open orders and zero reserved pUSD, and the local one-order cap is consumed. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: LB7 runbook, observability, rollback hardening, incident workflow, and handoff.
+- Last completed milestone: LB7 runbook, observability, rollback hardening, incident workflow, and STATUS handoff are complete and merged to `main` via PR #27. LB6 one-order canary execution and closeout remain complete via PR #26: exactly one reviewed live canary order was submitted, that exact order was canceled, no fill occurred, post-cancel readback showed zero open orders and zero reserved pUSD, and the local one-order cap is consumed. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
+- Active milestone: Live Alpha LA0 approval and scope lock.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: review/merge the LB7 handoff PR. Do not submit another canary, cancel any live order, broaden markets/assets, add strategy-selected live trading, or reset the one-order cap without a new explicit approval record and milestone scope.
+- Next exit gate: review/merge the LA0 Live Alpha approval/scope PR, then stop for human/operator approval before LA1. LA0 does not authorize live orders, live cancels, cancel-all, strategy-selected live trading, or resetting/bypassing the consumed LB6 one-order cap.
 
 ## M3 Scope Lock
 
@@ -413,6 +413,7 @@ EXECUTED and merged to `main` via PR #26 at `2031332` on 2026-05-03 UTC.
 PASS for runbook, observability, rollback hardening, incident workflow, and STATUS handoff only.
 - Branch: `live-beta/lb7-runbook-handoff`.
 - Evidence file: `verification/2026-05-03-live-beta-lb7-runbook-handoff.md`.
+- PR: #27 merged to `main` at `26144dc` on 2026-05-03.
 - Scope: updated the handoff after merged PR #26, folded LB6 closeout lessons into the rollback runbook, reviewed live-beta observability coverage, and preserved the next approval gate.
 - Runbook update: exact single-order readback path is `GET /data/order/{orderID}`, exact cancel path remains `DELETE /order`, official `py_clob_client_v2` closeout behavior is recorded, and Rust/SDK readback disagreement now halts live action pending human review.
 - Observability update: `docs/m8-observability-runbook.md` now lists live-beta coverage for live mode, geoblock, kill switch, heartbeat age/failures, order attempts/accepts/rejects, cancels, fills, readback mismatches, balance/reserved mismatches, open notional, realized P&L, and settlement P&L.
@@ -421,6 +422,17 @@ PASS for runbook, observability, rollback hardening, incident workflow, and STAT
 - Safety result: no new live order, live cancel, cancel-all, secret value, API-key value, seed phrase, wallet/private-key material, geoblock bypass, strategy-to-live route, broader order type, multi-order path, cap increase, or market/asset expansion was added.
 - LB7 does not authorize another canary, live cancel, cancel-all, strategy-selected live trading, taker/FOK/FAK/marketable limit paths, multi-order paths, higher caps, broader markets/assets, or profitability claims from the LB6 canary.
 - Required handoff facts from LB6: one canary submitted, exact order canceled, no fill, post-cancel open orders `0`, post-cancel reserved pUSD `0`, and local one-order cap consumed.
+
+## Live Alpha LA0 Status
+
+PASS for approval and scope lock only.
+- Branch: `live-alpha/la0-approval-scope`.
+- Evidence file: `verification/2026-05-03-live-alpha-la0-approval-scope.md`.
+- Scope: establish Live Alpha as the post-LB7 release track, add/finalize `LIVE_ALPHA_PRD.md` and `LIVE_ALPHA_IMPLEMENTATION_PLAN.md`, preserve the LB7 handoff facts, and record the next gate.
+- LA0 does not authorize live order placement, live canceling, cancel-all, strategy-selected live trading, resetting/bypassing the consumed LB6 one-order cap, enabling `LIVE_ORDER_PLACEMENT_ENABLED=true` globally, or starting LA1/LA2/LA3 work.
+- Required sequencing: LA1 and LA2 must pass before any controlled fill canary; LA3 is the first possible controlled fill canary and only after explicit approval; LA5 or later is the first possible maker-only micro autonomy and only after prior evidence gates; strategy-selected live trading remains behind a separate robustness gate.
+- LA0 checks passed: `cargo fmt --check`, `cargo test --offline` (220 lib tests + 8 main tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, and safety/no-secret scans.
+- Exact next action after LA0 PR merge: stop and obtain explicit human/operator approval to start LA1 from fresh updated `main`.
 
 ## Blockers And Risks
 
@@ -434,6 +446,7 @@ PASS for runbook, observability, rollback hardening, incident workflow, and STAT
 - LB5 was offline readiness only; LB6 now has one live canary/cancel proof for the exact reviewed canary envelope. This does not authorize autonomous trading, repeated canaries, strategy-to-live routing, wider order sizes, cancel-all, or production live trading.
 - The local one-order cap sentinel is consumed for LB6. Do not submit another canary unless a new explicit milestone/gate resets the cap policy and records a new approval scope.
 - LB7 is a handoff/runbook/observability phase only. It must not expand the beta or convert the LB6 lifecycle probe into strategy performance evidence.
+- Live Alpha starts with LA0 scope lock and evidence gates, not immediate live trading. LA0 preserves all geoblock, readback, heartbeat, risk, stale-data, approval, and no-secret gates.
 
 ## Next Concrete Action
 
@@ -441,12 +454,12 @@ PASS for runbook, observability, rollback hardening, incident workflow, and STAT
 - LB1 is complete via `verification/2026-04-29-live-beta-lb1-kill-gates.md`.
 - LB2 is complete via `verification/2026-04-29-live-beta-lb2-auth-secret-handling.md`.
 - LB3 is complete for dry-run payload construction via `verification/2026-04-30-live-beta-lb3-signing-dry-run.md`.
-- Current branch is `live-beta/lb7-runbook-handoff` for LB7 runbook, observability, rollback hardening, incident workflow, and STATUS handoff only.
+- LB7 is complete and merged via PR #27 at `26144dc`; current branch is `live-alpha/la0-approval-scope` for LA0 approval/scope documentation only.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only; LB6 has now proven one exact live canary submission and exact single-order cancel closeout.
-- Next concrete action is review/merge the LB7 handoff PR. Do not submit another order, send a live cancel, reset the one-order cap, or start another live-beta phase from this branch.
-- Mandatory boundary: any expansion after LB7 requires a new explicit human/operator authorization and a new milestone scope. Do not start any wider live trading, repeated canary, live strategy routing, or production rollout.
+- Next concrete action is review/merge the LA0 Live Alpha approval/scope PR, then stop for human/operator approval to start LA1 from fresh updated `main`.
+- Mandatory boundary: LA0 does not authorize any live order, live cancel, cancel-all, one-order cap reset/bypass, strategy-selected live trading, wider live trading, repeated canary, live strategy routing, or production rollout.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 
 ## Update Checklist
