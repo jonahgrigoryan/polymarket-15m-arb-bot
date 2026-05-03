@@ -37,6 +37,7 @@ The next ETH window existed through Gamma's direct slug endpoint, but PR #24's p
 - Added Gamma slug URL construction from the configured keyset URL:
   - `https://gamma-api.polymarket.com/markets/keyset`
   - to `https://gamma-api.polymarket.com/markets/slug/<slug>`
+- Treats HTTP 404 from the slug endpoint as `Ok(None)`, preserving normal LB6 readiness reporting for missing/stale/typo slugs instead of aborting the command as a fatal transport error.
 - Updated LB6 pre-authorized binding to fetch the exact supplied slug, then still require:
   - ETH asset
   - active lifecycle
@@ -48,10 +49,10 @@ The next ETH window existed through Gamma's direct slug endpoint, but PR #24's p
 ## Verification
 
 - `cargo fmt --check` PASS.
-- `cargo test --offline market_discovery` PASS.
+- `cargo test --offline market_discovery` PASS, including 404-as-missing slug regression coverage.
 - `cargo test --offline canary` PASS.
-- `cargo run --offline -- --config config/default.toml validate --local-only` PASS, run ID `18abe4888d71bc18-157db-0`.
-- `cargo test --offline` PASS: 216 lib tests + 8 main tests.
+- `cargo run --offline -- --config config/default.toml validate --local-only` PASS, run ID `18abe52494054f80-162f0-0`.
+- `cargo test --offline` PASS: 217 lib tests + 8 main tests.
 - `cargo clippy --offline -- -D warnings` PASS.
 - `git diff --check` PASS.
 - Safety/no-secret scans PASS with expected hits only: existing gated canary `post_order` path, exact single-order cancel/readback path, paper order/cancel simulation paths, disabled live-order gate strings, public condition/feed IDs, and secret handle names.

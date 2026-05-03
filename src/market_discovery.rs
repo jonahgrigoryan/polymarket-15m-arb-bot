@@ -104,7 +104,9 @@ impl MarketDiscoveryClient {
         &self,
         slug: &str,
     ) -> DiscoveryResult<Option<Market>> {
-        let gamma_market = self.fetch_gamma_market_by_slug(slug).await?;
+        let Some(gamma_market) = self.fetch_gamma_market_by_slug(slug).await? else {
+            return Ok(None);
+        };
         if !is_candidate_crypto_15m_market(&gamma_market) {
             return Ok(None);
         }
@@ -159,7 +161,7 @@ impl MarketDiscoveryClient {
         decode_response(response, "gamma_markets").await
     }
 
-    async fn fetch_gamma_market_by_slug(&self, slug: &str) -> DiscoveryResult<GammaMarket> {
+    async fn fetch_gamma_market_by_slug(&self, slug: &str) -> DiscoveryResult<Option<GammaMarket>> {
         let url = self.gamma_market_slug_url(slug);
         let response =
             self.http
@@ -170,8 +172,13 @@ impl MarketDiscoveryClient {
                     url: url.clone(),
                     message: source.to_string(),
                 })?;
+        if Self::is_missing_gamma_slug_response(response.status()) {
+            return Ok(None);
+        }
 
-        decode_response(response, "gamma_market_by_slug").await
+        decode_response(response, "gamma_market_by_slug")
+            .await
+            .map(Some)
     }
 
     fn gamma_market_slug_url(&self, slug: &str) -> String {
@@ -181,6 +188,10 @@ impl MarketDiscoveryClient {
         } else {
             format!("{}/slug/{}", base, slug)
         }
+    }
+
+    fn is_missing_gamma_slug_response(status: reqwest::StatusCode) -> bool {
+        status == reqwest::StatusCode::NOT_FOUND
     }
 
     async fn fetch_clob_market_info(&self, condition_id: &str) -> DiscoveryResult<ClobMarketInfo> {
@@ -827,6 +838,19 @@ mod tests {
             client.gamma_market_slug_url("eth-updown-15m-1777765500"),
             "https://gamma-api.polymarket.com/markets/slug/eth-updown-15m-1777765500"
         );
+    }
+
+    #[test]
+    fn slug_lookup_treats_404_as_missing_binding_only() {
+        assert!(MarketDiscoveryClient::is_missing_gamma_slug_response(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+        assert!(!MarketDiscoveryClient::is_missing_gamma_slug_response(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(!MarketDiscoveryClient::is_missing_gamma_slug_response(
+            reqwest::StatusCode::TOO_MANY_REQUESTS
+        ));
     }
 
     #[test]
