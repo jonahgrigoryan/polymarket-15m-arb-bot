@@ -134,6 +134,8 @@ Post-review fix: the `validate` startup/preflight path now invokes the LA2 start
 
 Second post-review fix: `live_alpha.journal_path` is now an inert default-empty config field. When it is explicitly configured and the file exists, the validate startup path replays the full durable Live Alpha journal through the LA1 reducer, reconstructs local balance/order/trade/position state, and marks journal replay plus position reconstruction as passed. Authenticated readback preflight now exposes raw read-only collateral/open-order/trade evidence alongside the existing summary report. When approved live-network readback passes and raw counts match the summary, validate builds a venue state and runs reconciliation against the replayed local state. Missing journal configuration, missing journal file, malformed journal replay, local-only readback, blocked readback, or incomplete raw evidence remains fail-closed and leaves startup recovery halted or unknown.
 
+Third post-review fix: startup reconciliation now scopes local order evidence to the open-order readback snapshot before building the `LiveReconciliationInput`. This keeps historical terminal journal orders, such as previously canceled or filled orders, from producing false `missing_venue_order` or cancel-confirmation halts when the venue evidence is intentionally open-order scoped. Unknown venue open orders still halt through the core reconciliation engine.
+
 ## Readback And Reconstruction
 
 No optional approved-host live read-only or heartbeat check has been run for this LA2 branch as of this note.
@@ -267,6 +269,20 @@ git diff --check
 ```
 
 Result: PASS. The default config remains inert with `live_alpha.enabled=false`, `live_alpha.mode=disabled`, `journal_path=""`, and `LIVE_ORDER_PLACEMENT_ENABLED=false`. Startup recovery now replays a configured journal and reconciles only against passed live-network readback evidence; missing or local-only evidence still halts/fails closed.
+
+Third post-review check for startup reconciliation order scoping:
+
+```text
+cargo test --offline startup_recovery
+cargo test --offline live_reconciliation
+cargo run --offline -- --config config/default.toml validate --local-only
+cargo fmt --check
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+```
+
+Result: PASS. `startup_recovery` covered 6 library tests and 5 validate-path tests, including the new regression for a journal with terminal canceled/filled orders and a healthy zero-open-order readback snapshot. `live_reconciliation` preserved the core fail-closed checks for unknown open orders, missing venue orders, cancel confirmation, trade mismatches, balances, and positions. Latest local validate run ID `18ac4646671c7ab0-8f88-0` kept default Live Alpha disabled and startup recovery skipped with `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`. Full offline test count is now 288 library tests, 13 main tests, and 0 doc tests.
 
 ## Safety Result
 

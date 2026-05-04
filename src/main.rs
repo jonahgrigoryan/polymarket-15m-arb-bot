@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::fs;
@@ -3202,6 +3202,7 @@ fn live_alpha_reconciliation_input_for_validate(
     {
         return None;
     }
+    let local = local_state_for_startup_reconciliation_scope(local, &validation.open_orders);
 
     let venue = live_startup_recovery::venue_state_from_readback(
         &validation.open_orders,
@@ -3220,6 +3221,26 @@ fn live_alpha_reconciliation_input_for_validate(
         local,
         venue,
     })
+}
+
+fn local_state_for_startup_reconciliation_scope(
+    mut local: LocalLiveState,
+    open_orders: &[OpenOrderReadback],
+) -> LocalLiveState {
+    let open_order_ids = open_orders
+        .iter()
+        .map(|order| order.id.clone())
+        .collect::<BTreeSet<_>>();
+    local
+        .known_orders
+        .retain(|order_id| open_order_ids.contains(order_id));
+    local
+        .canceled_orders
+        .retain(|order_id| open_order_ids.contains(order_id));
+    local
+        .partially_filled_orders
+        .retain(|order_id| open_order_ids.contains(order_id));
+    local
 }
 
 fn balance_snapshot_from_readback(
@@ -3510,6 +3531,8 @@ fn generate_run_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polymarket_15m_arb_bot::live_order_journal::{LiveJournalEvent, LiveJournalEventType};
+    use polymarket_15m_arb_bot::live_reconciliation::LiveReconciliationMismatch;
 
     #[test]
     fn paper_capture_allows_quiet_clob_websocket_when_snapshots_are_recorded() {
@@ -3861,6 +3884,108 @@ mod tests {
             reconciliation_readiness_from_startup_recovery(&report),
             LiveAlphaReadinessStatus::Passed
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_scopes_local_orders_to_open_order_readback() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la2-startup-recovery-terminal-orders-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        let journal = LiveOrderJournal::new(&path);
+        for event in [
+            LiveJournalEvent::new(
+                "previous-run",
+                "balance-1",
+                LiveJournalEventType::LiveBalanceSnapshot,
+                900,
+                serde_json::json!({
+                    "p_usd_available": 1.0,
+                    "p_usd_reserved": 0.0,
+                    "p_usd_total": 1.0,
+                    "conditional_token_positions": {},
+                    "balance_snapshot_at": 900,
+                    "source": "fixture"
+                }),
+            ),
+            LiveJournalEvent::new(
+                "previous-run",
+                "closed-order-readback",
+                LiveJournalEventType::LiveOrderReadbackObserved,
+                901,
+                serde_json::json!({"order_id":"closed-order"}),
+            ),
+            LiveJournalEvent::new(
+                "previous-run",
+                "closed-order-canceled",
+                LiveJournalEventType::LiveOrderCanceled,
+                902,
+                serde_json::json!({"order_id":"closed-order"}),
+            ),
+            LiveJournalEvent::new(
+                "previous-run",
+                "filled-order",
+                LiveJournalEventType::LiveOrderFilled,
+                903,
+                serde_json::json!({"order_id":"filled-order"}),
+            ),
+        ] {
+            journal.append(&event).expect("journal event appends");
+        }
+
+        let validation = ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 0,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 1_000_000,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        let reconciliation_input = input
+            .reconciliation_input
+            .as_ref()
+            .expect("reconciliation input");
+        assert!(reconciliation_input.local.known_orders.is_empty());
+        assert!(reconciliation_input.local.canceled_orders.is_empty());
+
+        let report = live_startup_recovery::evaluate_startup_recovery(input);
+        assert_eq!(report.status, LiveStartupRecoveryStatus::Passed);
+        assert!(!report
+            .reconciliation_mismatches
+            .contains(&LiveReconciliationMismatch::MissingVenueOrder));
 
         let _ = fs::remove_file(path);
     }
