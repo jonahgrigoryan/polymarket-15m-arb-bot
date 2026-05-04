@@ -267,6 +267,7 @@ async fn connect_stream(url: &Url, timeout_ms: u64) -> FeedResult<BoxedAsyncStre
         "ws" => Ok(Box::new(tcp)),
         "wss" => {
             let roots = native_root_store()?;
+            let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
             let config = ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
