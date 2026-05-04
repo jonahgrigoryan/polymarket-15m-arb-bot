@@ -10,10 +10,10 @@ Optimize for correctness, auditability, deterministic replay, and risk control b
 
 ## Hard Boundaries
 
-- Do not add live order placement unless the user explicitly requests a separate live-trading phase.
+- Gated live order placement is allowed only under `LIVE_ALPHA_PRD.md` and `LIVE_ALPHA_IMPLEMENTATION_PLAN.md` (phase order, hold points, verification, compile-time features off-by-default such as `live-alpha-orders`, runtime gates, approval artifacts)—not by bypassing those gates or flipping `LIVE_ORDER_PLACEMENT_ENABLED` alone.
 - Do not implement or suggest geoblock bypassing.
 - Treat Polymarket access, fees, APIs, and CLOB V2 behavior as time-sensitive; verify against official docs or live read-only endpoints before relying on assumptions.
-- Do not use unaudited third-party signing, wallet, or order-routing code in the hot path.
+- Do not use unaudited third-party signing, wallet, or order-routing code in the hot path; live-path secrets and signing follow Live Alpha discipline and documented approval.
 - Keep BTC, ETH, and SOL as the only default assets unless the user expands scope.
 
 ## Stack Defaults
@@ -45,8 +45,8 @@ Optimize for correctness, auditability, deterministic replay, and risk control b
 ## Safety And Compliance
 
 - Startup should include a geoblock/compliance check before any trading-capable mode.
-- MVP must remain paper-only.
-- Future live trading requires a new PRD or explicit release gate with legal/access review, key management, order signing audit, and live risk limits.
+- MVP default is non-live (fail-closed): live placement requires explicit Live Alpha phase gates and approvals per `LIVE_ALPHA_*` docs, not ad hoc toggles.
+- Any live execution continues to require legal/access review, key management, order-signing audit, and live risk limits as documented in those gates.
 
 ## Working Style
 
