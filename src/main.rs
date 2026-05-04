@@ -3220,6 +3220,7 @@ fn live_alpha_reconciliation_input_for_validate(
         checked_at_ms,
         local,
         venue,
+        venue_position_evidence_complete: false,
     })
 }
 
@@ -3253,6 +3254,7 @@ fn balance_snapshot_from_readback(
         p_usd_reserved: fixed6_units_to_decimal(report.reserved_pusd_units),
         p_usd_total: fixed6_units_to_decimal(collateral.balance_units),
         conditional_token_positions: BTreeMap::new(),
+        conditional_token_positions_evidence_complete: false,
         balance_snapshot_at: checked_at_ms,
         source: "live_readback_preflight".to_string(),
     }
@@ -3884,6 +3886,201 @@ mod tests {
             reconciliation_readiness_from_startup_recovery(&report),
             LiveAlphaReadinessStatus::Passed
         );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_halts_missing_venue_position_evidence_not_spurious_position_mismatch(
+    ) {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la2-missing-venue-pos-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        let position = polymarket_15m_arb_bot::live_position_book::LivePosition {
+            key: polymarket_15m_arb_bot::live_position_book::LivePositionKey {
+                market_id: "market-1".to_string(),
+                token_id: "token-up".to_string(),
+                asset: Asset::Btc,
+                outcome: "Up".to_string(),
+            },
+            size: 5.0,
+            average_price: 0.42,
+            fees_paid: 0.0,
+            updated_at: 901,
+        };
+
+        let journal = LiveOrderJournal::new(&path);
+        journal
+            .append(&LiveJournalEvent::new(
+                "previous-run",
+                "balance-1",
+                LiveJournalEventType::LiveBalanceSnapshot,
+                900,
+                serde_json::json!({
+                    "p_usd_available": 1.0,
+                    "p_usd_reserved": 0.0,
+                    "p_usd_total": 1.0,
+                    "conditional_token_positions": {},
+                    "balance_snapshot_at": 900,
+                    "source": "fixture"
+                }),
+            ))
+            .expect("append balance");
+        journal
+            .append(&LiveJournalEvent::new(
+                "previous-run",
+                "pos-1",
+                LiveJournalEventType::LivePositionOpened,
+                901,
+                serde_json::to_value(&position).expect("position json"),
+            ))
+            .expect("append position");
+
+        let validation = ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 0,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 1_000_000,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        let report = live_startup_recovery::evaluate_startup_recovery(input);
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(report
+            .block_reasons
+            .contains(&LiveStartupRecoveryBlockReason::ReconciliationFailed));
+        assert!(
+            report
+                .reconciliation_mismatches
+                .contains(&LiveReconciliationMismatch::MissingVenuePositionEvidence),
+            "expected missing position evidence, got {}",
+            report
+                .reconciliation_mismatches
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(!report
+            .reconciliation_mismatches
+            .contains(&LiveReconciliationMismatch::PositionMismatch));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_halts_missing_conditional_balance_evidence_not_spurious_drift(
+    ) {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la2-missing-cond-bal-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        let journal = LiveOrderJournal::new(&path);
+        journal
+            .append(&LiveJournalEvent::new(
+                "previous-run",
+                "balance-1",
+                LiveJournalEventType::LiveBalanceSnapshot,
+                900,
+                serde_json::json!({
+                    "p_usd_available": 1.0,
+                    "p_usd_reserved": 0.0,
+                    "p_usd_total": 1.0,
+                    "conditional_token_positions": {"token-up": 2.5},
+                    "balance_snapshot_at": 900,
+                    "source": "fixture"
+                }),
+            ))
+            .expect("append balance");
+
+        let validation = ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 0,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 1_000_000,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        let report = live_startup_recovery::evaluate_startup_recovery(input);
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(
+            report
+                .reconciliation_mismatches
+                .contains(&LiveReconciliationMismatch::MissingVenueConditionalBalanceEvidence),
+            "expected missing conditional balance evidence, got {}",
+            report
+                .reconciliation_mismatches
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(!report
+            .reconciliation_mismatches
+            .contains(&LiveReconciliationMismatch::BalanceDeltaMismatch));
 
         let _ = fs::remove_file(path);
     }

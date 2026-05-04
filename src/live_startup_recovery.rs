@@ -517,6 +517,7 @@ mod tests {
                 checked_at_ms: 1,
                 local,
                 venue,
+                venue_position_evidence_complete: true,
             }),
         }
     }
