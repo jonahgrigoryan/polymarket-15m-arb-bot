@@ -220,12 +220,8 @@ pub fn reduce_live_journal_events(
             }
         }
         if event.event_type == LiveJournalEventType::LiveBalanceSnapshot {
-            let snapshot = serde_json::from_value::<LiveBalanceSnapshot>(event.payload.clone())
-                .map_err(|source| LiveJournalError::MalformedPayload {
-                    event_id: event.event_id.clone(),
-                    event_type: event.event_type,
-                    source,
-                })?;
+            let snapshot: LiveBalanceSnapshot =
+                serde_json::from_value(event.payload.clone()).map_err(LiveJournalError::Serialize)?;
             state.balance_tracker.apply_snapshot(snapshot);
         }
         if matches!(
@@ -234,13 +230,8 @@ pub fn reduce_live_journal_events(
                 | LiveJournalEventType::LivePositionReduced
                 | LiveJournalEventType::LivePositionClosed
         ) {
-            let position = serde_json::from_value::<LivePosition>(event.payload.clone()).map_err(
-                |source| LiveJournalError::MalformedPayload {
-                    event_id: event.event_id.clone(),
-                    event_type: event.event_type,
-                    source,
-                },
-            )?;
+            let position: LivePosition =
+                serde_json::from_value(event.payload.clone()).map_err(LiveJournalError::Serialize)?;
             state.position_book.upsert_position(position);
         }
         if event.event_type == LiveJournalEventType::LiveReconciliationMismatch {
@@ -451,7 +442,7 @@ mod tests {
         journal.append(&trade_event).expect("trade event appends");
 
         let events = journal.replay().expect("journal replays");
-        let state = reduce_live_journal_events(&events).expect("events reduce");
+        let state = reduce_live_journal_events(&events).expect("journal reduces");
 
         assert_eq!(events.len(), 3);
         assert!(state.intents.contains("intent-1"));
@@ -517,7 +508,7 @@ mod tests {
             ),
         ];
 
-        let state = reduce_live_journal_events(&events).expect("events reduce");
+        let state = reduce_live_journal_events(&events).expect("journal reduces");
 
         assert!(state.intents.contains("intent-1"));
         assert!(!state.orders.contains_key("order-1"));
@@ -533,7 +524,7 @@ mod tests {
             serde_json::json!({"order_id":"order-1","trade_id":"trade-1","status":"failed"}),
         )];
 
-        let state = reduce_live_journal_events(&events).expect("events reduce");
+        let state = reduce_live_journal_events(&events).expect("journal reduces");
 
         assert!(!state.orders.contains_key("order-1"));
         assert!(!state.trades.contains("trade-1"));
@@ -659,7 +650,7 @@ mod tests {
             ),
         ];
 
-        let state = reduce_live_journal_events(&events).expect("events reduce");
+        let state = reduce_live_journal_events(&events).expect("journal reduces");
 
         assert_eq!(state.position_book.positions().len(), 1);
         assert!(state.risk_halted);
