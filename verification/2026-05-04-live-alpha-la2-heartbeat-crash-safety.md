@@ -134,7 +134,7 @@ Local readback integration added:
 - `TradeReadback` now carries an optional related order ID from documented `taker_order_id` or `maker_orders[].order_id`.
 - startup recovery can convert read-only open-order/trade readback into `VenueLiveState`.
 - trade status `RETRYING` is preserved and treated as nonterminal.
-- PR review follow-up: authenticated trade readback now derives the related order ID from the configured account side. Maker-side fills prefer the matching `maker_orders[].order_id`, so reconciliation does not compare a local maker order against the counterparty `taker_order_id`; taker-side fills continue to use `taker_order_id`.
+- PR review follow-up: authenticated trade readback now derives the related order ID from the official `trader_side` field when present. `trader_side=MAKER` uses the matching `maker_orders[].order_id`, so reconciliation does not compare a local maker order against the counterparty `taker_order_id`; `trader_side=TAKER` uses `taker_order_id`. Address-based inference remains only as a fallback for older or missing wire shapes.
 
 Journal/reducer updates:
 
@@ -210,7 +210,7 @@ Exact results:
 - Live-alpha/gate scan: PASS with expected hits for disabled defaults, heartbeat/reconciliation/risk halt gates, config, and tests.
 - Sensitive/no-secret scan: PASS. Broad scan hits were expected historical docs, non-secret env handle names, public fixture IDs, public feed IDs, and existing gated LB6 code. Targeted scan over new LA2 files found only warning text and the scan command itself; no secret values, API-key values, private-key material, raw L2 credentials, auth headers, signed payloads, mnemonic, seed phrase, or wallet/private-key material were added.
 
-Post-review fix checks for maker-side trade order ID derivation:
+Post-review fix checks for maker/taker-side trade order ID derivation:
 
 ```text
 cargo +stable fmt --check
@@ -222,6 +222,15 @@ cargo +stable test --offline
 ```
 
 Result: PASS. The local default Rust toolchain was `1.83.0`, which could not parse the locked edition-2024 transitive crate metadata; checks above used locally installed stable Rust `1.95.0`.
+
+Follow-up local check after tightening the fix to prefer the official `trader_side` field:
+
+```text
+cargo fmt --check
+cargo test --offline live_beta_readback
+```
+
+Result: PASS. `cargo test --offline live_beta_readback` covered 33 focused tests, including `readback_trader_side_taker_uses_taker_order_even_when_maker_address_matches_account` and `readback_trader_side_maker_does_not_use_counterparty_taker_order`.
 
 ## Safety Result
 

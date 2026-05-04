@@ -946,6 +946,8 @@ struct TradeWire {
     transaction_hash: Option<String>,
     maker_address: String,
     #[serde(default)]
+    trader_side: Option<String>,
+    #[serde(default)]
     taker_order_id: Option<String>,
     #[serde(default)]
     maker_orders: Vec<TradeMakerOrderWire>,
@@ -1003,6 +1005,46 @@ impl TradeWire {
     }
 
     fn order_id_for_account(&self, account_address: Option<&str>) -> Option<String> {
+        if let Some(trader_side) = self.trader_side.as_deref().map(str::trim) {
+            if trader_side.eq_ignore_ascii_case("TAKER") {
+                return self.taker_order_id.as_deref().and_then(non_empty_order_id);
+            }
+
+            if trader_side.eq_ignore_ascii_case("MAKER") {
+                return self.maker_order_id_for_account(account_address);
+            }
+        }
+
+        self.order_id_for_account_without_trader_side(account_address)
+    }
+
+    fn order_id_for_account_without_trader_side(
+        &self,
+        account_address: Option<&str>,
+    ) -> Option<String> {
+        let normalized_account = account_address
+            .map(str::trim)
+            .filter(|account_address| !account_address.is_empty());
+
+        if let Some(account_address) = normalized_account {
+            if let Some(order_id) = self.maker_order_id_for_account(Some(account_address)) {
+                return Some(order_id);
+            }
+
+            return self.taker_order_id.as_deref().and_then(non_empty_order_id);
+        }
+
+        self.taker_order_id
+            .as_deref()
+            .and_then(non_empty_order_id)
+            .or_else(|| {
+                self.maker_orders
+                    .iter()
+                    .find_map(|order| non_empty_order_id(&order.order_id))
+            })
+    }
+
+    fn maker_order_id_for_account(&self, account_address: Option<&str>) -> Option<String> {
         let normalized_account = account_address
             .map(str::trim)
             .filter(|account_address| !account_address.is_empty());
@@ -1021,24 +1063,14 @@ impl TradeWire {
                 return Some(order_id);
             }
 
-            if evm_addresses_equal(&self.maker_address, account_address) {
-                return self
-                    .maker_orders
-                    .iter()
-                    .find_map(|order| non_empty_order_id(&order.order_id));
+            if !evm_addresses_equal(&self.maker_address, account_address) {
+                return None;
             }
-
-            return self.taker_order_id.as_deref().and_then(non_empty_order_id);
         }
 
-        self.taker_order_id
-            .as_deref()
-            .and_then(non_empty_order_id)
-            .or_else(|| {
-                self.maker_orders
-                    .iter()
-                    .find_map(|order| non_empty_order_id(&order.order_id))
-            })
+        self.maker_orders
+            .iter()
+            .find_map(|order| non_empty_order_id(&order.order_id))
     }
 }
 
@@ -1708,6 +1740,72 @@ mod tests {
         .expect("trades parse");
 
         assert_eq!(page.data[0].order_id.as_deref(), Some("local-taker-order"));
+    }
+
+    #[test]
+    fn readback_trader_side_taker_uses_taker_order_even_when_maker_address_matches_account() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "trader_side": "TAKER",
+                    "taker_order_id": "local-taker-order",
+                    "maker_orders": [
+                        {{
+                            "order_id": "counterparty-maker-order",
+                            "maker_address": "0x1111111111111111111111111111111111111111"
+                        }}
+                    ]
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id.as_deref(), Some("local-taker-order"));
+    }
+
+    #[test]
+    fn readback_trader_side_maker_does_not_use_counterparty_taker_order() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "trader_side": "MAKER",
+                    "taker_order_id": "counterparty-taker-order",
+                    "maker_orders": [
+                        {{
+                            "order_id": "local-maker-order",
+                            "maker_address": "0x1111111111111111111111111111111111111111"
+                        }}
+                    ]
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id.as_deref(), Some("local-maker-order"));
     }
 
     #[test]
