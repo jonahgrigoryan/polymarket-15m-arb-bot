@@ -7,6 +7,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::live_alpha_config::LiveAlphaConfig;
 use crate::secret_handling::{SecretHandle, SecretInventory, ENV_SECRET_BACKEND};
 
 pub const MODULE: &str = "config";
@@ -16,6 +17,8 @@ pub struct AppConfig {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub live_beta: LiveBetaConfig,
+    #[serde(default)]
+    pub live_alpha: LiveAlphaConfig,
     pub assets: AssetsConfig,
     pub polymarket: PolymarketConfig,
     pub feeds: FeedsConfig,
@@ -66,6 +69,9 @@ impl AppConfig {
         require_non_empty(&mut errors, "runtime.log_level", &self.runtime.log_level);
         require_supported_mode(&mut errors, &self.runtime.mode);
         require_live_beta_secret_handles_config(&mut errors, &self.live_beta.secret_handles);
+        if let Err(live_alpha_errors) = self.live_alpha.validate() {
+            errors.extend(live_alpha_errors);
+        }
 
         require_exact_assets(&mut errors, &self.assets.symbols);
 
@@ -820,6 +826,13 @@ mod tests {
             config.live_beta.secret_handles.canary_private_key,
             "P15M_LIVE_BETA_CANARY_PRIVATE_KEY"
         );
+        assert!(!config.live_alpha.enabled);
+        assert_eq!(config.live_alpha.mode.as_str(), "disabled");
+        assert!(!config.live_alpha.fill_canary.enabled);
+        assert!(!config.live_alpha.maker.enabled);
+        assert!(!config.live_alpha.taker.enabled);
+        assert_eq!(config.live_alpha.risk.max_open_orders, 0);
+        assert_eq!(config.live_alpha.risk.max_single_order_notional, 0.0);
         assert_eq!(config.reference_feed.provider, "none");
         assert!(!config.reference_feed.pyth_enabled);
         assert_eq!(
@@ -877,6 +890,57 @@ mod tests {
             "P15M_LIVE_BETA_CANARY_PRIVATE_KEY"
         );
         config.validate().expect("legacy config validates");
+    }
+
+    #[test]
+    fn missing_live_alpha_section_defaults_to_inert() {
+        let legacy_config = without_toml_table(VALID_CONFIG, "live_alpha");
+
+        let config: AppConfig = toml::from_str(&legacy_config).expect("legacy config parses");
+
+        assert!(!config.live_alpha.enabled);
+        assert_eq!(config.live_alpha.mode.as_str(), "disabled");
+        assert!(!config.live_alpha.maker.enabled);
+        assert!(!config.live_alpha.taker.enabled);
+        config.validate().expect("legacy config validates");
+    }
+
+    fn without_toml_table(input: &str, root_table: &str) -> String {
+        let mut output = Vec::new();
+        let mut skipping = false;
+
+        for line in input.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                let table = trimmed
+                    .trim_start_matches('[')
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .trim_end_matches(']');
+                skipping = table == root_table
+                    || table
+                        .strip_prefix(root_table)
+                        .is_some_and(|suffix| suffix.starts_with('.'));
+            }
+            if !skipping {
+                output.push(line);
+            }
+        }
+
+        output.join("\n")
+    }
+
+    #[test]
+    fn live_alpha_config_rejects_disallowed_la1_taker_flags() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.live_alpha.taker.enabled = true;
+
+        let error = config
+            .validate()
+            .expect_err("taker enabled fails in LA1")
+            .to_string();
+
+        assert!(error.contains("live_alpha.taker.enabled"));
     }
 
     #[test]

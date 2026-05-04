@@ -22,6 +22,9 @@ pub const METRIC_PAPER_FILLS: &str = "p15m_paper_fills_total";
 pub const METRIC_PAPER_PNL: &str = "p15m_paper_pnl";
 pub const METRIC_STORAGE_WRITE_FAILURES: &str = "p15m_storage_write_failures_total";
 pub const METRIC_REPLAY_DETERMINISM_FAILURES: &str = "p15m_replay_determinism_failures_total";
+pub const METRIC_LIVE_ALPHA_RECONCILIATION_STATUS: &str = "p15m_live_alpha_reconciliation_status";
+pub const METRIC_LIVE_ALPHA_RECONCILIATION_MISMATCHES: &str =
+    "p15m_live_alpha_reconciliation_mismatches_total";
 
 pub const STRUCTURED_LOG_FIELDS: &[&str] = &[
     "run_id",
@@ -260,6 +263,36 @@ impl MetricsSnapshot {
                 count as f64,
             )
             .label("replay_run_id", replay_run_id),
+        );
+    }
+
+    pub fn record_live_alpha_reconciliation_status(&mut self, run_id: &str, healthy: bool) {
+        self.push(
+            MetricSample::new(
+                METRIC_LIVE_ALPHA_RECONCILIATION_STATUS,
+                "Live Alpha reconciliation health by run.",
+                MetricKind::Gauge,
+                if healthy { 1.0 } else { 0.0 },
+            )
+            .label("run_id", run_id),
+        );
+    }
+
+    pub fn record_live_alpha_reconciliation_mismatch(
+        &mut self,
+        run_id: &str,
+        mismatch: &str,
+        count: u64,
+    ) {
+        self.push(
+            MetricSample::new(
+                METRIC_LIVE_ALPHA_RECONCILIATION_MISMATCHES,
+                "Live Alpha reconciliation mismatch count by reason.",
+                MetricKind::Counter,
+                count as f64,
+            )
+            .label("run_id", run_id)
+            .label("mismatch", mismatch),
         );
     }
 
@@ -560,6 +593,20 @@ mod tests {
                 "missing TYPE for {metric_family}"
             );
         }
+    }
+
+    #[test]
+    fn live_alpha_reconciliation_metrics_render_health_and_mismatch() {
+        let mut snapshot = MetricsSnapshot::new();
+        snapshot.record_live_alpha_reconciliation_status("la1-run", false);
+        snapshot.record_live_alpha_reconciliation_mismatch("la1-run", "unknown_open_order", 1);
+
+        let rendered = snapshot.render_prometheus();
+
+        assert!(rendered.contains(METRIC_LIVE_ALPHA_RECONCILIATION_STATUS));
+        assert!(rendered.contains(METRIC_LIVE_ALPHA_RECONCILIATION_MISMATCHES));
+        assert!(rendered.contains("mismatch=\"unknown_open_order\""));
+        assert!(rendered.contains("run_id=\"la1-run\""));
     }
 
     #[test]

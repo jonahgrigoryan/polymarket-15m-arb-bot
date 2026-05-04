@@ -15,6 +15,60 @@ clob_l2_credential = "P15M_LIVE_BETA_CLOB_L2_CREDENTIAL"
 clob_l2_passphrase = "P15M_LIVE_BETA_CLOB_L2_PASSPHRASE"
 canary_private_key = "P15M_LIVE_BETA_CANARY_PRIVATE_KEY"
 
+[live_alpha]
+enabled = false
+mode = "disabled"
+approved_host_required = true
+approved_wallet_required = true
+geoblock_required = true
+heartbeat_required = true
+
+[live_alpha.risk]
+max_wallet_funding_pusd = 0.0
+max_available_pusd_usage = 0.0
+max_reserved_pusd = 0.0
+max_single_order_notional = 0.0
+max_per_market_notional = 0.0
+max_per_asset_notional = 0.0
+max_total_live_notional = 0.0
+max_open_orders = 0
+max_open_orders_per_market = 0
+max_open_orders_per_asset = 0
+max_daily_realized_loss = 0.0
+max_daily_unrealized_loss = 0.0
+max_fee_spend = 0.0
+max_submit_rate_per_min = 0
+max_cancel_rate_per_min = 0
+max_reconciliation_lag_ms = 0
+max_book_staleness_ms = 0
+max_reference_staleness_ms = 0
+no_trade_seconds_before_close = 0
+
+[live_alpha.fill_canary]
+enabled = false
+human_approval_required = true
+max_notional = 0.0
+max_price = 0.0
+allow_fok = false
+allow_fak = false
+allow_marketable_limit = false
+
+[live_alpha.maker]
+enabled = false
+post_only = true
+order_type = "GTD"
+ttl_seconds = 0
+min_edge_bps = 0
+replace_tolerance_bps = 0
+min_quote_lifetime_ms = 0
+
+[live_alpha.taker]
+enabled = false
+max_notional = 0.0
+min_ev_after_all_costs_bps = 0
+max_slippage_bps = 0
+max_orders_per_day = 0
+
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
 
