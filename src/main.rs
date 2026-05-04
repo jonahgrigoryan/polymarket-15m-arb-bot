@@ -4293,6 +4293,123 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_validate_path_preserves_in_window_trade_order_mismatch() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la2-startup-recovery-trade-mismatch-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        let journal = LiveOrderJournal::new(&path);
+        for event in [
+            LiveJournalEvent::new(
+                "previous-run",
+                "balance-1",
+                LiveJournalEventType::LiveBalanceSnapshot,
+                900,
+                serde_json::json!({
+                    "p_usd_available": 1.0,
+                    "p_usd_reserved": 0.0,
+                    "p_usd_total": 1.0,
+                    "conditional_token_positions": {},
+                    "balance_snapshot_at": 900,
+                    "source": "fixture"
+                }),
+            ),
+            LiveJournalEvent::new(
+                "previous-run",
+                "trade-1",
+                LiveJournalEventType::LiveTradeConfirmed,
+                901,
+                serde_json::json!({
+                    "trade_id": "trade-in-readback-window",
+                    "order_id": "local-order-1"
+                }),
+            ),
+        ] {
+            journal.append(&event).expect("journal event appends");
+        }
+
+        let validation = ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 1,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 1_000_000,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: vec![TradeReadback {
+                id: "trade-in-readback-window".to_string(),
+                market: "market-1".to_string(),
+                asset_id: "token-up".to_string(),
+                status: live_beta_readback::TradeReadbackStatus::Confirmed,
+                transaction_hash: Some(format!("0x{}", "1".repeat(64))),
+                maker_address: "0x1111111111111111111111111111111111111111".to_string(),
+                order_id: Some("venue-wrong-order".to_string()),
+            }],
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        let reconciliation_input = input
+            .reconciliation_input
+            .as_ref()
+            .expect("reconciliation input");
+        assert!(reconciliation_input
+            .local
+            .known_trades
+            .contains("trade-in-readback-window"));
+        assert!(reconciliation_input
+            .local
+            .trade_order_ids
+            .contains("local-order-1"));
+
+        let report = live_startup_recovery::evaluate_startup_recovery(input);
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(
+            report
+                .reconciliation_mismatches
+                .contains(&LiveReconciliationMismatch::TradeOrderMismatch),
+            "expected trade order mismatch, got {}",
+            report
+                .reconciliation_mismatches
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(!report
+            .reconciliation_mismatches
+            .contains(&LiveReconciliationMismatch::MissingVenueTrade));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn lb6_order_cap_reservation_fails_closed_when_state_exists() {
         let path = std::env::temp_dir().join(format!(
             "p15m-lb6-cap-{}-{}.json",
