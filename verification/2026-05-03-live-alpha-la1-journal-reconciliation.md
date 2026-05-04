@@ -35,7 +35,7 @@ Validation run:
 cargo run --offline -- --config config/default.toml validate --local-only
 ```
 
-Result: PASS. Latest run ID `18ac33f315b5cda8-d0f9-0`.
+Result: PASS. Latest run ID `18ac3462596503d8-ddb7-0`.
 
 ## Gate Decision Examples
 
@@ -50,6 +50,7 @@ Covered examples:
 - default Live Alpha gate blocks;
 - missing compile-time/default global placement gates block;
 - modes that cannot place live orders, including `shadow`, remain blocked through `LiveAlphaMode::can_place_live_orders()`;
+- live-order-capable modes require their matching enabled submode flag, including fill canary, maker micro, quote manager, and taker gate;
 - reconciliation failure blocks.
 
 ## Execution Intent Shape
@@ -97,7 +98,7 @@ Replay/reducer behavior reconstructs:
 - reconciliation mismatch count;
 - risk halt state.
 
-Regression coverage confirms rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state. Failed trade events also do not become venue-known order state, known-trade fill evidence, trade-order evidence, or exact trade/order mappings.
+Regression coverage confirms `replay_state(run_id)` scopes reduced journal state to the requested run ID. Rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state. Failed trade events also do not become venue-known order state, known-trade fill evidence, trade-order evidence, or exact trade/order mappings.
 
 Focused journal tests passed:
 
@@ -175,7 +176,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 262 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 265 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 
@@ -193,7 +194,7 @@ Expected hits only:
 - existing paper order/cancel simulation paths;
 - existing readback/auth secret-handle names and L2 header names, not values;
 - new LA1 inert config/gate/order-intent/journal/reconciliation definitions;
-- new LA1 reducer and reconciliation tests for rejected submissions, failed trade evidence filtering, exact trade/order mapping, missing venue trade readback, and conditional-token balance drift;
+- new LA1 gate, reducer, and reconciliation tests for submode enablement, run-scoped journal replay, rejected submissions, failed trade evidence filtering, exact trade/order mapping, missing venue trade readback, and conditional-token balance drift;
 - safety scan command text in docs and verification notes;
 - public fixture IDs, public Pyth/Chainlink feed IDs, public condition/order IDs already recorded in prior evidence.
 

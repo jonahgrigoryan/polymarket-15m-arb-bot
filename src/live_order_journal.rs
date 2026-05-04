@@ -145,8 +145,16 @@ impl LiveOrderJournal {
         Ok(events)
     }
 
-    pub fn replay_state(&self) -> LiveJournalResult<LiveJournalState> {
+    pub fn replay_for_run(&self, run_id: &str) -> LiveJournalResult<Vec<LiveJournalEvent>> {
         let events = self.replay()?;
+        Ok(events
+            .into_iter()
+            .filter(|event| event.run_id == run_id)
+            .collect())
+    }
+
+    pub fn replay_state(&self, run_id: &str) -> LiveJournalResult<LiveJournalState> {
+        let events = self.replay_for_run(run_id)?;
         Ok(reduce_live_journal_events(&events))
     }
 }
@@ -423,6 +431,39 @@ mod tests {
             Some(&"order-1".to_string())
         );
         assert_eq!(state.balance_tracker.snapshot_count(), 1);
+    }
+
+    #[test]
+    fn live_order_journal_replay_state_is_scoped_to_run_id() {
+        let path = temp_path("journal_run_scope");
+        let journal = LiveOrderJournal::new(&path);
+        journal
+            .append(&LiveJournalEvent::new(
+                "run-old",
+                "event-1",
+                LiveJournalEventType::LiveOrderReadbackObserved,
+                1,
+                serde_json::json!({"order_id":"order-old","intent_id":"intent-old"}),
+            ))
+            .expect("old run event appends");
+        journal
+            .append(&LiveJournalEvent::new(
+                "run-current",
+                "event-2",
+                LiveJournalEventType::LiveOrderReadbackObserved,
+                2,
+                serde_json::json!({"order_id":"order-current","intent_id":"intent-current"}),
+            ))
+            .expect("current run event appends");
+
+        let state = journal
+            .replay_state("run-current")
+            .expect("current run replays");
+
+        assert!(state.orders.contains_key("order-current"));
+        assert!(!state.orders.contains_key("order-old"));
+        assert!(state.intents.contains("intent-current"));
+        assert!(!state.intents.contains("intent-old"));
     }
 
     #[test]

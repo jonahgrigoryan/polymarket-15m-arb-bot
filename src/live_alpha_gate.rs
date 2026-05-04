@@ -15,6 +15,9 @@ pub enum LiveAlphaReadinessStatus {
 pub struct LiveAlphaGateInput {
     pub live_alpha_enabled: bool,
     pub live_alpha_mode: LiveAlphaMode,
+    pub fill_canary_enabled: bool,
+    pub maker_enabled: bool,
+    pub taker_enabled: bool,
     pub config_intent_enabled: bool,
     pub cli_intent_enabled: bool,
     pub kill_switch_active: bool,
@@ -31,6 +34,9 @@ impl Default for LiveAlphaGateInput {
         Self {
             live_alpha_enabled: false,
             live_alpha_mode: LiveAlphaMode::Disabled,
+            fill_canary_enabled: false,
+            maker_enabled: false,
+            taker_enabled: false,
             config_intent_enabled: false,
             cli_intent_enabled: false,
             kill_switch_active: true,
@@ -50,6 +56,7 @@ pub enum LiveAlphaBlockReason {
     CompileTimeLiveDisabled,
     LiveAlphaDisabled,
     ModeDisabled,
+    SubmodeDisabled,
     MissingConfigIntent,
     MissingCliIntent,
     KillSwitchActive,
@@ -72,6 +79,7 @@ impl LiveAlphaBlockReason {
             Self::CompileTimeLiveDisabled => "compile_time_live_disabled",
             Self::LiveAlphaDisabled => "live_alpha_disabled",
             Self::ModeDisabled => "mode_disabled",
+            Self::SubmodeDisabled => "submode_disabled",
             Self::MissingConfigIntent => "missing_config_intent",
             Self::MissingCliIntent => "missing_cli_intent",
             Self::KillSwitchActive => "kill_switch_active",
@@ -127,6 +135,9 @@ pub fn evaluate_live_alpha_gate(input: LiveAlphaGateInput) -> LiveAlphaGateDecis
     }
     if !input.live_alpha_mode.can_place_live_orders() {
         block_reasons.push(LiveAlphaBlockReason::ModeDisabled);
+    }
+    if input.live_alpha_mode.can_place_live_orders() && !input.selected_submode_enabled() {
+        block_reasons.push(LiveAlphaBlockReason::SubmodeDisabled);
     }
     if !input.config_intent_enabled {
         block_reasons.push(LiveAlphaBlockReason::MissingConfigIntent);
@@ -186,6 +197,17 @@ fn push_readiness_block(
     }
 }
 
+impl LiveAlphaGateInput {
+    fn selected_submode_enabled(&self) -> bool {
+        match self.live_alpha_mode {
+            LiveAlphaMode::FillCanary => self.fill_canary_enabled,
+            LiveAlphaMode::MakerMicro | LiveAlphaMode::QuoteManager => self.maker_enabled,
+            LiveAlphaMode::TakerGate => self.taker_enabled,
+            LiveAlphaMode::Disabled | LiveAlphaMode::Shadow | LiveAlphaMode::Scale => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +245,9 @@ mod tests {
         let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
             live_alpha_enabled: true,
             live_alpha_mode: LiveAlphaMode::Shadow,
+            fill_canary_enabled: false,
+            maker_enabled: false,
+            taker_enabled: false,
             config_intent_enabled: true,
             cli_intent_enabled: true,
             kill_switch_active: false,
@@ -248,6 +273,9 @@ mod tests {
         let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
             live_alpha_enabled: true,
             live_alpha_mode: LiveAlphaMode::Shadow,
+            fill_canary_enabled: false,
+            maker_enabled: false,
+            taker_enabled: false,
             config_intent_enabled: true,
             cli_intent_enabled: true,
             kill_switch_active: false,
@@ -266,6 +294,50 @@ mod tests {
     }
 
     #[test]
+    fn live_alpha_gate_blocks_live_order_mode_when_submode_disabled() {
+        for mode in [
+            LiveAlphaMode::FillCanary,
+            LiveAlphaMode::MakerMicro,
+            LiveAlphaMode::QuoteManager,
+            LiveAlphaMode::TakerGate,
+        ] {
+            let decision = evaluate_live_alpha_gate(live_order_capable_input(mode));
+
+            assert!(!decision.allowed);
+            assert!(
+                decision
+                    .block_reasons
+                    .contains(&LiveAlphaBlockReason::SubmodeDisabled),
+                "{mode:?} missing submode disabled block"
+            );
+        }
+    }
+
+    #[test]
+    fn live_alpha_gate_accepts_matching_submode_enablement() {
+        for (mode, fill_canary_enabled, maker_enabled, taker_enabled) in [
+            (LiveAlphaMode::FillCanary, true, false, false),
+            (LiveAlphaMode::MakerMicro, false, true, false),
+            (LiveAlphaMode::QuoteManager, false, true, false),
+            (LiveAlphaMode::TakerGate, false, false, true),
+        ] {
+            let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
+                fill_canary_enabled,
+                maker_enabled,
+                taker_enabled,
+                ..live_order_capable_input(mode)
+            });
+
+            assert!(
+                !decision
+                    .block_reasons
+                    .contains(&LiveAlphaBlockReason::SubmodeDisabled),
+                "{mode:?} should not have submode disabled block"
+            );
+        }
+    }
+
+    #[test]
     fn live_alpha_gate_fails_closed_on_reconciliation_failure() {
         let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
             reconciliation_status: LiveAlphaReadinessStatus::Failed,
@@ -276,5 +348,24 @@ mod tests {
         assert!(decision
             .block_reasons
             .contains(&LiveAlphaBlockReason::ReconciliationFailed));
+    }
+
+    fn live_order_capable_input(live_alpha_mode: LiveAlphaMode) -> LiveAlphaGateInput {
+        LiveAlphaGateInput {
+            live_alpha_enabled: true,
+            live_alpha_mode,
+            fill_canary_enabled: false,
+            maker_enabled: false,
+            taker_enabled: false,
+            config_intent_enabled: true,
+            cli_intent_enabled: true,
+            kill_switch_active: false,
+            geoblock_status: GeoblockGateStatus::Passed,
+            account_preflight_status: LiveAlphaReadinessStatus::Passed,
+            heartbeat_status: LiveAlphaReadinessStatus::Passed,
+            reconciliation_status: LiveAlphaReadinessStatus::Passed,
+            approval_status: LiveAlphaReadinessStatus::Passed,
+            phase_status: LiveAlphaReadinessStatus::Passed,
+        }
     }
 }

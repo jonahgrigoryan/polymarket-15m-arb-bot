@@ -417,6 +417,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     live_alpha_gate::evaluate_live_alpha_gate(LiveAlphaGateInput {
                         live_alpha_enabled: config.live_alpha.enabled,
                         live_alpha_mode: config.live_alpha.mode,
+                        fill_canary_enabled: config.live_alpha.fill_canary.enabled,
+                        maker_enabled: config.live_alpha.maker.enabled,
+                        taker_enabled: config.live_alpha.taker.enabled,
                         config_intent_enabled: config.live_alpha.enabled,
                         cli_intent_enabled: false,
                         kill_switch_active: config.live_beta.kill_switch_active,
