@@ -134,6 +134,7 @@ Local readback integration added:
 - `TradeReadback` now carries an optional related order ID from documented `taker_order_id` or `maker_orders[].order_id`.
 - startup recovery can convert read-only open-order/trade readback into `VenueLiveState`.
 - trade status `RETRYING` is preserved and treated as nonterminal.
+- PR review follow-up: authenticated trade readback now derives the related order ID from the configured account side. Maker-side fills prefer the matching `maker_orders[].order_id`, so reconciliation does not compare a local maker order against the counterparty `taker_order_id`; taker-side fills continue to use `taker_order_id`.
 
 Journal/reducer updates:
 
@@ -208,6 +209,19 @@ Exact results:
 - Order/FOK/FAK scan: PASS with expected hits only for LA2 fail-closed config flags/tests, existing LB6 gated canary code, paper-order simulation, and disabled placement gates.
 - Live-alpha/gate scan: PASS with expected hits for disabled defaults, heartbeat/reconciliation/risk halt gates, config, and tests.
 - Sensitive/no-secret scan: PASS. Broad scan hits were expected historical docs, non-secret env handle names, public fixture IDs, public feed IDs, and existing gated LB6 code. Targeted scan over new LA2 files found only warning text and the scan command itself; no secret values, API-key values, private-key material, raw L2 credentials, auth headers, signed payloads, mnemonic, seed phrase, or wallet/private-key material were added.
+
+Post-review fix checks for maker-side trade order ID derivation:
+
+```text
+cargo +stable fmt --check
+cargo +stable test live_beta_readback
+cargo +stable test --offline live_beta_readback
+cargo +stable clippy --offline -- -D warnings
+git diff --check
+cargo +stable test --offline
+```
+
+Result: PASS. The local default Rust toolchain was `1.83.0`, which could not parse the locked edition-2024 transitive crate metadata; checks above used locally installed stable Rust `1.95.0`.
 
 ## Safety Result
 
