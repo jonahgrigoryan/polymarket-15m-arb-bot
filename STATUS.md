@@ -18,7 +18,7 @@ Authoritative sources remain:
 ## Current Branch
 
 - Branch: `live-alpha/la2-heartbeat-crash-safety`
-- Current commit: PR #31 branch work from `main` after PR #29 merge commit `c6f3c23`, with LA2 post-review fixes for startup recovery, heartbeat parsing, readback trade order IDs, recovery-evidence reconciliation wiring, and startup reconciliation order-scope matching.
+- Current commit: PR #31 branch work from `main` after PR #29 merge commit `c6f3c23`, with LA2 post-review fixes for startup recovery, heartbeat parsing, readback trade order IDs, recovery-evidence reconciliation wiring, startup reconciliation order-scope matching, maker-side readback trade order fallback, and durable startup recovery journal event persistence.
 - Worktree status: LA2 Live Alpha heartbeat, user-event parser, startup recovery, halt/recovery events, runbooks, STATUS, verification note, and PR-review fixes only. No live order, live cancel, cancel-all, controlled fill canary, maker autonomy, strategy-selected live trading, LA3 work, secret value, API-key value, seed phrase, raw L2 credential, or wallet/private-key material is authorized or added.
 
 ## Milestones
@@ -456,8 +456,8 @@ PASS for heartbeat, user events, and crash recovery only.
 - Runbooks: `runbooks/live-alpha-runbook.md`, `runbooks/live-alpha-reconciliation-runbook.md`, and `runbooks/live-alpha-incident-response.md`.
 - Scope: heartbeat state/evaluation with official `postHeartbeat` timing modeled but network heartbeat POST disabled, parser-only user-channel event handling, startup recovery evaluation for geoblock/account/balance/open-order/recent-trade/journal/position/reconciliation checks, durable halt/recovery events, and readback-to-reconciliation conversion.
 - Official Polymarket docs rechecked for user WebSocket events, heartbeat behavior, L2 auth, geoblock, order/cancel/readback, trade lifecycle, fees, and rate limits before coding.
-- Focused checks passed: `cargo test --offline live_heartbeat`, `cargo test --offline live_user_events`, `cargo test --offline live_reconciliation`, `cargo test --offline startup_recovery`, `cargo test --offline risk_halt`, `cargo test --offline live_alpha_gate`, and `cargo test --offline live_beta_readback`. PR review fixes derive readback trade `order_id` from official `trader_side` when present and scope startup reconciliation local order evidence to the open-order readback snapshot, so historical terminal journal orders do not false-halt against open-order-only venue evidence.
-- Final checks passed: `cargo run --offline -- --config config/default.toml validate --local-only` (run ID `18ac4646671c7ab0-8f88-0`), `cargo fmt --check`, `cargo test --offline` (288 lib tests, 13 main tests, 0 doc tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, `git status --short --branch`, and required scope/no-secret scans.
+- Focused checks passed: `cargo test --offline live_heartbeat`, `cargo test --offline live_user_events`, `cargo test --offline live_reconciliation`, `cargo test --offline startup_recovery`, `cargo test --offline risk_halt`, `cargo test --offline live_alpha_gate`, `cargo test --offline live_beta_readback`, `cargo test --offline readback_missing_trader_side_does_not_use_taker_order_for_account_maker`, and `cargo test --offline startup_recovery_validate_path_persists_journal_events`. PR review fixes derive readback trade `order_id` from official `trader_side` when present, do not fall back to a counterparty `taker_order_id` when missing `maker_orders` still prove the configured account is maker-side, scope startup reconciliation local order evidence to the open-order readback snapshot, and persist emitted startup recovery journal events durably.
+- Final checks passed: `cargo run --offline -- --config config/default.toml validate --local-only` (run ID `18ac576299093bd0-f6a4-0`), `cargo fmt --check`, `cargo test --offline` (294 lib tests, 18 main tests, 0 doc tests), `cargo clippy --offline -- -D warnings`, `git diff --check`, `git status --short --branch`, and required scope/no-secret scans.
 - Optional approved-host live read-only/heartbeat check was not run for LA2.
 - LA2 authorizes no live order placement, no live cancels, no cancel-all, no controlled fill canary, no maker autonomy, no strategy-selected live trading, no LA3 work, no global `LIVE_ORDER_PLACEMENT_ENABLED=true`, no default `live-alpha-orders` feature enablement, and no reset/bypass of the consumed LB6 one-order cap.
 - Exact next action after LA2 PR merge: stop and obtain explicit human/operator approval before starting LA3 from fresh updated `main`.
@@ -489,7 +489,7 @@ PASS for heartbeat, user events, and crash recovery only.
 - LB4 approved-host geoblock is PASS from this Mexico session, and legal/access approval for this LB4 evidence attempt is recorded.
 - LB4 approved-host authenticated readback/account preflight is PASS for the approved Mexico host/session only.
 - LB5 cancel readiness and rollback/runbook minimum are PASS for offline readiness only; LB6 has now proven one exact live canary submission and exact single-order cancel closeout.
-- Next concrete action is finish LA2 verification, commit/push the LA2 branch, open the LA2 PR, and stop after PR creation.
+- Next concrete action is commit and push the LA2 post-review fix branch, then wait for PR #31 review/merge decision and stop before LA3.
 - Mandatory boundary: LA2 does not authorize any live order, live cancel, cancel-all, controlled fill canary, maker autonomy, one-order cap reset/bypass, strategy-selected live trading, wider live trading, repeated canary, live strategy routing, production rollout, or LA3 work.
 - Continue M9/RTDS paper evidence only as strategy robustness evidence, not as live profitability proof.
 

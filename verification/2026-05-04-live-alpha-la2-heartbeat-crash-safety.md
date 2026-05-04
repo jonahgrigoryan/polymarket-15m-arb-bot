@@ -136,6 +136,8 @@ Second post-review fix: `live_alpha.journal_path` is now an inert default-empty 
 
 Third post-review fix: startup reconciliation now scopes local order evidence to the open-order readback snapshot before building the `LiveReconciliationInput`. This keeps historical terminal journal orders, such as previously canceled or filled orders, from producing false `missing_venue_order` or cancel-confirmation halts when the venue evidence is intentionally open-order scoped. Unknown venue open orders still halt through the core reconciliation engine.
 
+Fourth post-review fix: the validate startup recovery path now appends the evaluator's planned durable startup recovery events to the configured `live_alpha.journal_path` before printing the recovery summary. `LiveStartupRecoveryStarted`, `LiveStartupRecoveryPassed`, `LiveStartupRecoveryFailed`, and `LiveRiskHalt` are therefore replayable across restarts when emitted. If startup recovery produces journal events but no Live Alpha journal path is configured, validate fails closed instead of relying on stdout-only evidence.
+
 ## Readback And Reconstruction
 
 No optional approved-host live read-only or heartbeat check has been run for this LA2 branch as of this note.
@@ -147,6 +149,7 @@ Local readback integration added:
 - authenticated readback preflight can return raw read-only collateral/open-order/trade evidence for startup recovery while preserving the existing report-only API for LB6/LB7 callers.
 - trade status `RETRYING` is preserved and treated as nonterminal.
 - PR review follow-up: authenticated trade readback now derives the related order ID from the official `trader_side` field when present. `trader_side=MAKER` uses the matching `maker_orders[].order_id`, so reconciliation does not compare a local maker order against the counterparty `taker_order_id`; `trader_side=TAKER` uses `taker_order_id`. Address-based inference remains only as a fallback for older or missing wire shapes.
+- Additional PR review follow-up: when `trader_side` is absent, top-level `maker_address` proves the configured account is maker-side. If `maker_orders` is missing or empty in that maker-side case, readback now leaves `order_id=None` instead of falling back to the counterparty `taker_order_id`.
 
 Journal/reducer updates:
 
@@ -211,9 +214,9 @@ rg -n -i "(wallet|private[_ -]?key|secret|api[_ -]?key|passphrase|signing|signat
 
 Exact results:
 
-- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, latest post-review run ID `18ac4582232f80a0-79ed-0`; output confirmed `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_heartbeat_required=true`, `live_alpha_startup_recovery_status=skipped`, `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`, `live_alpha_compile_time_orders_enabled=false`, and `live_alpha_gate_status=blocked`.
+- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, latest post-review run ID `18ac576299093bd0-f6a4-0`; output confirmed `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_heartbeat_required=true`, `live_alpha_startup_recovery_status=skipped`, `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`, `live_alpha_startup_recovery_journal_events=`, `live_alpha_compile_time_orders_enabled=false`, and `live_alpha_gate_status=blocked`.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 288 lib tests, 12 main tests, 0 doc tests.
+- `cargo test --offline`: PASS, 294 lib tests, 18 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - `git status --short --branch`: branch `live-alpha/la2-heartbeat-crash-safety` with only LA2 source/docs/status/verification changes.
@@ -283,6 +286,20 @@ git diff --check
 ```
 
 Result: PASS. `startup_recovery` covered 6 library tests and 5 validate-path tests, including the new regression for a journal with terminal canceled/filled orders and a healthy zero-open-order readback snapshot. `live_reconciliation` preserved the core fail-closed checks for unknown open orders, missing venue orders, cancel confirmation, trade mismatches, balances, and positions. Latest local validate run ID `18ac4646671c7ab0-8f88-0` kept default Live Alpha disabled and startup recovery skipped with `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`. Full offline test count is now 288 library tests, 13 main tests, and 0 doc tests.
+
+Fourth post-review check for maker-side trade ID fallback and durable startup recovery journal events:
+
+```text
+cargo test --offline readback_missing_trader_side_does_not_use_taker_order_for_account_maker
+cargo test --offline startup_recovery_validate_path_persists_journal_events
+cargo run --offline -- --config config/default.toml validate --local-only
+cargo fmt --check
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+```
+
+Result: PASS. The readback regression covers a confirmed trade where `maker_address` matches the configured account, `trader_side` is absent, `maker_orders` is absent by serde default, and `taker_order_id` belongs to the counterparty; the parsed trade keeps `order_id=None` rather than poisoning reconciliation with the counterparty order. The startup recovery regression persists `LiveStartupRecoveryStarted`, `LiveStartupRecoveryFailed`, and `LiveRiskHalt` to `LiveOrderJournal` and replays them with run ID, timestamp, recovery status, block reasons, and reconciliation mismatches intact. Latest local validate run ID `18ac576299093bd0-f6a4-0` kept default Live Alpha disabled and emitted no startup recovery journal events. Full offline test count is now 294 library tests, 18 main tests, and 0 doc tests.
 
 ## Safety Result
 

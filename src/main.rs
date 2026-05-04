@@ -451,6 +451,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     readiness_from_startup_check(startup_recovery_input.account_preflight_status);
                 let startup_recovery =
                     live_startup_recovery::evaluate_startup_recovery(startup_recovery_input);
+                persist_startup_recovery_journal_events(&config, &startup_recovery)?;
                 let startup_reconciliation_status =
                     reconciliation_readiness_from_startup_recovery(&startup_recovery);
                 println!(
@@ -3315,6 +3316,51 @@ fn reconciliation_readiness_from_startup_recovery(
     }
 }
 
+fn persist_startup_recovery_journal_events(
+    config: &AppConfig,
+    report: &LiveStartupRecoveryReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if report.journal_event_types.is_empty() {
+        return Ok(());
+    }
+
+    let journal_path = config.live_alpha.journal_path().ok_or_else(|| {
+        std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "live_alpha.journal_path is required to persist startup recovery journal events",
+        )
+    })?;
+    let journal = LiveOrderJournal::new(Path::new(journal_path));
+    let block_reasons = report
+        .block_reasons
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect::<Vec<_>>();
+    let reconciliation_mismatches = report
+        .reconciliation_mismatches
+        .iter()
+        .map(|mismatch| mismatch.as_str())
+        .collect::<Vec<_>>();
+    let payload = serde_json::json!({
+        "startup_recovery_status": report.status_str(),
+        "block_reasons": block_reasons,
+        "reconciliation_mismatches": reconciliation_mismatches,
+    });
+
+    for (index, event_type) in report.journal_event_types.iter().copied().enumerate() {
+        let event = polymarket_15m_arb_bot::live_order_journal::LiveJournalEvent::new(
+            report.run_id.clone(),
+            format!("{}-startup-recovery-{index}", report.run_id),
+            event_type,
+            report.checked_at_ms,
+            payload.clone(),
+        );
+        journal.append(&event)?;
+    }
+
+    Ok(())
+}
+
 fn live_journal_event_type_list(
     event_types: &[polymarket_15m_arb_bot::live_order_journal::LiveJournalEventType],
 ) -> String {
@@ -3724,6 +3770,78 @@ mod tests {
             reconciliation_readiness_from_startup_recovery(&report),
             LiveAlphaReadinessStatus::Unknown
         );
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_persists_journal_events() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la2-startup-recovery-events-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+        let report = LiveStartupRecoveryReport {
+            run_id: "test-run".to_string(),
+            checked_at_ms: 1_000,
+            status: LiveStartupRecoveryStatus::HaltRequired,
+            block_reasons: vec![
+                LiveStartupRecoveryBlockReason::JournalReplayFailed,
+                LiveStartupRecoveryBlockReason::ReconciliationFailed,
+            ],
+            reconciliation_mismatches: vec![LiveReconciliationMismatch::UnknownOpenOrder],
+            journal_event_types: vec![
+                LiveJournalEventType::LiveStartupRecoveryStarted,
+                LiveJournalEventType::LiveStartupRecoveryFailed,
+                LiveJournalEventType::LiveRiskHalt,
+            ],
+        };
+
+        persist_startup_recovery_journal_events(&config, &report)
+            .expect("startup recovery journal events persist");
+
+        let events = LiveOrderJournal::new(&path)
+            .replay()
+            .expect("journal replays");
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event_type)
+                .collect::<Vec<_>>(),
+            vec![
+                LiveJournalEventType::LiveStartupRecoveryStarted,
+                LiveJournalEventType::LiveStartupRecoveryFailed,
+                LiveJournalEventType::LiveRiskHalt,
+            ]
+        );
+        assert!(events.iter().all(|event| event.run_id == "test-run"));
+        assert!(events.iter().all(|event| event.created_at == 1_000));
+        assert_eq!(
+            events[2].payload["startup_recovery_status"].as_str(),
+            Some("halt_required")
+        );
+        assert_eq!(
+            events[2].payload["block_reasons"]
+                .as_array()
+                .expect("block reasons array")
+                .iter()
+                .filter_map(|reason| reason.as_str())
+                .collect::<Vec<_>>(),
+            vec!["journal_replay_failed", "reconciliation_failed"]
+        );
+        assert_eq!(
+            events[2].payload["reconciliation_mismatches"]
+                .as_array()
+                .expect("mismatches array")
+                .iter()
+                .filter_map(|mismatch| mismatch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["unknown_open_order"]
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
