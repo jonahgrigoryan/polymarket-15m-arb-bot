@@ -35,7 +35,7 @@ Validation run:
 cargo run --offline -- --config config/default.toml validate --local-only
 ```
 
-Result: PASS. Latest run ID `18ac3462596503d8-ddb7-0`.
+Result: PASS. Latest run ID `18ac35218324a100-ece2-0`.
 
 ## Gate Decision Examples
 
@@ -98,7 +98,7 @@ Replay/reducer behavior reconstructs:
 - reconciliation mismatch count;
 - risk halt state.
 
-Regression coverage confirms `replay_state(run_id)` scopes reduced journal state to the requested run ID. Rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state. Failed trade events also do not become venue-known order state, known-trade fill evidence, trade-order evidence, or exact trade/order mappings.
+Regression coverage confirms `replay_state(run_id)` scopes reduced journal state to the requested run ID and fails on malformed typed journal payloads instead of reconstructing incomplete balance or position state. Rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state. Failed trade events also do not become venue-known order state, known-trade fill evidence, trade-order evidence, or exact trade/order mappings.
 
 Focused journal tests passed:
 
@@ -108,7 +108,7 @@ cargo test --offline live_order_journal
 
 ## Redaction Result
 
-Journal payload redaction covers sensitive keys including private-key, secret, credential, passphrase, mnemonic, and seed-like fields.
+Journal payload redaction normalizes key names before matching and covers sensitive keys including private-key/privateKey, api-key/apiKey, secret, credential, passphrase, mnemonic, and seed-like fields.
 
 Focused redaction checks passed:
 
@@ -176,7 +176,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 265 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 267 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 
@@ -194,7 +194,7 @@ Expected hits only:
 - existing paper order/cancel simulation paths;
 - existing readback/auth secret-handle names and L2 header names, not values;
 - new LA1 inert config/gate/order-intent/journal/reconciliation definitions;
-- new LA1 gate, reducer, and reconciliation tests for submode enablement, run-scoped journal replay, rejected submissions, failed trade evidence filtering, exact trade/order mapping, missing venue trade readback, and conditional-token balance drift;
+- new LA1 gate, reducer, redaction, and reconciliation tests for submode enablement, run-scoped journal replay, malformed typed journal payload rejection, normalized sensitive-key matching, rejected submissions, failed trade evidence filtering, exact trade/order mapping, missing venue trade readback, and conditional-token balance drift;
 - safety scan command text in docs and verification notes;
 - public fixture IDs, public Pyth/Chainlink feed IDs, public condition/order IDs already recorded in prior evidence.
 

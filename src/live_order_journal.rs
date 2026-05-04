@@ -155,7 +155,7 @@ impl LiveOrderJournal {
 
     pub fn replay_state(&self, run_id: &str) -> LiveJournalResult<LiveJournalState> {
         let events = self.replay_for_run(run_id)?;
-        Ok(reduce_live_journal_events(&events))
+        reduce_live_journal_events(&events)
     }
 }
 
@@ -180,7 +180,9 @@ pub struct LiveJournalState {
     pub risk_halted: bool,
 }
 
-pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalState {
+pub fn reduce_live_journal_events(
+    events: &[LiveJournalEvent],
+) -> LiveJournalResult<LiveJournalState> {
     let mut state = LiveJournalState::default();
 
     for event in events {
@@ -218,11 +220,13 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
             }
         }
         if event.event_type == LiveJournalEventType::LiveBalanceSnapshot {
-            if let Ok(snapshot) =
-                serde_json::from_value::<LiveBalanceSnapshot>(event.payload.clone())
-            {
-                state.balance_tracker.apply_snapshot(snapshot);
-            }
+            let snapshot = serde_json::from_value::<LiveBalanceSnapshot>(event.payload.clone())
+                .map_err(|source| LiveJournalError::MalformedPayload {
+                    event_id: event.event_id.clone(),
+                    event_type: event.event_type,
+                    source,
+                })?;
+            state.balance_tracker.apply_snapshot(snapshot);
         }
         if matches!(
             event.event_type,
@@ -230,9 +234,14 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
                 | LiveJournalEventType::LivePositionReduced
                 | LiveJournalEventType::LivePositionClosed
         ) {
-            if let Ok(position) = serde_json::from_value::<LivePosition>(event.payload.clone()) {
-                state.position_book.upsert_position(position);
-            }
+            let position = serde_json::from_value::<LivePosition>(event.payload.clone()).map_err(
+                |source| LiveJournalError::MalformedPayload {
+                    event_id: event.event_id.clone(),
+                    event_type: event.event_type,
+                    source,
+                },
+            )?;
+            state.position_book.upsert_position(position);
         }
         if event.event_type == LiveJournalEventType::LiveReconciliationMismatch {
             state.reconciliation_mismatch_count += 1;
@@ -242,7 +251,7 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
         }
     }
 
-    state
+    Ok(state)
 }
 
 impl LiveJournalEventType {
@@ -310,11 +319,11 @@ fn redact_value(value: Value, key: Option<&str>, redacted: &mut bool) -> Value {
 }
 
 fn is_sensitive_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    let key = normalize_sensitive_key(key);
     [
-        "private_key",
+        "privatekey",
         "secret",
-        "api_key",
+        "apikey",
         "passphrase",
         "signature",
         "auth",
@@ -324,6 +333,13 @@ fn is_sensitive_key(key: &str) -> bool {
     ]
     .iter()
     .any(|needle| key.contains(needle))
+}
+
+fn normalize_sensitive_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn payload_string(payload: &Value, key: &str) -> Option<String> {
@@ -349,6 +365,11 @@ pub enum LiveJournalError {
         source: std::io::Error,
     },
     Serialize(serde_json::Error),
+    MalformedPayload {
+        event_id: String,
+        event_type: LiveJournalEventType,
+        source: serde_json::Error,
+    },
 }
 
 impl Display for LiveJournalError {
@@ -360,6 +381,16 @@ impl Display for LiveJournalError {
             Self::Serialize(source) => {
                 write!(formatter, "live journal serialization failed: {source}")
             }
+            Self::MalformedPayload {
+                event_id,
+                event_type,
+                source,
+            } => {
+                write!(
+                    formatter,
+                    "live journal payload for {event_type:?} event {event_id} failed to decode: {source}"
+                )
+            }
         }
     }
 }
@@ -369,6 +400,7 @@ impl Error for LiveJournalError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Serialize(source) => Some(source),
+            Self::MalformedPayload { source, .. } => Some(source),
         }
     }
 }
@@ -419,7 +451,7 @@ mod tests {
         journal.append(&trade_event).expect("trade event appends");
 
         let events = journal.replay().expect("journal replays");
-        let state = reduce_live_journal_events(&events);
+        let state = reduce_live_journal_events(&events).expect("events reduce");
 
         assert_eq!(events.len(), 3);
         assert!(state.intents.contains("intent-1"));
@@ -485,7 +517,7 @@ mod tests {
             ),
         ];
 
-        let state = reduce_live_journal_events(&events);
+        let state = reduce_live_journal_events(&events).expect("events reduce");
 
         assert!(state.intents.contains("intent-1"));
         assert!(!state.orders.contains_key("order-1"));
@@ -501,7 +533,7 @@ mod tests {
             serde_json::json!({"order_id":"order-1","trade_id":"trade-1","status":"failed"}),
         )];
 
-        let state = reduce_live_journal_events(&events);
+        let state = reduce_live_journal_events(&events).expect("events reduce");
 
         assert!(!state.orders.contains_key("order-1"));
         assert!(!state.trades.contains("trade-1"));
@@ -519,7 +551,12 @@ mod tests {
             serde_json::json!({
                 "order_id": "order-1",
                 "api_key": "do-not-commit",
-                "nested": {"private_key": "also-secret"}
+                "apiKey": "camel-api-value",
+                "nested": {
+                    "private_key": "underscore-private-value",
+                    "privateKey": "camel-private-value",
+                    "xApiKey": "header-api-value"
+                }
             }),
         );
 
@@ -527,8 +564,68 @@ mod tests {
 
         assert_eq!(event.redaction_status, RedactionStatus::Redacted);
         assert!(!rendered.contains("do-not-commit"));
-        assert!(!rendered.contains("also-secret"));
+        assert!(!rendered.contains("underscore-private-value"));
+        assert!(!rendered.contains("camel-api-value"));
+        assert!(!rendered.contains("camel-private-value"));
+        assert!(!rendered.contains("header-api-value"));
         assert!(rendered.contains(REDACTED_VALUE));
+    }
+
+    #[test]
+    fn live_order_journal_replay_state_rejects_malformed_balance_payload() {
+        let path = temp_path("journal_malformed_balance");
+        let journal = LiveOrderJournal::new(&path);
+        journal
+            .append(&LiveJournalEvent::new(
+                "run-1",
+                "event-1",
+                LiveJournalEventType::LiveBalanceSnapshot,
+                1,
+                serde_json::json!({"source":"fixture"}),
+            ))
+            .expect("malformed balance event appends");
+
+        let error = journal
+            .replay_state("run-1")
+            .expect_err("malformed balance payload fails replay");
+
+        match error {
+            LiveJournalError::MalformedPayload {
+                event_id,
+                event_type,
+                ..
+            } => {
+                assert_eq!(event_id, "event-1");
+                assert_eq!(event_type, LiveJournalEventType::LiveBalanceSnapshot);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn live_order_journal_reducer_rejects_malformed_position_payload() {
+        let events = vec![LiveJournalEvent::new(
+            "run-1",
+            "event-1",
+            LiveJournalEventType::LivePositionOpened,
+            1,
+            serde_json::json!({"size": 1.0}),
+        )];
+
+        let error =
+            reduce_live_journal_events(&events).expect_err("malformed position payload fails");
+
+        match error {
+            LiveJournalError::MalformedPayload {
+                event_id,
+                event_type,
+                ..
+            } => {
+                assert_eq!(event_id, "event-1");
+                assert_eq!(event_type, LiveJournalEventType::LivePositionOpened);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
@@ -562,7 +659,7 @@ mod tests {
             ),
         ];
 
-        let state = reduce_live_journal_events(&events);
+        let state = reduce_live_journal_events(&events).expect("events reduce");
 
         assert_eq!(state.position_book.positions().len(), 1);
         assert!(state.risk_halted);
