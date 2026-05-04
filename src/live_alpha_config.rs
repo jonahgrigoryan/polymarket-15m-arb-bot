@@ -51,6 +51,8 @@ pub struct LiveAlphaConfig {
     #[serde(default = "default_true")]
     pub heartbeat_required: bool,
     #[serde(default)]
+    pub journal_path: String,
+    #[serde(default)]
     pub risk: LiveAlphaRiskConfig,
     #[serde(default)]
     pub fill_canary: LiveAlphaFillCanaryConfig,
@@ -69,6 +71,7 @@ impl Default for LiveAlphaConfig {
             approved_wallet_required: true,
             geoblock_required: true,
             heartbeat_required: true,
+            journal_path: String::new(),
             risk: LiveAlphaRiskConfig::default(),
             fill_canary: LiveAlphaFillCanaryConfig::default(),
             maker: LiveAlphaMakerConfig::default(),
@@ -114,6 +117,15 @@ impl LiveAlphaConfig {
             Ok(())
         } else {
             Err(errors)
+        }
+    }
+
+    pub fn journal_path(&self) -> Option<&str> {
+        let trimmed = self.journal_path.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
         }
     }
 
@@ -376,6 +388,7 @@ mod tests {
         assert!(!summary.maker_micro_enabled);
         assert!(!summary.taker_enabled);
         assert!(!summary.scale_enabled);
+        assert_eq!(config.journal_path(), None);
         assert_eq!(config.risk.max_open_orders, 0);
         assert_eq!(config.risk.max_single_order_notional, 0.0);
         config

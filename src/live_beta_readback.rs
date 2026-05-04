@@ -299,6 +299,14 @@ pub struct ReadbackPreflightReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedReadbackPreflightEvidence {
+    pub report: ReadbackPreflightReport,
+    pub collateral: BalanceAllowanceReadback,
+    pub open_orders: Vec<OpenOrderReadback>,
+    pub trades: Vec<TradeReadback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadbackEndpointError {
     pub status_code: u16,
     pub code: String,
@@ -473,6 +481,14 @@ pub fn sample_readback_preflight(
 pub async fn authenticated_readback_preflight(
     input: AuthenticatedReadbackInput,
 ) -> LiveBetaReadbackResult<ReadbackPreflightReport> {
+    Ok(authenticated_readback_preflight_evidence(input)
+        .await?
+        .report)
+}
+
+pub async fn authenticated_readback_preflight_evidence(
+    input: AuthenticatedReadbackInput,
+) -> LiveBetaReadbackResult<AuthenticatedReadbackPreflightEvidence> {
     validate_authenticated_readback_input(&input)?;
 
     let client = ReadOnlyClobReadbackClient::new(
@@ -498,14 +514,19 @@ pub async fn authenticated_readback_preflight(
         prerequisites: input.prerequisites,
         account: input.account,
         venue_state,
-        collateral,
-        open_orders,
-        trades,
+        collateral: collateral.clone(),
+        open_orders: open_orders.clone(),
+        trades: trades.clone(),
         heartbeat,
         required_collateral_allowance_units: input.required_collateral_allowance_units,
     })?;
     report.live_network_enabled = true;
-    Ok(report)
+    Ok(AuthenticatedReadbackPreflightEvidence {
+        report,
+        collateral,
+        open_orders,
+        trades,
+    })
 }
 
 pub fn readback_path_catalog() -> Vec<&'static str> {

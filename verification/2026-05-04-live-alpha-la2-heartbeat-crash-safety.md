@@ -132,6 +132,8 @@ Startup recovery detects unknown open orders through reconciliation and halts. L
 
 Post-review fix: the `validate` startup/preflight path now invokes the LA2 startup recovery evaluator and prints startup recovery status, block reasons, planned durable journal events, and reconciliation mismatches. For non-disabled Live Alpha modes, unknown recovery evidence remains halt-required. Local-only/sample readback is not treated as live evidence; only a passed live-network readback preflight maps account/balance/open-order/recent-trade checks to passed. Journal replay, position reconstruction, and reconciliation remain unknown unless actual recovery evidence is available, so startup remains fail-closed instead of silently passing.
 
+Second post-review fix: `live_alpha.journal_path` is now an inert default-empty config field. When it is explicitly configured and the file exists, the validate startup path replays the full durable Live Alpha journal through the LA1 reducer, reconstructs local balance/order/trade/position state, and marks journal replay plus position reconstruction as passed. Authenticated readback preflight now exposes raw read-only collateral/open-order/trade evidence alongside the existing summary report. When approved live-network readback passes and raw counts match the summary, validate builds a venue state and runs reconciliation against the replayed local state. Missing journal configuration, missing journal file, malformed journal replay, local-only readback, blocked readback, or incomplete raw evidence remains fail-closed and leaves startup recovery halted or unknown.
+
 ## Readback And Reconstruction
 
 No optional approved-host live read-only or heartbeat check has been run for this LA2 branch as of this note.
@@ -140,6 +142,7 @@ Local readback integration added:
 
 - `TradeReadback` now carries an optional related order ID from documented `taker_order_id` or `maker_orders[].order_id`.
 - startup recovery can convert read-only open-order/trade readback into `VenueLiveState`.
+- authenticated readback preflight can return raw read-only collateral/open-order/trade evidence for startup recovery while preserving the existing report-only API for LB6/LB7 callers.
 - trade status `RETRYING` is preserved and treated as nonterminal.
 - PR review follow-up: authenticated trade readback now derives the related order ID from the official `trader_side` field when present. `trader_side=MAKER` uses the matching `maker_orders[].order_id`, so reconciliation does not compare a local maker order against the counterparty `taker_order_id`; `trader_side=TAKER` uses `taker_order_id`. Address-based inference remains only as a fallback for older or missing wire shapes.
 
@@ -206,9 +209,9 @@ rg -n -i "(wallet|private[_ -]?key|secret|api[_ -]?key|passphrase|signing|signat
 
 Exact results:
 
-- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, latest post-review run ID `18ac44955d0ed7c8-56db-0`; output confirmed `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_heartbeat_required=true`, `live_alpha_startup_recovery_status=skipped`, `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`, `live_alpha_compile_time_orders_enabled=false`, and `live_alpha_gate_status=blocked`.
+- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, latest post-review run ID `18ac4582232f80a0-79ed-0`; output confirmed `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_heartbeat_required=true`, `live_alpha_startup_recovery_status=skipped`, `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`, `live_alpha_compile_time_orders_enabled=false`, and `live_alpha_gate_status=blocked`.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 288 lib tests, 11 main tests, 0 doc tests.
+- `cargo test --offline`: PASS, 288 lib tests, 12 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - `git status --short --branch`: branch `live-alpha/la2-heartbeat-crash-safety` with only LA2 source/docs/status/verification changes.
@@ -248,7 +251,22 @@ cargo test --offline startup_recovery
 cargo run --offline -- --config config/default.toml validate --local-only
 ```
 
-Result: PASS. `live_heartbeat` covered 5 focused tests, including the documented REST `{"status":"ok"}` heartbeat success response. `startup_recovery` covered 6 library tests and 3 validate-path tests, including non-disabled Live Alpha halt behavior, no live-evidence credit for local readback samples, and live-network readback status mapping without faking journal/reconciliation evidence. Latest local validate run ID `18ac44955d0ed7c8-56db-0` printed `live_alpha_startup_recovery_status=skipped` with `live_alpha_startup_recovery_block_reasons=live_alpha_disabled` under the default disabled config.
+Result: PASS. `live_heartbeat` covered 5 focused tests, including the documented REST `{"status":"ok"}` heartbeat success response. `startup_recovery` covered 6 library tests and 4 validate-path tests, including non-disabled Live Alpha halt behavior, no live-evidence credit for local readback samples, live-network readback status mapping without faking journal/reconciliation evidence, and successful journal replay plus live readback reconciliation when actual evidence is supplied. Latest local validate run ID `18ac4582232f80a0-79ed-0` printed `live_alpha_startup_recovery_status=skipped` with `live_alpha_startup_recovery_block_reasons=live_alpha_disabled` under the default disabled config.
+
+Second post-review check for recovery-evidence reconciliation wiring:
+
+```text
+cargo test --offline live_alpha_config
+cargo test --offline live_reconciliation
+cargo test --offline startup_recovery
+cargo run --offline -- --config config/default.toml validate --local-only
+cargo fmt --check
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+```
+
+Result: PASS. The default config remains inert with `live_alpha.enabled=false`, `live_alpha.mode=disabled`, `journal_path=""`, and `LIVE_ORDER_PLACEMENT_ENABLED=false`. Startup recovery now replays a configured journal and reconciles only against passed live-network readback evidence; missing or local-only evidence still halts/fails closed.
 
 ## Safety Result
 

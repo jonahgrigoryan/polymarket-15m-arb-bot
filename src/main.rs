@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
@@ -23,6 +24,7 @@ use polymarket_15m_arb_bot::{
     },
     live_alpha_config::LiveAlphaMode,
     live_alpha_gate::{self, LiveAlphaGateInput, LiveAlphaReadinessStatus},
+    live_balance_tracker::LiveBalanceSnapshot,
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
         CanaryOrderCapState, CanaryOrderPlan, CanaryRuntimeChecks, PreauthorizedEnvelopeBinding,
@@ -33,10 +35,14 @@ use polymarket_15m_arb_bot::{
         ExpectedCanaryOrder,
     },
     live_beta_readback::{
-        self, AccountPreflight, AuthenticatedReadbackInput, L2ReadbackCredentials,
-        ReadbackPreflightReport, ReadbackPrerequisites, SignatureType,
+        self, AccountPreflight, AuthenticatedReadbackInput, AuthenticatedReadbackPreflightEvidence,
+        BalanceAllowanceReadback, L2ReadbackCredentials, OpenOrderReadback,
+        ReadbackPreflightReport, ReadbackPrerequisites, SignatureType, TradeReadback,
     },
     live_beta_signing,
+    live_order_journal::{reduce_live_journal_events, LiveOrderJournal},
+    live_position_book::LivePositionBook,
+    live_reconciliation::{LiveReconciliationInput, LocalLiveState},
     live_startup_recovery::{
         self, LiveStartupRecoveryBlockReason, LiveStartupRecoveryInput, LiveStartupRecoveryReport,
         LiveStartupRecoveryStatus, StartupRecoveryCheckStatus,
@@ -422,7 +428,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "live_beta_gate_block_reasons={}",
                     live_beta_gate.reason_list()
                 );
-                let live_readback_report = if live_readback_preflight {
+                let live_readback_validation = if live_readback_preflight {
                     Some(
                         run_lb4_readback_preflight_validation(
                             &config,
@@ -439,7 +445,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &run_id,
                     unix_time_ms(),
                     geoblock_gate_status,
-                    live_readback_report.as_ref(),
+                    live_readback_validation.as_ref(),
                 );
                 let startup_account_preflight_status =
                     readiness_from_startup_check(startup_recovery_input.account_preflight_status);
@@ -508,11 +514,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if live_beta_signing_dry_run {
                     run_lb3_signing_dry_run_validation(&config)?;
                 }
-                if let Some(report) = &live_readback_report {
-                    if !report.passed() {
+                if let Some(validation) = &live_readback_validation {
+                    if !validation.report.passed() {
                         return Err(format!(
                             "LB4 readback/account preflight blocked: {}",
-                            report.block_reasons.join(",")
+                            validation.report.block_reasons.join(",")
                         )
                         .into());
                     }
@@ -2761,7 +2767,7 @@ async fn run_lb4_readback_preflight_validation(
     config: &AppConfig,
     geoblock_gate_status: safety::GeoblockGateStatus,
     local_only: bool,
-) -> Result<ReadbackPreflightReport, Box<dyn std::error::Error>> {
+) -> Result<ReadbackPreflightValidation, Box<dyn std::error::Error>> {
     let prerequisites = lb4_readback_prerequisites(config, geoblock_gate_status);
     println!(
         "live_beta_readback_preflight_lb3_hold_released={}",
@@ -2775,8 +2781,10 @@ async fn run_lb4_readback_preflight_validation(
         "live_beta_readback_preflight_deployment_geoblock_passed={}",
         prerequisites.deployment_geoblock_passed
     );
-    let report = if local_only || !lb4_prerequisites_ready(prerequisites) {
-        live_beta_readback::sample_readback_preflight(prerequisites)?
+    let validation = if local_only || !lb4_prerequisites_ready(prerequisites) {
+        ReadbackPreflightValidation::from_report(live_beta_readback::sample_readback_preflight(
+            prerequisites,
+        )?)
     } else {
         let secret_inventory = config.live_beta.secret_inventory();
         run_lb2_secret_handle_validation(&secret_inventory)?;
@@ -2794,18 +2802,23 @@ async fn run_lb4_readback_preflight_validation(
             "live_beta_readback_preflight_signature_type={}",
             account.signature_type.as_config_str()
         );
-        live_beta_readback::authenticated_readback_preflight(AuthenticatedReadbackInput {
-            prerequisites,
-            account,
-            credentials,
-            required_collateral_allowance_units: config
-                .live_beta
-                .readback_account
-                .required_collateral_allowance_units,
-            request_timeout_ms: config.polymarket.request_timeout_ms,
-        })
-        .await?
+        ReadbackPreflightValidation::from_authenticated_evidence(
+            live_beta_readback::authenticated_readback_preflight_evidence(
+                AuthenticatedReadbackInput {
+                    prerequisites,
+                    account,
+                    credentials,
+                    required_collateral_allowance_units: config
+                        .live_beta
+                        .readback_account
+                        .required_collateral_allowance_units,
+                    request_timeout_ms: config.polymarket.request_timeout_ms,
+                },
+            )
+            .await?,
+        )
     };
+    let report = &validation.report;
     println!("live_beta_readback_preflight_status={}", report.status);
     println!(
         "live_beta_readback_preflight_live_network_enabled={}",
@@ -2844,7 +2857,35 @@ async fn run_lb4_readback_preflight_validation(
         serde_json::to_string(&report)?
     );
 
-    Ok(report)
+    Ok(validation)
+}
+
+#[derive(Debug, Clone)]
+struct ReadbackPreflightValidation {
+    report: ReadbackPreflightReport,
+    collateral: Option<BalanceAllowanceReadback>,
+    open_orders: Vec<OpenOrderReadback>,
+    trades: Vec<TradeReadback>,
+}
+
+impl ReadbackPreflightValidation {
+    fn from_report(report: ReadbackPreflightReport) -> Self {
+        Self {
+            report,
+            collateral: None,
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        }
+    }
+
+    fn from_authenticated_evidence(evidence: AuthenticatedReadbackPreflightEvidence) -> Self {
+        Self {
+            report: evidence.report,
+            collateral: Some(evidence.collateral),
+            open_orders: evidence.open_orders,
+            trades: evidence.trades,
+        }
+    }
 }
 
 fn lb4_prerequisites_ready(prerequisites: ReadbackPrerequisites) -> bool {
@@ -3070,13 +3111,22 @@ fn live_alpha_startup_recovery_input_for_validate(
     run_id: &str,
     checked_at_ms: i64,
     geoblock_status: safety::GeoblockGateStatus,
-    readback_report: Option<&ReadbackPreflightReport>,
+    readback_validation: Option<&ReadbackPreflightValidation>,
 ) -> LiveStartupRecoveryInput {
     if !config.live_alpha.enabled || config.live_alpha.mode == LiveAlphaMode::Disabled {
         return LiveStartupRecoveryInput::disabled(run_id, checked_at_ms);
     }
 
+    let readback_report = readback_validation.map(|validation| &validation.report);
     let readback_status = startup_check_from_readback_report(readback_report);
+    let journal_recovery = live_alpha_journal_recovery_evidence(config);
+    let reconciliation_input = live_alpha_reconciliation_input_for_validate(
+        run_id,
+        checked_at_ms,
+        readback_validation,
+        journal_recovery.local_state,
+    );
+
     LiveStartupRecoveryInput {
         run_id: run_id.to_string(),
         checked_at_ms,
@@ -3087,10 +3137,108 @@ fn live_alpha_startup_recovery_input_for_validate(
         balance_allowance_status: readback_status,
         open_orders_readback_status: readback_status,
         recent_trades_readback_status: readback_status,
-        journal_replay_status: StartupRecoveryCheckStatus::Unknown,
-        position_reconstruction_status: StartupRecoveryCheckStatus::Unknown,
-        reconciliation_input: None,
+        journal_replay_status: journal_recovery.journal_replay_status,
+        position_reconstruction_status: journal_recovery.position_reconstruction_status,
+        reconciliation_input,
     }
+}
+
+#[derive(Debug, Clone)]
+struct LiveAlphaJournalRecoveryEvidence {
+    journal_replay_status: StartupRecoveryCheckStatus,
+    position_reconstruction_status: StartupRecoveryCheckStatus,
+    local_state: Option<LocalLiveState>,
+}
+
+fn live_alpha_journal_recovery_evidence(config: &AppConfig) -> LiveAlphaJournalRecoveryEvidence {
+    let Some(journal_path) = config.live_alpha.journal_path() else {
+        return LiveAlphaJournalRecoveryEvidence {
+            journal_replay_status: StartupRecoveryCheckStatus::Unknown,
+            position_reconstruction_status: StartupRecoveryCheckStatus::Unknown,
+            local_state: None,
+        };
+    };
+    let path = Path::new(journal_path);
+    if !path.exists() {
+        return LiveAlphaJournalRecoveryEvidence {
+            journal_replay_status: StartupRecoveryCheckStatus::Failed,
+            position_reconstruction_status: StartupRecoveryCheckStatus::Failed,
+            local_state: None,
+        };
+    }
+
+    let journal = LiveOrderJournal::new(path);
+    match journal
+        .replay()
+        .and_then(|events| reduce_live_journal_events(&events))
+    {
+        Ok(state) => LiveAlphaJournalRecoveryEvidence {
+            journal_replay_status: StartupRecoveryCheckStatus::Passed,
+            position_reconstruction_status: StartupRecoveryCheckStatus::Passed,
+            local_state: Some(LocalLiveState::from(&state)),
+        },
+        Err(_) => LiveAlphaJournalRecoveryEvidence {
+            journal_replay_status: StartupRecoveryCheckStatus::Failed,
+            position_reconstruction_status: StartupRecoveryCheckStatus::Failed,
+            local_state: None,
+        },
+    }
+}
+
+fn live_alpha_reconciliation_input_for_validate(
+    run_id: &str,
+    checked_at_ms: i64,
+    readback_validation: Option<&ReadbackPreflightValidation>,
+    local: Option<LocalLiveState>,
+) -> Option<LiveReconciliationInput> {
+    let validation = readback_validation?;
+    let local = local?;
+    let collateral = validation.collateral.as_ref()?;
+    if !validation.report.live_network_enabled || !validation.report.passed() {
+        return None;
+    }
+    if validation.report.open_order_count != validation.open_orders.len()
+        || validation.report.trade_count != validation.trades.len()
+    {
+        return None;
+    }
+
+    let venue = live_startup_recovery::venue_state_from_readback(
+        &validation.open_orders,
+        &validation.trades,
+        Some(balance_snapshot_from_readback(
+            &validation.report,
+            collateral,
+            checked_at_ms,
+        )),
+        LivePositionBook::new(),
+    );
+
+    Some(LiveReconciliationInput {
+        run_id: run_id.to_string(),
+        checked_at_ms,
+        local,
+        venue,
+    })
+}
+
+fn balance_snapshot_from_readback(
+    report: &ReadbackPreflightReport,
+    collateral: &BalanceAllowanceReadback,
+    checked_at_ms: i64,
+) -> LiveBalanceSnapshot {
+    LiveBalanceSnapshot {
+        p_usd_available: fixed6_units_to_decimal(report.available_pusd_units),
+        p_usd_reserved: fixed6_units_to_decimal(report.reserved_pusd_units),
+        p_usd_total: fixed6_units_to_decimal(collateral.balance_units),
+        conditional_token_positions: BTreeMap::new(),
+        balance_snapshot_at: checked_at_ms,
+        source: "live_readback_preflight".to_string(),
+    }
+}
+
+fn fixed6_units_to_decimal(value: u64) -> f64 {
+    value as f64 / 1_000_000.0
 }
 
 fn startup_check_from_readback_report(
@@ -3564,7 +3712,7 @@ mod tests {
             "test-run",
             1_000,
             safety::GeoblockGateStatus::Passed,
-            Some(&report),
+            Some(&ReadbackPreflightValidation::from_report(report)),
         );
 
         assert_eq!(
@@ -3597,13 +3745,24 @@ mod tests {
             heartbeat: "not_started_no_open_orders",
             live_network_enabled: true,
         };
+        let validation = ReadbackPreflightValidation {
+            report,
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        };
 
         let input = live_alpha_startup_recovery_input_for_validate(
             &config,
             "test-run",
             1_000,
             safety::GeoblockGateStatus::Passed,
-            Some(&report),
+            Some(&validation),
         );
 
         assert_eq!(
@@ -3619,6 +3778,91 @@ mod tests {
             StartupRecoveryCheckStatus::Unknown
         );
         assert!(input.reconciliation_input.is_none());
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_replays_journal_and_reconciles_live_readback() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la2-startup-recovery-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        let journal = LiveOrderJournal::new(&path);
+        journal
+            .append(
+                &polymarket_15m_arb_bot::live_order_journal::LiveJournalEvent::new(
+                    "previous-run",
+                    "balance-1",
+                    polymarket_15m_arb_bot::live_order_journal::LiveJournalEventType::LiveBalanceSnapshot,
+                    900,
+                    serde_json::json!({
+                        "p_usd_available": 1.0,
+                        "p_usd_reserved": 0.0,
+                        "p_usd_total": 1.0,
+                        "conditional_token_positions": {},
+                        "balance_snapshot_at": 900,
+                        "source": "fixture"
+                    }),
+                ),
+            )
+            .expect("journal event appends");
+
+        let validation = ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 0,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 1_000_000,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        assert_eq!(
+            input.journal_replay_status,
+            StartupRecoveryCheckStatus::Passed
+        );
+        assert_eq!(
+            input.position_reconstruction_status,
+            StartupRecoveryCheckStatus::Passed
+        );
+        assert!(input.reconciliation_input.is_some());
+
+        let report = live_startup_recovery::evaluate_startup_recovery(input);
+        assert_eq!(report.status, LiveStartupRecoveryStatus::Passed);
+        assert_eq!(
+            reconciliation_readiness_from_startup_recovery(&report),
+            LiveAlphaReadinessStatus::Passed
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]
