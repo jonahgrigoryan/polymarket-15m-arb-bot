@@ -503,15 +503,10 @@ fn validate_journal_and_attempt_cap(
 }
 
 fn host_matches(approved: &LiveAlphaApprovedOrderBounds, current_host: &str) -> bool {
-    approved.approved_host_ids.iter().any(|approved_host| {
-        eq_ignore_ascii(approved_host, current_host)
-            || current_host
-                .to_ascii_lowercase()
-                .contains(&approved_host.to_ascii_lowercase())
-            || approved_host
-                .to_ascii_lowercase()
-                .contains(&current_host.to_ascii_lowercase())
-    })
+    approved
+        .approved_host_ids
+        .iter()
+        .any(|approved_host| eq_ignore_ascii(approved_host, current_host))
 }
 
 fn eq_ignore_ascii(lhs: &str, rhs: &str) -> bool {
@@ -578,6 +573,27 @@ mod tests {
         assert!(report.block_reasons.contains(&"approved_host_mismatch"));
         assert!(report.block_reasons.contains(&"approved_wallet_mismatch"));
         assert!(report.block_reasons.contains(&"token_id_mismatch"));
+    }
+
+    #[test]
+    fn live_alpha_preflight_rejects_substring_host_matches() {
+        let approved = approved_bounds();
+
+        for host_id in ["prod-approved-host", "approved"] {
+            let mut current = current_preflight();
+            current.host_id = host_id.to_string();
+
+            let report = evaluate_live_alpha_preflight(
+                LiveAlphaPreflightMode::FinalSubmit,
+                &approved,
+                &current,
+            );
+
+            assert!(
+                report.block_reasons.contains(&"approved_host_mismatch"),
+                "host_id={host_id} must not satisfy exact host approval"
+            );
+        }
     }
 
     #[test]

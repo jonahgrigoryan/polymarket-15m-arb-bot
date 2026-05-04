@@ -2488,7 +2488,6 @@ async fn run_live_alpha_fill_canary_command(
         }),
     )?;
 
-    reserve_la3_fill_cap(order_cap_state, &result.approval.approval_id)?;
     let submit_input = LiveAlphaFillSubmitInput {
         clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
         signer_handle: config.live_beta.secret_handles.canary_private_key.clone(),
@@ -2500,7 +2499,11 @@ async fn run_live_alpha_fill_canary_command(
         signature_type: lb4_account_preflight(config)?.signature_type,
         approval: result.approval.clone(),
     };
-    live_fill_canary::validate_fill_submit_input_without_network(&submit_input)?;
+    validate_and_reserve_la3_fill_cap(
+        order_cap_state,
+        &result.approval.approval_id,
+        &submit_input,
+    )?;
     append_la3_journal_event(
         &journal,
         run_id,
@@ -3205,6 +3208,15 @@ fn reserve_la3_fill_cap(path: &Path, approval_id: &str) -> Result<(), Box<dyn st
         venue_order_id: None,
     };
     write_new_la3_fill_cap_state(path, &state)
+}
+
+fn validate_and_reserve_la3_fill_cap(
+    path: &Path,
+    approval_id: &str,
+    submit_input: &LiveAlphaFillSubmitInput,
+) -> Result<(), Box<dyn std::error::Error>> {
+    live_fill_canary::validate_fill_submit_input_without_network(submit_input)?;
+    reserve_la3_fill_cap(path, approval_id)
 }
 
 fn update_la3_fill_cap_with_order_id(
@@ -5568,6 +5580,77 @@ mod tests {
         assert_eq!(final_state, first_state);
 
         fs::remove_file(path).expect("test cap state removed");
+    }
+
+    #[test]
+    fn la3_submit_validation_failure_does_not_reserve_fill_cap() {
+        let unique = format!("{}_{}", std::process::id(), monotonic_like_ns());
+        let signer_handle = format!("P15M_TEST_LA3_SIGNER_{unique}");
+        let l2_access_handle = format!("P15M_TEST_LA3_L2_ACCESS_{unique}");
+        let l2_secret_handle = format!("P15M_TEST_LA3_L2_SECRET_{unique}");
+        let l2_passphrase_handle = format!("P15M_TEST_LA3_L2_PASSPHRASE_{unique}");
+        env::set_var(&signer_handle, "not-a-private-key");
+        env::set_var(&l2_access_handle, "not-a-uuid");
+        env::set_var(&l2_secret_handle, "present");
+        env::set_var(&l2_passphrase_handle, "present");
+
+        let path = std::env::temp_dir().join(format!("p15m-la3-cap-{unique}.json"));
+        let input = LiveAlphaFillSubmitInput {
+            clob_host: live_beta_readback::CLOB_HOST.to_string(),
+            signer_handle: signer_handle.clone(),
+            l2_access_handle: l2_access_handle.clone(),
+            l2_secret_handle: l2_secret_handle.clone(),
+            l2_passphrase_handle: l2_passphrase_handle.clone(),
+            wallet_address: "0x1111111111111111111111111111111111111111".to_string(),
+            funder_address: "0x2222222222222222222222222222222222222222".to_string(),
+            signature_type: SignatureType::PolyProxy,
+            approval: LiveAlphaApprovalArtifact {
+                approval_id: "LA3-test".to_string(),
+                approved_host_ids: vec!["approved-host".to_string()],
+                wallet_id: "0x1111111111111111111111111111111111111111".to_string(),
+                funder_id: "0x2222222222222222222222222222222222222222".to_string(),
+                signature_type: "poly_proxy".to_string(),
+                asset_symbol: "BTC".to_string(),
+                market_slug: "btc-updown-15m-1777909500".to_string(),
+                market_question: "BTC Up or Down".to_string(),
+                condition_id: "0x371c52ca5f8dbe256978e6d27f6a6d8cf64f3722b15e44ba3128685ccfbeee0c"
+                    .to_string(),
+                outcome: "Up".to_string(),
+                token_id:
+                    "91899612655270438973839203540142703788805338252926995927363610489118446263952"
+                        .to_string(),
+                side: "BUY".to_string(),
+                order_type: "FAK".to_string(),
+                amount_or_size: 2.56,
+                max_notional: 2.56,
+                max_fee_estimate: 0.10,
+                worst_price: 0.51,
+                max_slippage_bps: 200,
+                max_open_orders_after_run: 0,
+                retry_count: 0,
+                min_order_size: 5.0,
+                tick_size: 0.01,
+                market_end_unix: 1_777_909_600,
+                approved_best_bid: Some(0.49),
+                approved_best_bid_size: Some(10.0),
+                approved_best_ask: Some(0.50),
+                approved_best_ask_size: Some(10.0),
+                approved_book_hash: Some("book-hash".to_string()),
+                approved_book_timestamp_ms: Some(1_777_909_000_000),
+            },
+        };
+
+        let error = validate_and_reserve_la3_fill_cap(&path, "LA3-test", &input)
+            .expect_err("invalid local submit input must fail before cap reservation")
+            .to_string();
+
+        assert!(error.contains("private-key"));
+        assert!(!path.exists(), "cap state must not be reserved");
+
+        env::remove_var(signer_handle);
+        env::remove_var(l2_access_handle);
+        env::remove_var(l2_secret_handle);
+        env::remove_var(l2_passphrase_handle);
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {
