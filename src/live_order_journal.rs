@@ -198,14 +198,16 @@ pub fn reduce_live_journal_events(events: &[LiveJournalEvent]) -> LiveJournalSta
                 _ => {}
             }
         }
-        if let Some(trade_id) = payload_string(&event.payload, "trade_id") {
-            if let Some(order_id) = &event_order_id {
-                state.trade_order_ids.insert(order_id.clone());
-                state
-                    .trade_order_ids_by_trade
-                    .insert(trade_id.clone(), order_id.clone());
+        if event.event_type.records_successful_trade_state() {
+            if let Some(trade_id) = payload_string(&event.payload, "trade_id") {
+                if let Some(order_id) = &event_order_id {
+                    state.trade_order_ids.insert(order_id.clone());
+                    state
+                        .trade_order_ids_by_trade
+                        .insert(trade_id.clone(), order_id.clone());
+                }
+                state.trades.insert(trade_id);
             }
-            state.trades.insert(trade_id);
         }
         if event.event_type == LiveJournalEventType::LiveBalanceSnapshot {
             if let Ok(snapshot) =
@@ -248,11 +250,16 @@ impl LiveJournalEventType {
                 | Self::LiveOrderCancelRejected
                 | Self::LiveOrderCanceled
                 | Self::LiveOrderExpired
-                | Self::LiveTradeObserved
                 | Self::LiveTradeMatched
                 | Self::LiveTradeMined
                 | Self::LiveTradeConfirmed
-                | Self::LiveTradeFailed
+        )
+    }
+
+    fn records_successful_trade_state(self) -> bool {
+        matches!(
+            self,
+            Self::LiveTradeMatched | Self::LiveTradeMined | Self::LiveTradeConfirmed
         )
     }
 }
@@ -441,6 +448,24 @@ mod tests {
 
         assert!(state.intents.contains("intent-1"));
         assert!(!state.orders.contains_key("order-1"));
+    }
+
+    #[test]
+    fn live_order_journal_reducer_omits_failed_trades_from_fill_evidence() {
+        let events = vec![LiveJournalEvent::new(
+            "run-1",
+            "event-1",
+            LiveJournalEventType::LiveTradeFailed,
+            1,
+            serde_json::json!({"order_id":"order-1","trade_id":"trade-1","status":"failed"}),
+        )];
+
+        let state = reduce_live_journal_events(&events);
+
+        assert!(!state.orders.contains_key("order-1"));
+        assert!(!state.trades.contains("trade-1"));
+        assert!(!state.trade_order_ids.contains("order-1"));
+        assert!(!state.trade_order_ids_by_trade.contains_key("trade-1"));
     }
 
     #[test]

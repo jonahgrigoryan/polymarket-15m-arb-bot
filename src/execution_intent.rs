@@ -54,7 +54,7 @@ impl ExecutionIntent {
         if self.token_id.trim().is_empty() {
             errors.push("token_id_missing");
         }
-        if !self.price.is_finite() || self.price <= 0.0 {
+        if !self.price.is_finite() || self.price <= 0.0 || self.price > 1.0 {
             errors.push("price_invalid");
         }
         if !self.size.is_finite() || self.size <= 0.0 {
@@ -124,6 +124,19 @@ mod tests {
             .expect_err("notional mismatch should fail");
 
         assert!(errors.contains(&"notional_mismatch"));
+    }
+
+    #[test]
+    fn execution_intent_rejects_price_above_probability_bound() {
+        let mut intent = sample_intent();
+        intent.price = 1.01;
+        intent.notional = intent.price * intent.size;
+
+        let errors = intent
+            .validate_shape()
+            .expect_err("price above one should fail");
+
+        assert!(errors.contains(&"price_invalid"));
     }
 
     pub fn sample_intent() -> ExecutionIntent {

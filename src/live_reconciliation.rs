@@ -125,6 +125,7 @@ pub enum LiveReconciliationMismatch {
     ReservedBalanceMismatch,
     BalanceDeltaMismatch,
     PositionMismatch,
+    MissingVenueTrade,
     UnknownVenueTradeStatus,
     TradeStatusFailed,
     TradeOrderMismatch,
@@ -143,6 +144,7 @@ impl LiveReconciliationMismatch {
             Self::ReservedBalanceMismatch => "reserved_balance_mismatch",
             Self::BalanceDeltaMismatch => "balance_delta_mismatch",
             Self::PositionMismatch => "position_mismatch",
+            Self::MissingVenueTrade => "missing_venue_trade",
             Self::UnknownVenueTradeStatus => "unknown_venue_trade_status",
             Self::TradeStatusFailed => "trade_status_failed",
             Self::TradeOrderMismatch => "trade_order_mismatch",
@@ -229,6 +231,11 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
             mismatches.insert(LiveReconciliationMismatch::UnexpectedFill);
         }
     }
+    for trade_id in &input.local.known_trades {
+        if !input.venue.trades.contains_key(trade_id) {
+            mismatches.insert(LiveReconciliationMismatch::MissingVenueTrade);
+        }
+    }
     for trade in input.venue.trades.values() {
         if !input.local.known_trades.contains(&trade.trade_id) {
             mismatches.insert(LiveReconciliationMismatch::UnexpectedFill);
@@ -254,11 +261,7 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
             {
                 mismatches.insert(LiveReconciliationMismatch::ReservedBalanceMismatch);
             }
-            if (local.p_usd_available - venue.p_usd_available).abs()
-                > crate::live_balance_tracker::BALANCE_EPSILON
-                || (local.p_usd_total - venue.p_usd_total).abs()
-                    > crate::live_balance_tracker::BALANCE_EPSILON
-            {
+            if !local.matches(venue) {
                 mismatches.insert(LiveReconciliationMismatch::BalanceDeltaMismatch);
             }
         }
@@ -419,6 +422,20 @@ mod tests {
     }
 
     #[test]
+    fn live_reconciliation_conditional_token_balance_mismatch_halts_fail_closed() {
+        let mut input = matching_input();
+        input
+            .venue
+            .balance
+            .as_mut()
+            .expect("venue balance")
+            .conditional_token_positions
+            .insert("token-up".to_string(), 1.0);
+
+        assert_mismatch(input, LiveReconciliationMismatch::BalanceDeltaMismatch);
+    }
+
+    #[test]
     fn live_reconciliation_position_mismatch_halts_fail_closed() {
         let mut input = matching_input();
         input
@@ -473,6 +490,14 @@ mod tests {
         );
 
         assert_mismatch(input, LiveReconciliationMismatch::TradeOrderMismatch);
+    }
+
+    #[test]
+    fn live_reconciliation_missing_venue_trade_halts_fail_closed() {
+        let mut input = matching_input();
+        input.venue.trades.clear();
+
+        assert_mismatch(input, LiveReconciliationMismatch::MissingVenueTrade);
     }
 
     #[test]

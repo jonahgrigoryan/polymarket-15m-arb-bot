@@ -35,7 +35,7 @@ Validation run:
 cargo run --offline -- --config config/default.toml validate --local-only
 ```
 
-Result: PASS. Latest run ID `18ac321a869fbba8-b037-0`.
+Result: PASS. Latest run ID `18ac33f315b5cda8-d0f9-0`.
 
 ## Gate Decision Examples
 
@@ -60,7 +60,7 @@ Focused execution-intent tests passed:
 cargo test --offline execution_intent
 ```
 
-Coverage includes rejection when `notional` disagrees with `price * size` outside the small shape-validation tolerance.
+Coverage includes rejection when `notional` disagrees with `price * size` outside the small shape-validation tolerance and rejection when an intent price is above `1.0`.
 
 ## Journal Path And Replay
 
@@ -88,7 +88,7 @@ Replay/reducer behavior reconstructs:
 
 - known intents;
 - venue-known orders;
-- known trades;
+- successful known trades;
 - exact trade ID to order ID mappings;
 - partially filled orders;
 - canceled orders;
@@ -97,7 +97,7 @@ Replay/reducer behavior reconstructs:
 - reconciliation mismatch count;
 - risk halt state.
 
-Regression coverage confirms rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state.
+Regression coverage confirms rejected submission events do not become venue-known orders and therefore do not create false `missing_venue_order` reconciliation state. Failed trade events also do not become venue-known order state, known-trade fill evidence, trade-order evidence, or exact trade/order mappings.
 
 Focused journal tests passed:
 
@@ -137,12 +137,13 @@ Mismatch fixtures halt fail-closed for:
 - `reserved_balance_mismatch`;
 - `balance_delta_mismatch`;
 - `position_mismatch`;
+- `missing_venue_trade`;
 - `unknown_venue_trade_status`;
 - `trade_status_failed`;
 - `trade_order_mismatch`;
 - `sdk_rust_disagreement`.
 
-Regression coverage also confirms Rust/SDK readback fingerprints are compared only within the same source snapshot. A local-only Rust fingerprint and venue-only SDK fingerprint do not create `sdk_rust_disagreement`.
+Regression coverage also confirms conditional-token balance drift is included in balance mismatch checks and Rust/SDK readback fingerprints are compared only within the same source snapshot. A local-only Rust fingerprint and venue-only SDK fingerprint do not create `sdk_rust_disagreement`.
 
 ## Focused LA1 Tests
 
@@ -174,7 +175,7 @@ git diff --check
 
 Full test count:
 
-- `cargo test --offline`: 258 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: 262 lib tests, 8 main tests, 0 doc tests.
 
 ## Safety And No-Secret Scans
 
@@ -192,7 +193,7 @@ Expected hits only:
 - existing paper order/cancel simulation paths;
 - existing readback/auth secret-handle names and L2 header names, not values;
 - new LA1 inert config/gate/order-intent/journal/reconciliation definitions;
-- new LA1 reducer and reconciliation tests for rejected submissions and exact trade/order mapping;
+- new LA1 reducer and reconciliation tests for rejected submissions, failed trade evidence filtering, exact trade/order mapping, missing venue trade readback, and conditional-token balance drift;
 - safety scan command text in docs and verification notes;
 - public fixture IDs, public Pyth/Chainlink feed IDs, public condition/order IDs already recorded in prior evidence.
 
