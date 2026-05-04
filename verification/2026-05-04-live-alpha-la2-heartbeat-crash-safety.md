@@ -28,6 +28,9 @@ Official Polymarket docs were rechecked before LA2 coding:
   - heartbeat uses `postHeartbeat`;
   - latest `heartbeat_id` must be reused;
   - official timing is 5-second sends with 10-second validity plus a 5-second buffer.
+- REST heartbeat endpoint: `https://docs.polymarket.com/api-reference/trade/send-heartbeat`
+  - `POST /heartbeats` currently documents a success response shaped as `{"status":"ok"}`;
+  - the LA2 parser now accepts both this REST status response and the SDK/order-doc `heartbeat_id` response shape.
 - Fees: `https://docs.polymarket.com/trading/fees`
   - fees are set per market at match time;
   - makers are not charged fees in the documented fee table;
@@ -69,6 +72,8 @@ Network heartbeat POST is intentionally disabled in LA2:
 
 - `HEARTBEAT_NETWORK_POST_ENABLED=false`
 - official method label retained as `postHeartbeat`
+
+Post-review fix: `parse_heartbeat_response` now accepts the currently documented REST `{"status":"ok"}` success response without requiring `heartbeat_id`, while still accepting the SDK/order-doc `heartbeat_id` response shape and requiring the current `heartbeat_id` on `400` rejection.
 
 ## User-Event Parser Fixture Result
 
@@ -124,6 +129,8 @@ Passed recovery emits:
 - `LiveStartupRecoveryPassed`
 
 Startup recovery detects unknown open orders through reconciliation and halts. LA2 does not submit cancels, add cancel-all, or add an autonomous cancel loop.
+
+Post-review fix: the `validate` startup/preflight path now invokes the LA2 startup recovery evaluator and prints startup recovery status, block reasons, planned durable journal events, and reconciliation mismatches. For non-disabled Live Alpha modes, unknown recovery evidence remains halt-required. Local-only/sample readback is not treated as live evidence; only a passed live-network readback preflight maps account/balance/open-order/recent-trade checks to passed. Journal replay, position reconstruction, and reconciliation remain unknown unless actual recovery evidence is available, so startup remains fail-closed instead of silently passing.
 
 ## Readback And Reconstruction
 
@@ -199,9 +206,9 @@ rg -n -i "(wallet|private[_ -]?key|secret|api[_ -]?key|passphrase|signing|signat
 
 Exact results:
 
-- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac38592fea3be0-1664c-0`; output confirmed `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_heartbeat_required=true`, `live_alpha_compile_time_orders_enabled=false`, and `live_alpha_gate_status=blocked`.
+- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, latest post-review run ID `18ac44955d0ed7c8-56db-0`; output confirmed `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_heartbeat_required=true`, `live_alpha_startup_recovery_status=skipped`, `live_alpha_startup_recovery_block_reasons=live_alpha_disabled`, `live_alpha_compile_time_orders_enabled=false`, and `live_alpha_gate_status=blocked`.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 283 lib tests, 8 main tests, 0 doc tests.
+- `cargo test --offline`: PASS, 288 lib tests, 11 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - `git status --short --branch`: branch `live-alpha/la2-heartbeat-crash-safety` with only LA2 source/docs/status/verification changes.
@@ -231,6 +238,17 @@ cargo test --offline live_beta_readback
 ```
 
 Result: PASS. `cargo test --offline live_beta_readback` covered 33 focused tests, including `readback_trader_side_taker_uses_taker_order_even_when_maker_address_matches_account` and `readback_trader_side_maker_does_not_use_counterparty_taker_order`.
+
+Post-review check for startup recovery wiring and REST heartbeat response shape:
+
+```text
+cargo fmt --check
+cargo test --offline live_heartbeat
+cargo test --offline startup_recovery
+cargo run --offline -- --config config/default.toml validate --local-only
+```
+
+Result: PASS. `live_heartbeat` covered 5 focused tests, including the documented REST `{"status":"ok"}` heartbeat success response. `startup_recovery` covered 6 library tests and 3 validate-path tests, including non-disabled Live Alpha halt behavior, no live-evidence credit for local readback samples, and live-network readback status mapping without faking journal/reconciliation evidence. Latest local validate run ID `18ac44955d0ed7c8-56db-0` printed `live_alpha_startup_recovery_status=skipped` with `live_alpha_startup_recovery_block_reasons=live_alpha_disabled` under the default disabled config.
 
 ## Safety Result
 

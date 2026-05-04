@@ -18,15 +18,15 @@ Authoritative sources remain:
 ## Current Branch
 
 - Branch: `live-alpha/la2-heartbeat-crash-safety`
-- Current commit: branch work from `main` after PR #29 merge commit `c6f3c23`.
-- Worktree status: LA2 Live Alpha heartbeat, user-event parser, startup recovery, halt/recovery events, runbooks, STATUS, and verification note work only. No live order, live cancel, cancel-all, controlled fill canary, maker autonomy, strategy-selected live trading, LA3 work, secret value, API-key value, seed phrase, raw L2 credential, or wallet/private-key material is authorized or added.
+- Current commit: PR #31 branch work from `main` after PR #29 merge commit `c6f3c23`, with LA2 post-review fixes completed locally.
+- Worktree status: LA2 Live Alpha heartbeat, user-event parser, startup recovery, halt/recovery events, runbooks, STATUS, verification note, and PR-review fixes only. No live order, live cancel, cancel-all, controlled fill canary, maker autonomy, strategy-selected live trading, LA3 work, secret value, API-key value, seed phrase, raw L2 credential, or wallet/private-key material is authorized or added.
 
 ## Milestones
 
 - Last completed milestone: LA1 gates, journal, and reconciliation foundation is complete and merged to `main` via PR #29 at `c6f3c23`. LA0 approval and scope lock remain complete and merged via PR #28. LB7 runbook, observability, rollback hardening, incident workflow, and STATUS handoff remain complete and merged via PR #27. LB6 one-order canary execution and closeout remain complete via PR #26: exactly one reviewed live canary order was submitted, that exact order was canceled, no fill occurred, post-cancel readback showed zero open orders and zero reserved pUSD, and the local one-order cap is consumed. LB4 remains PASS for approved-host authenticated readback/account preflight from the approved Mexico host/session. M9 remains the last completed replay/paper milestone.
-- Active milestone: Live Alpha LA2 heartbeat, user events, and crash recovery.
+- Active milestone: Live Alpha LA2 heartbeat, user events, and crash recovery on PR #31.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: finish LA2 verification, open the LA2 PR, then stop before merge or any LA3 work. After LA2 PR merge, the exact next action is to sync fresh `main` and obtain explicit human/operator approval before starting LA3. LA2 does not authorize live order placement, live cancels, cancel-all, controlled fill canaries, maker autonomy, strategy-selected live trading, LA3 work, or resetting/bypassing the consumed LB6 one-order cap.
+- Next exit gate: push the verified LA2 post-review fix commit to PR #31, then stop before merge or any LA3 work. After LA2 PR merge, the exact next action is to sync fresh `main` and obtain explicit human/operator approval before starting LA3. LA2 does not authorize live order placement, live cancels, cancel-all, controlled fill canaries, maker autonomy, strategy-selected live trading, LA3 work, or resetting/bypassing the consumed LB6 one-order cap.
 
 ## M3 Scope Lock
 

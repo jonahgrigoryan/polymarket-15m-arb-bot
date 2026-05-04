@@ -21,6 +21,7 @@ use polymarket_15m_arb_bot::{
         FeedHealthTracker, FeedRecorder, PolymarketBookSnapshotClient,
         PolymarketMarketSubscription, ReadOnlyWebSocketClient,
     },
+    live_alpha_config::LiveAlphaMode,
     live_alpha_gate::{self, LiveAlphaGateInput, LiveAlphaReadinessStatus},
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
@@ -33,9 +34,13 @@ use polymarket_15m_arb_bot::{
     },
     live_beta_readback::{
         self, AccountPreflight, AuthenticatedReadbackInput, L2ReadbackCredentials,
-        ReadbackPrerequisites, SignatureType,
+        ReadbackPreflightReport, ReadbackPrerequisites, SignatureType,
     },
     live_beta_signing,
+    live_startup_recovery::{
+        self, LiveStartupRecoveryBlockReason, LiveStartupRecoveryInput, LiveStartupRecoveryReport,
+        LiveStartupRecoveryStatus, StartupRecoveryCheckStatus,
+    },
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
     },
@@ -417,6 +422,52 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "live_beta_gate_block_reasons={}",
                     live_beta_gate.reason_list()
                 );
+                let live_readback_report = if live_readback_preflight {
+                    Some(
+                        run_lb4_readback_preflight_validation(
+                            &config,
+                            geoblock_gate_status,
+                            local_only,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let startup_recovery_input = live_alpha_startup_recovery_input_for_validate(
+                    &config,
+                    &run_id,
+                    unix_time_ms(),
+                    geoblock_gate_status,
+                    live_readback_report.as_ref(),
+                );
+                let startup_account_preflight_status =
+                    readiness_from_startup_check(startup_recovery_input.account_preflight_status);
+                let startup_recovery =
+                    live_startup_recovery::evaluate_startup_recovery(startup_recovery_input);
+                let startup_reconciliation_status =
+                    reconciliation_readiness_from_startup_recovery(&startup_recovery);
+                println!(
+                    "live_alpha_startup_recovery_status={}",
+                    startup_recovery.status_str()
+                );
+                println!(
+                    "live_alpha_startup_recovery_block_reasons={}",
+                    startup_recovery.block_reason_list()
+                );
+                println!(
+                    "live_alpha_startup_recovery_journal_events={}",
+                    live_journal_event_type_list(&startup_recovery.journal_event_types)
+                );
+                println!(
+                    "live_alpha_startup_recovery_reconciliation_mismatches={}",
+                    startup_recovery
+                        .reconciliation_mismatches
+                        .iter()
+                        .map(|mismatch| mismatch.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
                 let live_alpha_gate =
                     live_alpha_gate::evaluate_live_alpha_gate(LiveAlphaGateInput {
                         live_alpha_enabled: config.live_alpha.enabled,
@@ -428,10 +479,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         cli_intent_enabled: false,
                         kill_switch_active: config.live_beta.kill_switch_active,
                         geoblock_status: geoblock_gate_status,
-                        account_preflight_status: LiveAlphaReadinessStatus::Unknown,
+                        account_preflight_status: startup_account_preflight_status,
                         heartbeat_required: config.live_alpha.heartbeat_required,
                         heartbeat_status: LiveAlphaReadinessStatus::Unknown,
-                        reconciliation_status: LiveAlphaReadinessStatus::Unknown,
+                        reconciliation_status: startup_reconciliation_status,
                         approval_status: LiveAlphaReadinessStatus::Unknown,
                         phase_status: LiveAlphaReadinessStatus::Unknown,
                     });
@@ -457,13 +508,14 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if live_beta_signing_dry_run {
                     run_lb3_signing_dry_run_validation(&config)?;
                 }
-                if live_readback_preflight {
-                    run_lb4_readback_preflight_validation(
-                        &config,
-                        geoblock_gate_status,
-                        local_only,
-                    )
-                    .await?;
+                if let Some(report) = &live_readback_report {
+                    if !report.passed() {
+                        return Err(format!(
+                            "LB4 readback/account preflight blocked: {}",
+                            report.block_reasons.join(",")
+                        )
+                        .into());
+                    }
                 }
                 if live_cancel_readiness {
                     run_lb5_cancel_readiness_validation(&config)?;
@@ -2709,7 +2761,7 @@ async fn run_lb4_readback_preflight_validation(
     config: &AppConfig,
     geoblock_gate_status: safety::GeoblockGateStatus,
     local_only: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ReadbackPreflightReport, Box<dyn std::error::Error>> {
     let prerequisites = lb4_readback_prerequisites(config, geoblock_gate_status);
     println!(
         "live_beta_readback_preflight_lb3_hold_released={}",
@@ -2791,15 +2843,8 @@ async fn run_lb4_readback_preflight_validation(
         "live_beta_readback_preflight_report={}",
         serde_json::to_string(&report)?
     );
-    if !report.passed() {
-        return Err(format!(
-            "LB4 readback/account preflight blocked: {}",
-            report.block_reasons.join(",")
-        )
-        .into());
-    }
 
-    Ok(())
+    Ok(report)
 }
 
 fn lb4_prerequisites_ready(prerequisites: ReadbackPrerequisites) -> bool {
@@ -3018,6 +3063,85 @@ fn lb4_readback_prerequisites(
         legal_access_approved: config.live_beta.legal_access_approved,
         deployment_geoblock_passed: geoblock_gate_status == safety::GeoblockGateStatus::Passed,
     }
+}
+
+fn live_alpha_startup_recovery_input_for_validate(
+    config: &AppConfig,
+    run_id: &str,
+    checked_at_ms: i64,
+    geoblock_status: safety::GeoblockGateStatus,
+    readback_report: Option<&ReadbackPreflightReport>,
+) -> LiveStartupRecoveryInput {
+    if !config.live_alpha.enabled || config.live_alpha.mode == LiveAlphaMode::Disabled {
+        return LiveStartupRecoveryInput::disabled(run_id, checked_at_ms);
+    }
+
+    let readback_status = startup_check_from_readback_report(readback_report);
+    LiveStartupRecoveryInput {
+        run_id: run_id.to_string(),
+        checked_at_ms,
+        live_alpha_enabled: config.live_alpha.enabled,
+        live_alpha_mode: config.live_alpha.mode,
+        geoblock_status,
+        account_preflight_status: readback_status,
+        balance_allowance_status: readback_status,
+        open_orders_readback_status: readback_status,
+        recent_trades_readback_status: readback_status,
+        journal_replay_status: StartupRecoveryCheckStatus::Unknown,
+        position_reconstruction_status: StartupRecoveryCheckStatus::Unknown,
+        reconciliation_input: None,
+    }
+}
+
+fn startup_check_from_readback_report(
+    readback_report: Option<&ReadbackPreflightReport>,
+) -> StartupRecoveryCheckStatus {
+    match readback_report {
+        Some(report) if report.live_network_enabled && report.passed() => {
+            StartupRecoveryCheckStatus::Passed
+        }
+        Some(report) if report.live_network_enabled => StartupRecoveryCheckStatus::Failed,
+        _ => StartupRecoveryCheckStatus::Unknown,
+    }
+}
+
+fn readiness_from_startup_check(status: StartupRecoveryCheckStatus) -> LiveAlphaReadinessStatus {
+    match status {
+        StartupRecoveryCheckStatus::Passed => LiveAlphaReadinessStatus::Passed,
+        StartupRecoveryCheckStatus::Failed => LiveAlphaReadinessStatus::Failed,
+        StartupRecoveryCheckStatus::Unknown => LiveAlphaReadinessStatus::Unknown,
+    }
+}
+
+fn reconciliation_readiness_from_startup_recovery(
+    report: &LiveStartupRecoveryReport,
+) -> LiveAlphaReadinessStatus {
+    match report.status {
+        LiveStartupRecoveryStatus::Passed => LiveAlphaReadinessStatus::Passed,
+        LiveStartupRecoveryStatus::Skipped => LiveAlphaReadinessStatus::Unknown,
+        LiveStartupRecoveryStatus::HaltRequired
+            if report
+                .block_reasons
+                .contains(&LiveStartupRecoveryBlockReason::ReconciliationFailed) =>
+        {
+            LiveAlphaReadinessStatus::Failed
+        }
+        LiveStartupRecoveryStatus::HaltRequired => LiveAlphaReadinessStatus::Unknown,
+    }
+}
+
+fn live_journal_event_type_list(
+    event_types: &[polymarket_15m_arb_bot::live_order_journal::LiveJournalEventType],
+) -> String {
+    event_types
+        .iter()
+        .map(|event_type| {
+            serde_json::to_string(event_type)
+                .map(|encoded| encoded.trim_matches('"').to_string())
+                .unwrap_or_else(|_| format!("{event_type:?}"))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn init_tracing(log_level: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -3375,6 +3499,126 @@ mod tests {
 
         assert_eq!(report.status, "passed");
         assert!(!report.block_reasons.contains(&"clob_host_mismatch"));
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_halts_non_disabled_live_alpha_without_recovery_evidence() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            None,
+        );
+        assert_eq!(
+            input.open_orders_readback_status,
+            StartupRecoveryCheckStatus::Unknown
+        );
+
+        let report = live_startup_recovery::evaluate_startup_recovery(input);
+
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(report
+            .block_reasons
+            .contains(&LiveStartupRecoveryBlockReason::OpenOrdersReadbackUnknown));
+        assert!(report
+            .block_reasons
+            .contains(&LiveStartupRecoveryBlockReason::JournalReplayUnknown));
+        assert!(report
+            .block_reasons
+            .contains(&LiveStartupRecoveryBlockReason::ReconciliationUnknown));
+        assert_eq!(
+            reconciliation_readiness_from_startup_recovery(&report),
+            LiveAlphaReadinessStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_does_not_treat_local_readback_sample_as_live_evidence() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let report = ReadbackPreflightReport {
+            status: "passed",
+            block_reasons: Vec::new(),
+            open_order_count: 0,
+            trade_count: 0,
+            reserved_pusd_units: 0,
+            required_collateral_allowance_units: 1_000_000,
+            available_pusd_units: 1_000_000,
+            venue_state: "trading_enabled",
+            heartbeat: "not_started_no_open_orders",
+            live_network_enabled: false,
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&report),
+        );
+
+        assert_eq!(
+            input.account_preflight_status,
+            StartupRecoveryCheckStatus::Unknown
+        );
+        assert_eq!(
+            input.open_orders_readback_status,
+            StartupRecoveryCheckStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn startup_recovery_validate_path_uses_approved_live_readback_status_without_faking_reconcile()
+    {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::FillCanary;
+        config.live_alpha.fill_canary.enabled = true;
+        let report = ReadbackPreflightReport {
+            status: "passed",
+            block_reasons: Vec::new(),
+            open_order_count: 0,
+            trade_count: 0,
+            reserved_pusd_units: 0,
+            required_collateral_allowance_units: 1_000_000,
+            available_pusd_units: 1_000_000,
+            venue_state: "trading_enabled",
+            heartbeat: "not_started_no_open_orders",
+            live_network_enabled: true,
+        };
+
+        let input = live_alpha_startup_recovery_input_for_validate(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&report),
+        );
+
+        assert_eq!(
+            input.account_preflight_status,
+            StartupRecoveryCheckStatus::Passed
+        );
+        assert_eq!(
+            input.open_orders_readback_status,
+            StartupRecoveryCheckStatus::Passed
+        );
+        assert_eq!(
+            input.journal_replay_status,
+            StartupRecoveryCheckStatus::Unknown
+        );
+        assert!(input.reconciliation_input.is_none());
     }
 
     #[test]

@@ -150,27 +150,34 @@ impl LiveHeartbeatState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatAck {
     pub accepted: bool,
-    pub heartbeat_id: String,
+    pub heartbeat_id: Option<String>,
+    pub status: Option<String>,
 }
 
 pub fn parse_heartbeat_response(status_code: u16, body: &str) -> LiveHeartbeatResult<HeartbeatAck> {
     let wire: HeartbeatAckWire = serde_json::from_str(body).map_err(LiveHeartbeatError::Parse)?;
     let heartbeat_id = wire
         .heartbeat_id
-        .ok_or(LiveHeartbeatError::MissingHeartbeatId)?;
-    if heartbeat_id.trim().is_empty() {
-        return Err(LiveHeartbeatError::MissingHeartbeatId);
-    }
+        .filter(|heartbeat_id| !heartbeat_id.trim().is_empty());
+    let status = wire.status.filter(|status| !status.trim().is_empty());
 
     match status_code {
-        200..=299 => Ok(HeartbeatAck {
-            accepted: true,
-            heartbeat_id,
-        }),
-        400 => Ok(HeartbeatAck {
-            accepted: false,
-            heartbeat_id,
-        }),
+        200..=299 if heartbeat_id.is_some() || is_ok_status(status.as_deref()) => {
+            Ok(HeartbeatAck {
+                accepted: true,
+                heartbeat_id,
+                status,
+            })
+        }
+        200..=299 => Err(LiveHeartbeatError::MissingHeartbeatConfirmation),
+        400 => {
+            let heartbeat_id = heartbeat_id.ok_or(LiveHeartbeatError::MissingHeartbeatId)?;
+            Ok(HeartbeatAck {
+                accepted: false,
+                heartbeat_id: Some(heartbeat_id),
+                status,
+            })
+        }
         status => Err(LiveHeartbeatError::RejectedStatus(status)),
     }
 }
@@ -178,6 +185,11 @@ pub fn parse_heartbeat_response(status_code: u16, body: &str) -> LiveHeartbeatRe
 #[derive(Debug, Deserialize)]
 struct HeartbeatAckWire {
     heartbeat_id: Option<String>,
+    status: Option<String>,
+}
+
+fn is_ok_status(status: Option<&str>) -> bool {
+    status.is_some_and(|status| status.eq_ignore_ascii_case("ok"))
 }
 
 pub type LiveHeartbeatResult<T> = Result<T, LiveHeartbeatError>;
@@ -186,6 +198,7 @@ pub type LiveHeartbeatResult<T> = Result<T, LiveHeartbeatError>;
 pub enum LiveHeartbeatError {
     Parse(serde_json::Error),
     MissingHeartbeatId,
+    MissingHeartbeatConfirmation,
     RejectedStatus(u16),
 }
 
@@ -195,6 +208,12 @@ impl Display for LiveHeartbeatError {
             Self::Parse(source) => write!(formatter, "heartbeat response parse failed: {source}"),
             Self::MissingHeartbeatId => {
                 write!(formatter, "heartbeat response missing heartbeat_id")
+            }
+            Self::MissingHeartbeatConfirmation => {
+                write!(
+                    formatter,
+                    "heartbeat response missing heartbeat_id or status=ok"
+                )
             }
             Self::RejectedStatus(status) => {
                 write!(formatter, "heartbeat response returned HTTP {status}")
@@ -207,7 +226,9 @@ impl Error for LiveHeartbeatError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Parse(source) => Some(source),
-            Self::MissingHeartbeatId | Self::RejectedStatus(_) => None,
+            Self::MissingHeartbeatId
+            | Self::MissingHeartbeatConfirmation
+            | Self::RejectedStatus(_) => None,
         }
     }
 }
@@ -255,11 +276,25 @@ mod tests {
         let ack = parse_heartbeat_response(400, r#"{"heartbeat_id":"hb-current"}"#)
             .expect("400 heartbeat with current id parses");
         let mut state = LiveHeartbeatState::enabled();
-        state.record_rejected(ack.heartbeat_id, 2_000);
+        state.record_rejected(
+            ack.heartbeat_id
+                .expect("rejected heartbeat ack keeps current id"),
+            2_000,
+        );
 
         assert!(!ack.accepted);
         assert_eq!(state.heartbeat_id, "hb-current");
         assert_eq!(state.evaluate(2_001), HeartbeatAction::HeartbeatRejected);
+    }
+
+    #[test]
+    fn live_heartbeat_accepts_documented_rest_status_ok_response() {
+        let ack = parse_heartbeat_response(200, r#"{"status":"ok"}"#)
+            .expect("REST heartbeat status response parses");
+
+        assert!(ack.accepted);
+        assert_eq!(ack.heartbeat_id, None);
+        assert_eq!(ack.status.as_deref(), Some("ok"));
     }
 
     #[test]
