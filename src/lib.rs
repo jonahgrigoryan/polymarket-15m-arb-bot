@@ -12,9 +12,12 @@ pub mod live_beta_cancel;
 pub mod live_beta_order_lifecycle;
 pub mod live_beta_readback;
 pub mod live_beta_signing;
+pub mod live_heartbeat;
 pub mod live_order_journal;
 pub mod live_position_book;
 pub mod live_reconciliation;
+pub mod live_startup_recovery;
+pub mod live_user_events;
 pub mod market_discovery;
 pub mod metrics;
 pub mod normalization;
@@ -46,9 +49,12 @@ pub fn module_names() -> Vec<&'static str> {
         live_beta_order_lifecycle::MODULE,
         live_beta_readback::MODULE,
         live_beta_signing::MODULE,
+        live_heartbeat::MODULE,
         live_order_journal::MODULE,
         live_position_book::MODULE,
         live_reconciliation::MODULE,
+        live_startup_recovery::MODULE,
+        live_user_events::MODULE,
         market_discovery::MODULE,
         metrics::MODULE,
         normalization::MODULE,

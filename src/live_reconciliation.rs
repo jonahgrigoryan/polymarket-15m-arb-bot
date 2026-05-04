@@ -102,6 +102,7 @@ pub enum VenueTradeStatus {
     Matched,
     Mined,
     Confirmed,
+    Retrying,
     Failed,
     Unknown,
 }
@@ -127,6 +128,7 @@ pub enum LiveReconciliationMismatch {
     PositionMismatch,
     MissingVenueTrade,
     UnknownVenueTradeStatus,
+    NonterminalVenueTradeStatus,
     TradeStatusFailed,
     TradeOrderMismatch,
     SdkRustDisagreement,
@@ -146,6 +148,7 @@ impl LiveReconciliationMismatch {
             Self::PositionMismatch => "position_mismatch",
             Self::MissingVenueTrade => "missing_venue_trade",
             Self::UnknownVenueTradeStatus => "unknown_venue_trade_status",
+            Self::NonterminalVenueTradeStatus => "nonterminal_venue_trade_status",
             Self::TradeStatusFailed => "trade_status_failed",
             Self::TradeOrderMismatch => "trade_order_mismatch",
             Self::SdkRustDisagreement => "sdk_rust_disagreement",
@@ -249,6 +252,12 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
         }
         if trade.status == VenueTradeStatus::Unknown {
             mismatches.insert(LiveReconciliationMismatch::UnknownVenueTradeStatus);
+        }
+        if matches!(
+            trade.status,
+            VenueTradeStatus::Matched | VenueTradeStatus::Mined | VenueTradeStatus::Retrying
+        ) {
+            mismatches.insert(LiveReconciliationMismatch::NonterminalVenueTradeStatus);
         }
         if trade.status == VenueTradeStatus::Failed {
             mismatches.insert(LiveReconciliationMismatch::TradeStatusFailed);
@@ -475,6 +484,24 @@ mod tests {
         );
 
         assert_mismatch(input, LiveReconciliationMismatch::UnknownVenueTradeStatus);
+    }
+
+    #[test]
+    fn live_reconciliation_retrying_trade_status_halts_fail_closed() {
+        let mut input = matching_input();
+        input.venue.trades.insert(
+            "trade-1".to_string(),
+            VenueTradeState {
+                trade_id: "trade-1".to_string(),
+                order_id: "order-1".to_string(),
+                status: VenueTradeStatus::Retrying,
+            },
+        );
+
+        assert_mismatch(
+            input,
+            LiveReconciliationMismatch::NonterminalVenueTradeStatus,
+        );
     }
 
     #[test]

@@ -183,6 +183,7 @@ pub struct TradeReadback {
     pub status: TradeReadbackStatus,
     pub transaction_hash: Option<String>,
     pub maker_address: String,
+    pub order_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -930,6 +931,15 @@ struct TradeWire {
     #[serde(default)]
     transaction_hash: Option<String>,
     maker_address: String,
+    #[serde(default)]
+    taker_order_id: Option<String>,
+    #[serde(default)]
+    maker_orders: Vec<TradeMakerOrderWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TradeMakerOrderWire {
+    order_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -973,6 +983,16 @@ impl TryFrom<TradeWire> for TradeReadback {
             status: TradeReadbackStatus::from_wire(&value.status),
             transaction_hash: value.transaction_hash,
             maker_address: value.maker_address,
+            order_id: value
+                .taker_order_id
+                .filter(|order_id| !order_id.trim().is_empty())
+                .or_else(|| {
+                    value
+                        .maker_orders
+                        .into_iter()
+                        .map(|order| order.order_id)
+                        .find(|order_id| !order_id.trim().is_empty())
+                }),
         })
     }
 }
@@ -1555,7 +1575,9 @@ mod tests {
                     "asset_id": "token-1",
                     "status": "TRADE_STATUS_CONFIRMED",
                     "transaction_hash": "{}",
-                    "maker_address": "0x1111111111111111111111111111111111111111"
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "taker_order_id": "order-taker",
+                    "maker_orders": [{{"order_id": "order-maker"}}]
                 }}]
             }}"#,
             valid_tx_hash()
@@ -1567,6 +1589,7 @@ mod tests {
             .transaction_hash
             .as_deref()
             .is_some_and(is_valid_tx_hash));
+        assert_eq!(trades[0].order_id.as_deref(), Some("order-taker"));
     }
 
     #[test]
@@ -1893,6 +1916,7 @@ mod tests {
             status: TradeReadbackStatus::from_wire(status),
             transaction_hash,
             maker_address: "0x1111111111111111111111111111111111111111".to_string(),
+            order_id: Some("order-1".to_string()),
         }
     }
 
