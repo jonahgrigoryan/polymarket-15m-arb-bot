@@ -555,12 +555,9 @@ pub fn reconcile_fill_submission(
         })
         .map(|trade| trade.id.clone())
         .collect::<Vec<_>>();
-    let matching_open_orders = open_orders
-        .iter()
-        .filter(|order| order.id.eq_ignore_ascii_case(&submission.order_id))
-        .count();
+    let open_orders_after_run = open_orders.len();
 
-    if matching_open_orders > approval.max_open_orders_after_run {
+    if open_orders_after_run > approval.max_open_orders_after_run {
         block_reasons.push("unexpected_open_order_after_fill");
     }
     if preflight.reserved_pusd_units != 0 {
@@ -575,7 +572,7 @@ pub fn reconcile_fill_submission(
         || submission.venue_status.eq_ignore_ascii_case("matched");
     let status = if block_reasons.is_empty() && filled_evidence {
         "filled_and_reconciled"
-    } else if block_reasons.is_empty() && matching_open_orders == 0 && submission.success {
+    } else if block_reasons.is_empty() && open_orders_after_run == 0 && submission.success {
         "not_filled_canceled_expired_cleanly"
     } else {
         if !filled_evidence {
@@ -589,7 +586,7 @@ pub fn reconcile_fill_submission(
         order_id: submission.order_id.clone(),
         venue_status: submission.venue_status.clone(),
         success: submission.success,
-        open_orders_after_run: matching_open_orders,
+        open_orders_after_run,
         matching_trade_ids,
         available_pusd_units_after: preflight.available_pusd_units,
         reserved_pusd_units_after: preflight.reserved_pusd_units,
@@ -899,6 +896,50 @@ mod tests {
         submission.trade_ids.clear();
         let clean = reconcile_fill_submission(&submission, &approval, &preflight, &[], &[]);
         assert_eq!(clean.status, "not_filled_canceled_expired_cleanly");
+    }
+
+    #[test]
+    fn reconciliation_counts_unrelated_open_orders_as_incidents() {
+        let approval = parse_la3_approval_artifact(APPROVAL).expect("artifact parses");
+        let preflight = preflight_report();
+        let submission = LiveAlphaFillSubmissionReport {
+            status: "submitted",
+            order_id: "order-1".to_string(),
+            venue_status: "matched".to_string(),
+            success: true,
+            making_amount: "1".to_string(),
+            taking_amount: "2".to_string(),
+            trade_ids: vec!["trade-1".to_string()],
+            transaction_hashes: Vec::new(),
+            approval_id: approval.approval_id.clone(),
+            submitted_order_count: 1,
+            not_submitted: false,
+        };
+        let open_order = OpenOrderReadback {
+            id: "stale-unrelated-order".to_string(),
+            status: crate::live_beta_readback::OrderReadbackStatus::Live,
+            maker_address: "0x1111111111111111111111111111111111111111".to_string(),
+            market: approval.market_slug.clone(),
+            asset_id: approval.token_id.clone(),
+            side: "BUY".to_string(),
+            original_size_units: 1_000_000,
+            size_matched_units: 0,
+            price: "0.50".to_string(),
+            outcome: approval.outcome.clone(),
+            expiration: "0".to_string(),
+            order_type: "GTC".to_string(),
+            associate_trades: Vec::new(),
+            created_at: 1_777_907_600,
+        };
+
+        let report =
+            reconcile_fill_submission(&submission, &approval, &preflight, &[open_order], &[]);
+
+        assert_eq!(report.open_orders_after_run, 1);
+        assert_eq!(report.status, "ambiguous_incident_required");
+        assert!(report
+            .block_reasons
+            .contains(&"unexpected_open_order_after_fill"));
     }
 
     fn preflight_report() -> LiveAlphaPreflightReport {

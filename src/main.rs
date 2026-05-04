@@ -2447,7 +2447,11 @@ async fn run_live_alpha_fill_canary_command(
         "live_alpha_fill_canary_approval_sha256={}",
         result.approval_sha256
     );
-    println!("live_alpha_fill_canary_not_submitted=true");
+    if let Some(not_submitted) =
+        live_alpha_fill_canary_pre_submit_not_submitted(dry_run, result.report.passed())
+    {
+        println!("live_alpha_fill_canary_not_submitted={not_submitted}");
+    }
 
     if dry_run {
         return Ok(());
@@ -2537,6 +2541,10 @@ async fn run_live_alpha_fill_canary_command(
             return Err(error.into());
         }
     };
+    println!(
+        "live_alpha_fill_canary_not_submitted={}",
+        submission.not_submitted
+    );
     update_la3_fill_cap_with_order_id(
         order_cap_state,
         &result.approval.approval_id,
@@ -3217,6 +3225,17 @@ fn validate_and_reserve_la3_fill_cap(
 ) -> Result<(), Box<dyn std::error::Error>> {
     live_fill_canary::validate_fill_submit_input_without_network(submit_input)?;
     reserve_la3_fill_cap(path, approval_id)
+}
+
+fn live_alpha_fill_canary_pre_submit_not_submitted(
+    dry_run: bool,
+    preflight_passed: bool,
+) -> Option<bool> {
+    if dry_run || !preflight_passed {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 fn update_la3_fill_cap_with_order_id(
@@ -5651,6 +5670,22 @@ mod tests {
         env::remove_var(l2_access_handle);
         env::remove_var(l2_secret_handle);
         env::remove_var(l2_passphrase_handle);
+    }
+
+    #[test]
+    fn la3_not_submitted_flag_is_not_emitted_before_final_submit_path() {
+        assert_eq!(
+            live_alpha_fill_canary_pre_submit_not_submitted(true, true),
+            Some(true)
+        );
+        assert_eq!(
+            live_alpha_fill_canary_pre_submit_not_submitted(false, false),
+            Some(true)
+        );
+        assert_eq!(
+            live_alpha_fill_canary_pre_submit_not_submitted(false, true),
+            None
+        );
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {
