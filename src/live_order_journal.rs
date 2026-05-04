@@ -51,6 +51,14 @@ pub enum LiveJournalEventType {
     LiveStartupRecoveryStarted,
     LiveStartupRecoveryPassed,
     LiveStartupRecoveryFailed,
+    LiveFillCanaryStarted,
+    LiveFillCanaryApproved,
+    LiveFillCanaryRejected,
+    LiveFillAttempted,
+    LiveFillSucceeded,
+    LiveFillFailed,
+    LiveFillReconciled,
+    LiveFillSettlementObserved,
     LiveRiskHalt,
 }
 
@@ -269,6 +277,10 @@ impl LiveJournalEventType {
         matches!(
             self,
             Self::LiveOrderSubmitAccepted
+                | Self::LiveFillAttempted
+                | Self::LiveFillSucceeded
+                | Self::LiveFillFailed
+                | Self::LiveFillReconciled
                 | Self::LiveOrderReadbackObserved
                 | Self::LiveOrderPartiallyFilled
                 | Self::LiveOrderFilled
@@ -286,7 +298,11 @@ impl LiveJournalEventType {
     fn records_successful_trade_state(self) -> bool {
         matches!(
             self,
-            Self::LiveTradeMatched | Self::LiveTradeMined | Self::LiveTradeConfirmed
+            Self::LiveTradeMatched
+                | Self::LiveTradeMined
+                | Self::LiveTradeConfirmed
+                | Self::LiveFillSucceeded
+                | Self::LiveFillReconciled
         )
     }
 }
@@ -549,6 +565,43 @@ mod tests {
         assert!(!state.trades.contains("trade-1"));
         assert!(!state.trade_order_ids.contains("order-1"));
         assert!(!state.trade_order_ids_by_trade.contains_key("trade-1"));
+    }
+
+    #[test]
+    fn live_order_journal_reducer_tracks_la3_fill_events() {
+        let events = vec![
+            LiveJournalEvent::new(
+                "run-1",
+                "event-1",
+                LiveJournalEventType::LiveFillAttempted,
+                1,
+                serde_json::json!({"order_id":"order-1","approval_id":"LA3-2026-05-04-001"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-2",
+                LiveJournalEventType::LiveFillSucceeded,
+                2,
+                serde_json::json!({"order_id":"order-1","trade_id":"trade-1","status":"matched"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-3",
+                LiveJournalEventType::LiveFillReconciled,
+                3,
+                serde_json::json!({"order_id":"order-1","trade_id":"trade-1","status":"filled_and_reconciled"}),
+            ),
+        ];
+
+        let state = reduce_live_journal_events(&events).expect("events reduce");
+
+        assert!(state.orders.contains_key("order-1"));
+        assert!(state.trades.contains("trade-1"));
+        assert!(state.trade_order_ids.contains("order-1"));
+        assert_eq!(
+            state.trade_order_ids_by_trade.get("trade-1"),
+            Some(&"order-1".to_string())
+        );
     }
 
     #[test]

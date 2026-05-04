@@ -96,19 +96,23 @@ impl LiveAlphaConfig {
                 .push("live_alpha.mode=disabled requires submodes to remain disabled".to_string());
         }
         if self.taker.enabled {
-            errors.push("live_alpha.taker.enabled must remain false during LA2".to_string());
+            errors.push("live_alpha.taker.enabled must remain false during LA3".to_string());
         }
         if self.fill_canary.allow_fok {
             errors
-                .push("live_alpha.fill_canary.allow_fok must remain false during LA2".to_string());
+                .push("live_alpha.fill_canary.allow_fok must remain false during LA3".to_string());
         }
-        if self.fill_canary.allow_fak {
-            errors
-                .push("live_alpha.fill_canary.allow_fak must remain false during LA2".to_string());
+        if self.fill_canary.allow_fak
+            && (self.mode != LiveAlphaMode::FillCanary || !self.fill_canary.enabled)
+        {
+            errors.push(
+                "live_alpha.fill_canary.allow_fak requires mode=fill_canary and fill_canary.enabled=true during LA3"
+                    .to_string(),
+            );
         }
         if self.fill_canary.allow_marketable_limit {
             errors.push(
-                "live_alpha.fill_canary.allow_marketable_limit must remain false during LA2"
+                "live_alpha.fill_canary.allow_marketable_limit must remain false during LA3"
                     .to_string(),
             );
         }
@@ -397,20 +401,33 @@ mod tests {
     }
 
     #[test]
-    fn live_alpha_config_rejects_la2_taker_or_marketable_flags() {
+    fn live_alpha_config_rejects_la3_taker_or_unapproved_marketable_flags() {
         let mut config = LiveAlphaConfig::default();
         config.fill_canary.allow_fok = true;
         config.fill_canary.allow_fak = true;
         config.fill_canary.allow_marketable_limit = true;
         config.taker.enabled = true;
 
-        let errors = config.validate().expect_err("LA1-disallowed flags fail");
+        let errors = config.validate().expect_err("LA3-disallowed flags fail");
         let rendered = errors.join(",");
 
         assert!(rendered.contains("allow_fok"));
         assert!(rendered.contains("allow_fak"));
         assert!(rendered.contains("allow_marketable_limit"));
         assert!(rendered.contains("taker.enabled"));
+    }
+
+    #[test]
+    fn live_alpha_config_allows_fak_only_for_enabled_fill_canary_mode() {
+        let mut config = LiveAlphaConfig {
+            enabled: true,
+            mode: LiveAlphaMode::FillCanary,
+            ..LiveAlphaConfig::default()
+        };
+        config.fill_canary.enabled = true;
+        config.fill_canary.allow_fak = true;
+
+        config.validate().expect("LA3 FAK fill canary validates");
     }
 
     #[test]

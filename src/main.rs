@@ -24,6 +24,9 @@ use polymarket_15m_arb_bot::{
     },
     live_alpha_config::LiveAlphaMode,
     live_alpha_gate::{self, LiveAlphaGateInput, LiveAlphaReadinessStatus},
+    live_alpha_preflight::{
+        self, LiveAlphaCurrentPreflight, LiveAlphaPreflightMode, LiveAlphaPreflightReport,
+    },
     live_balance_tracker::LiveBalanceSnapshot,
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
@@ -40,7 +43,12 @@ use polymarket_15m_arb_bot::{
         ReadbackPreflightReport, ReadbackPrerequisites, SignatureType, TradeReadback,
     },
     live_beta_signing,
-    live_order_journal::{reduce_live_journal_events, LiveOrderJournal},
+    live_fill_canary::{
+        self, LiveAlphaApprovalArtifact, LiveAlphaFillCanaryCapState, LiveAlphaFillSubmitInput,
+    },
+    live_order_journal::{
+        reduce_live_journal_events, LiveJournalEvent, LiveJournalEventType, LiveOrderJournal,
+    },
     live_position_book::LivePositionBook,
     live_reconciliation::{LiveReconciliationInput, LocalLiveState},
     live_startup_recovery::{
@@ -55,7 +63,9 @@ use polymarket_15m_arb_bot::{
         MetricsSnapshot,
     },
     module_names,
-    normalization::{SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB},
+    normalization::{
+        normalize_feed_message, SOURCE_BINANCE, SOURCE_COINBASE, SOURCE_POLYMARKET_CLOB,
+    },
     reference_feed::{
         parse_polymarket_rtds_chainlink_message,
         polymarket_rtds_chainlink_subscription_payload_for_asset, PythHermesClient,
@@ -283,6 +293,50 @@ enum Commands {
         )]
         order_cap_state: PathBuf,
     },
+    /// Run the LA3 controlled fill canary preflight without submitting.
+    LiveAlphaPreflight {
+        #[arg(long, help = "Required read-only mode; never submits orders")]
+        read_only: bool,
+        #[arg(
+            long,
+            default_value = "verification/2026-05-04-live-alpha-la3-approval.md",
+            help = "Local LA3 approval artifact with exact host/account/market/order bounds"
+        )]
+        approval_artifact: PathBuf,
+        #[arg(
+            long,
+            default_value = "reports/live-alpha-la3-fill-canary-state.json",
+            help = "Local non-secret sentinel used to prevent a second LA3 fill attempt"
+        )]
+        order_cap_state: PathBuf,
+    },
+    /// Dry-run or submit the one approved LA3 controlled fill canary.
+    LiveAlphaFillCanary {
+        #[arg(
+            long,
+            help = "Validate the LA3 envelope and print approval prompt only"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Final gated mode; may submit exactly one LA3 fill canary only if preflight passes"
+        )]
+        human_approved: bool,
+        #[arg(long, help = "Approval ID from the LA3 approval artifact")]
+        approval_id: Option<String>,
+        #[arg(
+            long,
+            default_value = "verification/2026-05-04-live-alpha-la3-approval.md",
+            help = "Local LA3 approval artifact with exact host/account/market/order bounds"
+        )]
+        approval_artifact: PathBuf,
+        #[arg(
+            long,
+            default_value = "reports/live-alpha-la3-fill-canary-state.json",
+            help = "Local non-secret sentinel used to prevent a second LA3 fill attempt"
+        )]
+        order_cap_state: PathBuf,
+    },
 }
 
 impl Commands {
@@ -293,6 +347,8 @@ impl Commands {
             Commands::Replay { .. } => "replay",
             Commands::LiveCanary { .. } => "live-canary",
             Commands::LiveCancel { .. } => "live-cancel",
+            Commands::LiveAlphaPreflight { .. } => "live-alpha-preflight",
+            Commands::LiveAlphaFillCanary { .. } => "live-alpha-fill-canary",
         }
     }
 
@@ -303,6 +359,8 @@ impl Commands {
             Commands::Replay { .. } => RuntimeMode::Replay,
             Commands::LiveCanary { .. } => RuntimeMode::Validate,
             Commands::LiveCancel { .. } => RuntimeMode::Validate,
+            Commands::LiveAlphaPreflight { .. } => RuntimeMode::Validate,
+            Commands::LiveAlphaFillCanary { .. } => RuntimeMode::Validate,
         }
     }
 }
@@ -643,6 +701,43 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     price,
                     size,
                     order_type,
+                    &order_cap_state,
+                )
+                .await?;
+            }
+            Commands::LiveAlphaPreflight {
+                read_only,
+                approval_artifact,
+                order_cap_state,
+            } => {
+                if !read_only {
+                    return Err("live-alpha-preflight requires --read-only".into());
+                }
+                run_live_alpha_preflight_command(
+                    &config,
+                    &run_id,
+                    &approval_artifact,
+                    &order_cap_state,
+                    LiveAlphaPreflightMode::ReadOnly,
+                    false,
+                    None,
+                )
+                .await?;
+            }
+            Commands::LiveAlphaFillCanary {
+                dry_run,
+                human_approved,
+                approval_id,
+                approval_artifact,
+                order_cap_state,
+            } => {
+                run_live_alpha_fill_canary_command(
+                    &config,
+                    &run_id,
+                    dry_run,
+                    human_approved,
+                    approval_id,
+                    &approval_artifact,
                     &order_cap_state,
                 )
                 .await?;
@@ -2278,6 +2373,887 @@ fn run_lb5_cancel_readiness_validation(
     Ok(())
 }
 
+struct LiveAlphaPreflightCommandResult {
+    approval: LiveAlphaApprovalArtifact,
+    report: LiveAlphaPreflightReport,
+    envelope: live_fill_canary::LiveAlphaFillCanaryEnvelope,
+    approval_prompt: String,
+    approval_sha256: String,
+}
+
+async fn run_live_alpha_preflight_command(
+    config: &AppConfig,
+    run_id: &str,
+    approval_artifact: &Path,
+    order_cap_state: &Path,
+    mode: LiveAlphaPreflightMode,
+    human_approved: bool,
+    approval_id: Option<&str>,
+) -> Result<LiveAlphaPreflightCommandResult, Box<dyn std::error::Error>> {
+    let result = build_live_alpha_preflight_command_result(
+        config,
+        run_id,
+        approval_artifact,
+        order_cap_state,
+        mode,
+        human_approved,
+        approval_id,
+    )
+    .await?;
+    print_live_alpha_preflight_result(&result)?;
+    Ok(result)
+}
+
+async fn run_live_alpha_fill_canary_command(
+    config: &AppConfig,
+    run_id: &str,
+    dry_run: bool,
+    human_approved: bool,
+    approval_id: Option<String>,
+    approval_artifact: &Path,
+    order_cap_state: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if dry_run == human_approved {
+        return Err(
+            "live-alpha-fill-canary requires exactly one of --dry-run or --human-approved".into(),
+        );
+    }
+    if human_approved && approval_id.as_deref().unwrap_or_default().trim().is_empty() {
+        return Err("live-alpha-fill-canary --human-approved requires --approval-id".into());
+    }
+    let mode = if human_approved {
+        LiveAlphaPreflightMode::FinalSubmit
+    } else {
+        LiveAlphaPreflightMode::DryRun
+    };
+    let result = run_live_alpha_preflight_command(
+        config,
+        run_id,
+        approval_artifact,
+        order_cap_state,
+        mode,
+        human_approved,
+        approval_id.as_deref(),
+    )
+    .await?;
+
+    println!("live_alpha_fill_canary_mode={}", result.report.mode);
+    println!("live_alpha_fill_canary_status={}", result.report.status);
+    println!(
+        "live_alpha_fill_canary_block_reasons={}",
+        result.report.block_reasons.join(",")
+    );
+    println!(
+        "live_alpha_fill_canary_approval_sha256={}",
+        result.approval_sha256
+    );
+    println!("live_alpha_fill_canary_not_submitted=true");
+
+    if dry_run {
+        return Ok(());
+    }
+    if !result.report.passed() {
+        return Err(format!(
+            "LA3 fill canary stopped before submit: {}",
+            result.report.block_reasons.join(",")
+        )
+        .into());
+    }
+
+    let journal_path = config
+        .live_alpha
+        .journal_path()
+        .ok_or("live_alpha.journal_path is required before LA3 final submit")?;
+    let journal = LiveOrderJournal::new(Path::new(journal_path));
+    append_la3_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::LiveFillCanaryStarted,
+        serde_json::json!({
+            "approval_id": &result.approval.approval_id,
+            "approval_sha256": &result.approval_sha256,
+            "market_slug": &result.approval.market_slug,
+            "token_id": &result.approval.token_id,
+            "order_type": &result.approval.order_type,
+        }),
+    )?;
+    append_la3_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::LiveFillCanaryApproved,
+        serde_json::json!({
+            "approval_id": &result.approval.approval_id,
+            "approval_sha256": &result.approval_sha256,
+            "human_approved": true,
+        }),
+    )?;
+
+    reserve_la3_fill_cap(order_cap_state, &result.approval.approval_id)?;
+    let submit_input = LiveAlphaFillSubmitInput {
+        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+        signer_handle: config.live_beta.secret_handles.canary_private_key.clone(),
+        l2_access_handle: config.live_beta.secret_handles.clob_l2_access.clone(),
+        l2_secret_handle: config.live_beta.secret_handles.clob_l2_credential.clone(),
+        l2_passphrase_handle: config.live_beta.secret_handles.clob_l2_passphrase.clone(),
+        wallet_address: result.report.wallet_id.clone(),
+        funder_address: result.report.funder_id.clone(),
+        signature_type: lb4_account_preflight(config)?.signature_type,
+        approval: result.approval.clone(),
+    };
+    live_fill_canary::validate_fill_submit_input_without_network(&submit_input)?;
+    append_la3_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::LiveFillAttempted,
+        serde_json::json!({
+            "approval_id": &result.approval.approval_id,
+            "market_slug": &result.approval.market_slug,
+            "token_id": &result.approval.token_id,
+            "side": &result.approval.side,
+            "order_type": &result.approval.order_type,
+            "price": result.approval.worst_price,
+            "amount_or_size": result.approval.amount_or_size,
+        }),
+    )?;
+
+    let submission = match live_fill_canary::submit_one_fill_canary_with_official_sdk(submit_input)
+        .await
+    {
+        Ok(submission) => submission,
+        Err(error) => {
+            append_la3_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::LiveFillFailed,
+                serde_json::json!({
+                    "approval_id": &result.approval.approval_id,
+                    "error": error.to_string(),
+                    "incident_note": "submit failed after LA3 attempt cap reservation; no retry attempted",
+                }),
+            )?;
+            return Err(error.into());
+        }
+    };
+    update_la3_fill_cap_with_order_id(
+        order_cap_state,
+        &result.approval.approval_id,
+        &submission.order_id,
+    )?;
+    append_la3_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::LiveFillSucceeded,
+        serde_json::json!({
+            "approval_id": &result.approval.approval_id,
+            "order_id": &submission.order_id,
+            "trade_id": submission.trade_ids.first(),
+            "venue_status": &submission.venue_status,
+            "success": submission.success,
+        }),
+    )?;
+    println!(
+        "live_alpha_fill_canary_submission_report={}",
+        serde_json::to_string(&submission)?
+    );
+
+    let after_readback = live_alpha_authenticated_readback(config).await?;
+    let mut after_report = result.report.clone();
+    after_report.available_pusd_units = after_readback.report.available_pusd_units;
+    after_report.reserved_pusd_units = after_readback.report.reserved_pusd_units;
+    after_report.open_order_count = after_readback.report.open_order_count;
+    after_report.recent_trade_count = after_readback.report.trade_count;
+    let reconciliation = live_fill_canary::reconcile_fill_submission(
+        &submission,
+        &result.approval,
+        &after_report,
+        &after_readback.open_orders,
+        &after_readback.trades,
+    );
+    append_la3_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::LiveFillReconciled,
+        serde_json::json!({
+            "approval_id": &result.approval.approval_id,
+            "order_id": &reconciliation.order_id,
+            "trade_id": reconciliation.matching_trade_ids.first(),
+            "status": reconciliation.status,
+            "block_reasons": &reconciliation.block_reasons,
+        }),
+    )?;
+    println!(
+        "live_alpha_fill_canary_reconciliation_report={}",
+        serde_json::to_string(&reconciliation)?
+    );
+    if reconciliation.status == "ambiguous_incident_required" {
+        return Err(format!(
+            "LA3 fill canary requires incident review: {}",
+            reconciliation.block_reasons.join(",")
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_live_alpha_preflight_command_result(
+    config: &AppConfig,
+    run_id: &str,
+    approval_artifact: &Path,
+    order_cap_state: &Path,
+    mode: LiveAlphaPreflightMode,
+    human_approved: bool,
+    approval_id: Option<&str>,
+) -> Result<LiveAlphaPreflightCommandResult, Box<dyn std::error::Error>> {
+    let markdown = fs::read_to_string(approval_artifact)?;
+    let approval = live_fill_canary::parse_la3_approval_artifact(&markdown)?;
+    if let Some(approval_id) = approval_id {
+        if approval_id != approval.approval_id {
+            return Err(format!(
+                "LA3 approval id mismatch: command requested {approval_id}, artifact contains {}",
+                approval.approval_id
+            )
+            .into());
+        }
+    }
+
+    let geoblock = run_geoblock_validation(config).await?;
+    let account = lb4_account_preflight(config)?;
+    let l2_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    let canary_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.canary_secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    let readback = if !geoblock.blocked && l2_secret_report.all_present() {
+        live_alpha_authenticated_readback(config).await?
+    } else {
+        ReadbackPreflightValidation::from_report(live_beta_readback::sample_readback_preflight(
+            lb4_readback_prerequisites(
+                config,
+                safety::GeoblockGateStatus::from_blocked(geoblock.blocked),
+            ),
+        )?)
+    };
+    let public = live_alpha_public_market_evidence(config, &approval).await?;
+    let reference_asset = live_alpha_asset_from_symbol(&approval.asset_symbol)?;
+    let reference = live_alpha_reference_evidence(config, reference_asset).await?;
+    let prior_attempt_consumed = read_la3_fill_cap_state(order_cap_state)?
+        .map(|state| state.submission_attempted)
+        .unwrap_or(false);
+    let journal_path_present = config.live_alpha.journal_path().is_some();
+    let journal_replay_passed = config
+        .live_alpha
+        .journal_path()
+        .map(|path| {
+            let path = Path::new(path);
+            !path.exists() || LiveOrderJournal::new(path).replay().is_ok()
+        })
+        .unwrap_or(false);
+
+    let current = LiveAlphaCurrentPreflight {
+        run_id: run_id.to_string(),
+        host_id: current_host_label(),
+        geoblock_passed: !geoblock.blocked,
+        geoblock_result: geoblock_result_label(&geoblock),
+        wallet_id: account.wallet_address.clone(),
+        funder_id: account.funder_address.clone(),
+        signature_type: account.signature_type.as_config_str().to_string(),
+        live_alpha_enabled: config.live_alpha.enabled,
+        live_alpha_mode: config.live_alpha.mode.as_str().to_string(),
+        fill_canary_enabled: config.live_alpha.fill_canary.enabled,
+        allow_fak: config.live_alpha.fill_canary.allow_fak,
+        allow_fok: config.live_alpha.fill_canary.allow_fok,
+        allow_marketable_limit: config.live_alpha.fill_canary.allow_marketable_limit,
+        compile_time_orders_enabled: live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED,
+        cli_intent_enabled: matches!(
+            mode,
+            LiveAlphaPreflightMode::DryRun | LiveAlphaPreflightMode::FinalSubmit
+        ),
+        human_approved,
+        kill_switch_active: config.live_beta.kill_switch_active,
+        account_preflight_passed: readback.report.passed() && readback.report.live_network_enabled,
+        account_preflight_live_network_enabled: readback.report.live_network_enabled,
+        available_pusd_units: readback.report.available_pusd_units,
+        allowance_pusd_units: readback
+            .collateral
+            .as_ref()
+            .map(|collateral| collateral.allowance_units)
+            .unwrap_or_default(),
+        reserved_pusd_units: readback.report.reserved_pusd_units,
+        open_order_count: readback.report.open_order_count,
+        recent_trade_count: readback.report.trade_count,
+        heartbeat_status: readback.report.heartbeat.to_string(),
+        market_found: public.market_found,
+        market_active: public.market_active,
+        market_closed: public.market_closed,
+        market_accepting_orders: public.market_accepting_orders,
+        current_market_slug: public.market_slug,
+        current_condition_id: public.condition_id,
+        current_token_id: public.token_id,
+        current_asset_symbol: public.asset_symbol,
+        current_outcome: public.outcome,
+        current_market_end_unix: public.market_end_unix,
+        current_min_order_size: public.min_order_size,
+        current_tick_size: public.tick_size,
+        best_bid: public.best_bid,
+        best_bid_size: public.best_bid_size,
+        best_ask: public.best_ask,
+        best_ask_size: public.best_ask_size,
+        book_snapshot_id: public.book_snapshot_id,
+        book_age_ms: public.book_age_ms,
+        max_book_age_ms: config
+            .live_alpha
+            .risk
+            .max_book_staleness_ms
+            .max(config.risk.stale_book_ms),
+        reference_snapshot_id: reference.snapshot_id,
+        reference_age_ms: reference.age_ms,
+        max_reference_age_ms: config
+            .live_alpha
+            .risk
+            .max_reference_staleness_ms
+            .max(config.reference_feed.max_staleness_ms)
+            .max(config.risk.stale_reference_ms),
+        journal_path_present,
+        journal_replay_passed,
+        prior_attempt_consumed,
+        now_unix: unix_time_secs(),
+        no_trade_seconds_before_close: config.live_alpha.risk.no_trade_seconds_before_close,
+        canary_secret_handles_present: canary_secret_report.all_present(),
+        l2_secret_handles_present: l2_secret_report.all_present(),
+    };
+    let report = live_alpha_preflight::evaluate_live_alpha_preflight(
+        mode,
+        &approval.approved_bounds(),
+        &current,
+    );
+    let envelope = live_fill_canary::build_fill_canary_envelope(&report, unix_time_ms());
+    let approval_prompt = live_fill_canary::canonical_fill_canary_prompt(&envelope, &report);
+    let approval_sha256 = live_fill_canary::approval_hash(&approval_prompt);
+
+    Ok(LiveAlphaPreflightCommandResult {
+        approval,
+        report,
+        envelope,
+        approval_prompt,
+        approval_sha256,
+    })
+}
+
+fn print_live_alpha_preflight_result(
+    result: &LiveAlphaPreflightCommandResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("live_alpha_preflight_status={}", result.report.status);
+    println!("live_alpha_preflight_mode={}", result.report.mode);
+    println!("run_id={}", result.report.run_id);
+    println!(
+        "live_alpha_preflight_approval_id={}",
+        result.report.approval_id
+    );
+    println!(
+        "live_alpha_preflight_block_reasons={}",
+        result.report.block_reasons.join(",")
+    );
+    println!(
+        "live_alpha_preflight_geoblock_result={}",
+        result.report.geoblock_result
+    );
+    println!("live_alpha_preflight_host_id={}", result.report.host_id);
+    println!("live_alpha_preflight_wallet_id={}", result.report.wallet_id);
+    println!("live_alpha_preflight_funder_id={}", result.report.funder_id);
+    println!(
+        "live_alpha_preflight_account_passed={}",
+        result.report.account_preflight_passed
+    );
+    println!(
+        "live_alpha_preflight_account_live_network={}",
+        result.report.account_preflight_live_network_enabled
+    );
+    println!(
+        "live_alpha_preflight_available_pusd_units={}",
+        result.report.available_pusd_units
+    );
+    println!(
+        "live_alpha_preflight_reserved_pusd_units={}",
+        result.report.reserved_pusd_units
+    );
+    println!(
+        "live_alpha_preflight_open_order_count={}",
+        result.report.open_order_count
+    );
+    println!(
+        "live_alpha_preflight_recent_trade_count={}",
+        result.report.recent_trade_count
+    );
+    println!(
+        "live_alpha_preflight_heartbeat={}",
+        result.report.heartbeat_status
+    );
+    println!(
+        "live_alpha_preflight_market_order_intent={}/{}/{}/{}/{}/{}@{} amount_or_size={}",
+        result.report.asset_symbol,
+        result.report.market_slug,
+        result.report.condition_id,
+        result.report.token_id,
+        result.report.outcome,
+        result.report.side,
+        result.report.price,
+        result.report.amount_or_size
+    );
+    println!(
+        "live_alpha_preflight_book_snapshot_id={}",
+        result.report.book_snapshot_id
+    );
+    println!(
+        "live_alpha_preflight_book_age_ms={}",
+        result
+            .report
+            .book_age_ms
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "missing".to_string())
+    );
+    println!(
+        "live_alpha_preflight_reference_snapshot_id={}",
+        result.report.reference_snapshot_id
+    );
+    println!(
+        "live_alpha_preflight_reference_age_ms={}",
+        result
+            .report
+            .reference_age_ms
+            .map(|age| age.to_string())
+            .unwrap_or_else(|| "missing".to_string())
+    );
+    println!(
+        "live_alpha_preflight_compile_time_orders_enabled={}",
+        result.report.compile_time_orders_enabled
+    );
+    println!(
+        "live_alpha_preflight_official_taker_fee_estimate={}",
+        result
+            .report
+            .official_taker_fee_estimate
+            .map(|fee| format!("{fee:.6}"))
+            .unwrap_or_else(|| "missing".to_string())
+    );
+    println!(
+        "live_alpha_fill_canary_approval_prompt=\n{}",
+        result.approval_prompt
+    );
+    println!(
+        "live_alpha_fill_canary_approval_sha256={}",
+        result.approval_sha256
+    );
+    println!(
+        "live_alpha_fill_canary_envelope={}",
+        serde_json::to_string(&result.envelope)?
+    );
+    println!(
+        "live_alpha_preflight_report={}",
+        serde_json::to_string(&result.report)?
+    );
+    Ok(())
+}
+
+struct LiveAlphaPublicMarketEvidence {
+    market_found: bool,
+    market_active: bool,
+    market_closed: bool,
+    market_accepting_orders: bool,
+    market_slug: Option<String>,
+    condition_id: Option<String>,
+    token_id: Option<String>,
+    asset_symbol: Option<String>,
+    outcome: Option<String>,
+    market_end_unix: Option<u64>,
+    min_order_size: Option<f64>,
+    tick_size: Option<f64>,
+    best_bid: Option<f64>,
+    best_bid_size: Option<f64>,
+    best_ask: Option<f64>,
+    best_ask_size: Option<f64>,
+    book_snapshot_id: Option<String>,
+    book_age_ms: Option<u64>,
+}
+
+async fn live_alpha_public_market_evidence(
+    config: &AppConfig,
+    approval: &LiveAlphaApprovalArtifact,
+) -> Result<LiveAlphaPublicMarketEvidence, Box<dyn std::error::Error>> {
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let market = discovery
+        .discover_crypto_15m_market_by_slug(&approval.market_slug)
+        .await?;
+    let Some(market) = market else {
+        return Ok(LiveAlphaPublicMarketEvidence::missing());
+    };
+    let outcome = market
+        .outcomes
+        .iter()
+        .find(|outcome| {
+            outcome.token_id == approval.token_id
+                || outcome.outcome.eq_ignore_ascii_case(&approval.outcome)
+        })
+        .cloned();
+    let book: Option<OrderBookSnapshot> =
+        (fetch_live_alpha_book(config, &approval.token_id).await).unwrap_or_default();
+    let (best_bid, best_bid_size) = book
+        .as_ref()
+        .and_then(|book| {
+            book.bids
+                .iter()
+                .max_by(|left, right| left.price.total_cmp(&right.price))
+                .map(|level| (Some(level.price), Some(level.size)))
+        })
+        .unwrap_or((None, None));
+    let (best_ask, best_ask_size) = book
+        .as_ref()
+        .and_then(|book| {
+            book.asks
+                .iter()
+                .min_by(|left, right| left.price.total_cmp(&right.price))
+                .map(|level| (Some(level.price), Some(level.size)))
+        })
+        .unwrap_or((None, None));
+    let book_snapshot_id = book.as_ref().and_then(|book| book.hash.clone());
+    let book_age_ms = book
+        .as_ref()
+        .and_then(|book| book.source_ts)
+        .and_then(|source_ts| age_ms(unix_time_ms(), source_ts));
+
+    Ok(LiveAlphaPublicMarketEvidence {
+        market_found: true,
+        market_active: market.lifecycle_state == MarketLifecycleState::Active,
+        market_closed: market.lifecycle_state == MarketLifecycleState::Closed,
+        market_accepting_orders: market.lifecycle_state == MarketLifecycleState::Active
+            && market.ineligibility_reason.is_none(),
+        market_slug: Some(market.slug),
+        condition_id: Some(market.condition_id),
+        token_id: outcome.as_ref().map(|outcome| outcome.token_id.clone()),
+        asset_symbol: Some(asset_symbol(market.asset).to_string()),
+        outcome: outcome.map(|outcome| outcome.outcome),
+        market_end_unix: u64::try_from(market.end_ts / 1_000).ok(),
+        min_order_size: Some(market.min_order_size),
+        tick_size: Some(market.tick_size),
+        best_bid,
+        best_bid_size,
+        best_ask,
+        best_ask_size,
+        book_snapshot_id,
+        book_age_ms,
+    })
+}
+
+impl LiveAlphaPublicMarketEvidence {
+    fn missing() -> Self {
+        Self {
+            market_found: false,
+            market_active: false,
+            market_closed: true,
+            market_accepting_orders: false,
+            market_slug: None,
+            condition_id: None,
+            token_id: None,
+            asset_symbol: None,
+            outcome: None,
+            market_end_unix: None,
+            min_order_size: None,
+            tick_size: None,
+            best_bid: None,
+            best_bid_size: None,
+            best_ask: None,
+            best_ask_size: None,
+            book_snapshot_id: None,
+            book_age_ms: None,
+        }
+    }
+}
+
+async fn fetch_live_alpha_book(
+    config: &AppConfig,
+    token_id: &str,
+) -> Result<Option<OrderBookSnapshot>, Box<dyn std::error::Error>> {
+    let snapshot_client = PolymarketBookSnapshotClient::new(
+        &config.polymarket.clob_rest_url,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let payload = snapshot_client.fetch_book(token_id).await?;
+    let batch = normalize_feed_message(SOURCE_POLYMARKET_CLOB, &payload, unix_time_ms())?;
+    Ok(batch.events.into_iter().find_map(|event| match event {
+        NormalizedEvent::BookSnapshot { book } if book.token_id == token_id => Some(book),
+        _ => None,
+    }))
+}
+
+struct LiveAlphaReferenceEvidence {
+    snapshot_id: Option<String>,
+    age_ms: Option<u64>,
+}
+
+async fn live_alpha_reference_evidence(
+    config: &AppConfig,
+    asset: Asset,
+) -> Result<LiveAlphaReferenceEvidence, Box<dyn std::error::Error>> {
+    if config.reference_feed.is_polymarket_rtds_chainlink_enabled() {
+        return live_alpha_rtds_chainlink_reference_evidence(config, asset).await;
+    }
+
+    if !config.reference_feed.is_pyth_proxy_enabled() {
+        return Ok(LiveAlphaReferenceEvidence {
+            snapshot_id: None,
+            age_ms: None,
+        });
+    }
+    let recv_wall_ts = unix_time_ms();
+    let client = PythHermesClient::new(
+        &config.reference_feed.pyth_hermes_url,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let batch = client
+        .fetch_latest(&config.reference_feed, recv_wall_ts)
+        .await?;
+    Ok(live_alpha_reference_evidence_from_events(
+        batch.events,
+        asset,
+    ))
+}
+
+async fn live_alpha_rtds_chainlink_reference_evidence(
+    config: &AppConfig,
+    asset: Asset,
+) -> Result<LiveAlphaReferenceEvidence, Box<dyn std::error::Error>> {
+    let client = ReadOnlyWebSocketClient;
+    let probe = FeedConnectionConfig {
+        source: SOURCE_POLYMARKET_RTDS_CHAINLINK.to_string(),
+        ws_url: config.reference_feed.polymarket_rtds_url.clone(),
+        subscribe_payload: Some(polymarket_rtds_chainlink_subscription_payload_for_asset(
+            asset,
+        )),
+        message_limit: 8,
+        connect_timeout_ms: config.feeds.connect_timeout_ms,
+        read_timeout_ms: config.feeds.read_timeout_ms,
+    };
+    let result = client.connect_and_capture(&probe).await?;
+
+    for message in result.received_text_messages {
+        let recv_wall_ts = unix_time_ms();
+        let events = match parse_polymarket_rtds_chainlink_message(
+            &message,
+            recv_wall_ts,
+            config.reference_feed.max_staleness_ms,
+        ) {
+            Ok(events) => events,
+            Err(error) if should_skip_stale_polymarket_rtds_reference_error(&error) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let evidence = live_alpha_reference_evidence_from_events(events, asset);
+        if evidence.snapshot_id.is_some() {
+            return Ok(evidence);
+        }
+    }
+
+    Ok(LiveAlphaReferenceEvidence {
+        snapshot_id: None,
+        age_ms: None,
+    })
+}
+
+fn live_alpha_reference_evidence_from_events(
+    events: Vec<NormalizedEvent>,
+    asset: Asset,
+) -> LiveAlphaReferenceEvidence {
+    let Some(price) = events.into_iter().find_map(|event| match event {
+        NormalizedEvent::ReferenceTick { price } if price.asset == asset => Some(price),
+        _ => None,
+    }) else {
+        return LiveAlphaReferenceEvidence {
+            snapshot_id: None,
+            age_ms: None,
+        };
+    };
+    let source_ts = price.source_ts.unwrap_or(price.recv_wall_ts);
+    LiveAlphaReferenceEvidence {
+        snapshot_id: Some(format!(
+            "{}:{}:{}",
+            price.source,
+            price.provider.unwrap_or_else(|| "unknown".to_string()),
+            source_ts
+        )),
+        age_ms: age_ms(price.recv_wall_ts, source_ts),
+    }
+}
+
+fn live_alpha_asset_from_symbol(value: &str) -> Result<Asset, String> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "BTC" => Ok(Asset::Btc),
+        "ETH" => Ok(Asset::Eth),
+        "SOL" => Ok(Asset::Sol),
+        _ => Err(format!("unsupported LA3 approval asset_symbol {value:?}")),
+    }
+}
+
+fn age_ms(now_ms: i64, source_ts: i64) -> Option<u64> {
+    if source_ts <= 0 {
+        return None;
+    }
+    if now_ms >= source_ts {
+        u64::try_from(now_ms - source_ts).ok()
+    } else {
+        Some(0)
+    }
+}
+
+async fn live_alpha_authenticated_readback(
+    config: &AppConfig,
+) -> Result<ReadbackPreflightValidation, Box<dyn std::error::Error>> {
+    let credentials = lb4_l2_credentials_from_env(&config.live_beta.secret_handles)?;
+    let account = lb4_account_preflight(config)?;
+    let evidence =
+        live_beta_readback::authenticated_readback_preflight_evidence(AuthenticatedReadbackInput {
+            prerequisites: ReadbackPrerequisites {
+                lb3_hold_released: config.live_beta.lb3_hold_released,
+                legal_access_approved: config.live_beta.legal_access_approved,
+                deployment_geoblock_passed: true,
+            },
+            account,
+            credentials,
+            required_collateral_allowance_units: config
+                .live_beta
+                .readback_account
+                .required_collateral_allowance_units,
+            request_timeout_ms: config.polymarket.request_timeout_ms,
+        })
+        .await?;
+    Ok(ReadbackPreflightValidation::from_authenticated_evidence(
+        evidence,
+    ))
+}
+
+fn current_host_label() -> String {
+    for key in ["HOSTNAME", "HOST"] {
+        if let Ok(value) = env::var(key) {
+            if !value.trim().is_empty() {
+                return value;
+            }
+        }
+    }
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown-host".to_string())
+}
+
+fn append_la3_journal_event(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    event_type: LiveJournalEventType,
+    payload: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = LiveJournalEvent::new(
+        run_id.to_string(),
+        format!(
+            "{}-la3-{}-{}",
+            run_id,
+            unix_time_ms(),
+            event_type_label(event_type)
+        ),
+        event_type,
+        unix_time_ms(),
+        payload,
+    );
+    journal.append(&event)?;
+    Ok(())
+}
+
+fn event_type_label(event_type: LiveJournalEventType) -> String {
+    serde_json::to_string(&event_type)
+        .map(|encoded| encoded.trim_matches('"').to_string())
+        .unwrap_or_else(|_| format!("{event_type:?}"))
+}
+
+fn read_la3_fill_cap_state(
+    path: &Path,
+) -> Result<Option<LiveAlphaFillCanaryCapState>, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(path)?;
+    Ok(Some(live_fill_canary::fill_canary_cap_state_from_json(
+        &contents,
+    )?))
+}
+
+fn reserve_la3_fill_cap(path: &Path, approval_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let state = LiveAlphaFillCanaryCapState {
+        approval_id: approval_id.to_string(),
+        submission_attempted: true,
+        reserved_at_unix: unix_time_secs(),
+        venue_order_id: None,
+    };
+    write_new_la3_fill_cap_state(path, &state)
+}
+
+fn update_la3_fill_cap_with_order_id(
+    path: &Path,
+    approval_id: &str,
+    venue_order_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_la3_fill_cap_state(
+        path,
+        &LiveAlphaFillCanaryCapState {
+            approval_id: approval_id.to_string(),
+            submission_attempted: true,
+            reserved_at_unix: unix_time_secs(),
+            venue_order_id: Some(venue_order_id.to_string()),
+        },
+    )
+}
+
+fn write_la3_fill_cap_state(
+    path: &Path,
+    state: &LiveAlphaFillCanaryCapState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_canary_order_cap_parent(path)?;
+    fs::write(path, live_fill_canary::fill_canary_cap_state_json(state)?)?;
+    Ok(())
+}
+
+fn write_new_la3_fill_cap_state(
+    path: &Path,
+    state: &LiveAlphaFillCanaryCapState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_canary_order_cap_parent(path)?;
+    let contents = live_fill_canary::fill_canary_cap_state_json(state)?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err("LA3 fill canary cap is already reserved or consumed".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_lb6_live_canary(
     config: &AppConfig,
@@ -3619,6 +4595,45 @@ mod tests {
         assert!(!should_skip_stale_polymarket_rtds_reference_error(
             &protocol
         ));
+    }
+
+    #[test]
+    fn la3_reference_evidence_accepts_rtds_chainlink_for_requested_asset() {
+        let recv_wall_ts = 1_777_911_000_010;
+        let source_ts = 1_777_911_000_000;
+        let events = vec![NormalizedEvent::ReferenceTick {
+            price: ReferencePrice {
+                asset: Asset::Eth,
+                source: Asset::Eth.chainlink_resolution_source().to_string(),
+                price: 3_240.12,
+                confidence: None,
+                provider: Some(PROVIDER_POLYMARKET_RTDS_CHAINLINK.to_string()),
+                matches_market_resolution_source: Some(true),
+                source_ts: Some(source_ts),
+                recv_wall_ts,
+            },
+        }];
+
+        let evidence = live_alpha_reference_evidence_from_events(events, Asset::Eth);
+
+        assert_eq!(
+            evidence.snapshot_id.as_deref(),
+            Some("https://data.chain.link/streams/eth-usd:polymarket_rtds_chainlink:1777911000000")
+        );
+        assert_eq!(evidence.age_ms, Some(10));
+    }
+
+    #[test]
+    fn la3_approval_asset_symbol_is_not_hardcoded_to_btc() {
+        assert_eq!(
+            live_alpha_asset_from_symbol("ETH").expect("ETH parses"),
+            Asset::Eth
+        );
+        assert_eq!(
+            live_alpha_asset_from_symbol("sol").expect("SOL parses"),
+            Asset::Sol
+        );
+        assert!(live_alpha_asset_from_symbol("XRP").is_err());
     }
 
     #[test]
