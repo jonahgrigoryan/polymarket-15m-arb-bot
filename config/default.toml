@@ -22,6 +22,7 @@ approved_host_required = true
 approved_wallet_required = true
 geoblock_required = true
 heartbeat_required = true
+journal_path = ""
 
 [live_alpha.risk]
 max_wallet_funding_pusd = 0.0

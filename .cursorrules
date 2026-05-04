@@ -1,5 +1,5 @@
 # Legacy Cursor Rules
 
-This project uses version-controlled Cursor Project Rules in `.cursor/rules/`.
+Cursor loads optional project rules from `.cursor/rules/` on disk. That directory is gitignored here so each clone can keep local rules without putting them in the remote tree.
 
-Treat `.cursor/rules/*.mdc`, `AGENTS.md`, and `PRD.md` as the authoritative agent instructions. This legacy file exists only to redirect older Cursor setups and should not contain independent project constraints.
+In the repository, treat `AGENTS.md` and `PRD.md` as the authoritative agent instructions. This legacy file exists only to redirect older Cursor setups and should not contain independent project constraints.

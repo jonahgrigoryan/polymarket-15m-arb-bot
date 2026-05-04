@@ -102,6 +102,7 @@ pub enum VenueTradeStatus {
     Matched,
     Mined,
     Confirmed,
+    Retrying,
     Failed,
     Unknown,
 }
@@ -112,6 +113,10 @@ pub struct LiveReconciliationInput {
     pub checked_at_ms: i64,
     pub local: LocalLiveState,
     pub venue: VenueLiveState,
+    /// When false, `venue.positions` is not populated from venue readback (LA2 preflight cannot
+    /// reconstruct the position book today). Empty venue positions must not be treated as proof
+    /// of zero exposure while local replay shows positions.
+    pub venue_position_evidence_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -125,8 +130,11 @@ pub enum LiveReconciliationMismatch {
     ReservedBalanceMismatch,
     BalanceDeltaMismatch,
     PositionMismatch,
+    MissingVenuePositionEvidence,
+    MissingVenueConditionalBalanceEvidence,
     MissingVenueTrade,
     UnknownVenueTradeStatus,
+    NonterminalVenueTradeStatus,
     TradeStatusFailed,
     TradeOrderMismatch,
     SdkRustDisagreement,
@@ -144,8 +152,13 @@ impl LiveReconciliationMismatch {
             Self::ReservedBalanceMismatch => "reserved_balance_mismatch",
             Self::BalanceDeltaMismatch => "balance_delta_mismatch",
             Self::PositionMismatch => "position_mismatch",
+            Self::MissingVenuePositionEvidence => "missing_venue_position_evidence",
+            Self::MissingVenueConditionalBalanceEvidence => {
+                "missing_venue_conditional_balance_evidence"
+            }
             Self::MissingVenueTrade => "missing_venue_trade",
             Self::UnknownVenueTradeStatus => "unknown_venue_trade_status",
+            Self::NonterminalVenueTradeStatus => "nonterminal_venue_trade_status",
             Self::TradeStatusFailed => "trade_status_failed",
             Self::TradeOrderMismatch => "trade_order_mismatch",
             Self::SdkRustDisagreement => "sdk_rust_disagreement",
@@ -250,6 +263,12 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
         if trade.status == VenueTradeStatus::Unknown {
             mismatches.insert(LiveReconciliationMismatch::UnknownVenueTradeStatus);
         }
+        if matches!(
+            trade.status,
+            VenueTradeStatus::Matched | VenueTradeStatus::Mined | VenueTradeStatus::Retrying
+        ) {
+            mismatches.insert(LiveReconciliationMismatch::NonterminalVenueTradeStatus);
+        }
         if trade.status == VenueTradeStatus::Failed {
             mismatches.insert(LiveReconciliationMismatch::TradeStatusFailed);
         }
@@ -261,8 +280,18 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
             {
                 mismatches.insert(LiveReconciliationMismatch::ReservedBalanceMismatch);
             }
-            if !local.matches(venue) {
-                mismatches.insert(LiveReconciliationMismatch::BalanceDeltaMismatch);
+            if venue.conditional_token_positions_evidence_complete {
+                if !local.matches(venue) {
+                    mismatches.insert(LiveReconciliationMismatch::BalanceDeltaMismatch);
+                }
+            } else {
+                if !local.matches_p_usd_fields(venue) {
+                    mismatches.insert(LiveReconciliationMismatch::BalanceDeltaMismatch);
+                }
+                if !local.conditional_token_positions.is_empty() {
+                    mismatches
+                        .insert(LiveReconciliationMismatch::MissingVenueConditionalBalanceEvidence);
+                }
             }
         }
         (Some(_), None) | (None, Some(_)) => {
@@ -270,8 +299,12 @@ pub fn reconcile_live_state(input: LiveReconciliationInput) -> LiveReconciliatio
         }
         (None, None) => {}
     }
-    if !input.local.positions.matches(&input.venue.positions) {
-        mismatches.insert(LiveReconciliationMismatch::PositionMismatch);
+    if input.venue_position_evidence_complete {
+        if !input.local.positions.matches(&input.venue.positions) {
+            mismatches.insert(LiveReconciliationMismatch::PositionMismatch);
+        }
+    } else if !input.local.positions.positions().is_empty() {
+        mismatches.insert(LiveReconciliationMismatch::MissingVenuePositionEvidence);
     }
     if readback_fingerprints_disagree(&input.local, &input.venue) {
         mismatches.insert(LiveReconciliationMismatch::SdkRustDisagreement);
@@ -424,15 +457,95 @@ mod tests {
     #[test]
     fn live_reconciliation_conditional_token_balance_mismatch_halts_fail_closed() {
         let mut input = matching_input();
+        let venue_balance = input.venue.balance.as_mut().expect("venue balance");
+        venue_balance.conditional_token_positions_evidence_complete = true;
+        venue_balance
+            .conditional_token_positions
+            .insert("token-up".to_string(), 1.0);
+
+        assert_mismatch(input, LiveReconciliationMismatch::BalanceDeltaMismatch);
+    }
+
+    #[test]
+    fn live_reconciliation_passes_when_venue_conditional_evidence_incomplete_and_local_has_no_tokens(
+    ) {
+        let mut input = matching_input();
         input
             .venue
             .balance
             .as_mut()
             .expect("venue balance")
-            .conditional_token_positions
-            .insert("token-up".to_string(), 1.0);
+            .conditional_token_positions_evidence_complete = false;
 
-        assert_mismatch(input, LiveReconciliationMismatch::BalanceDeltaMismatch);
+        let result = reconcile_live_state(input);
+        assert_eq!(result.status(), "passed");
+    }
+
+    #[test]
+    fn live_reconciliation_missing_venue_conditional_balance_evidence_halts_when_local_has_tokens()
+    {
+        let mut input = matching_input();
+        input
+            .venue
+            .balance
+            .as_mut()
+            .expect("venue balance")
+            .conditional_token_positions_evidence_complete = false;
+        input
+            .local
+            .balance
+            .as_mut()
+            .expect("local balance")
+            .conditional_token_positions
+            .insert("token-up".to_string(), 2.0);
+
+        assert_mismatch(
+            input,
+            LiveReconciliationMismatch::MissingVenueConditionalBalanceEvidence,
+        );
+    }
+
+    #[test]
+    fn live_reconciliation_missing_venue_position_evidence_halts_when_local_has_positions() {
+        let mut input = matching_input();
+        input.venue_position_evidence_complete = false;
+        input.venue.positions = crate::live_position_book::LivePositionBook::new();
+
+        assert_mismatch(
+            input,
+            LiveReconciliationMismatch::MissingVenuePositionEvidence,
+        );
+    }
+
+    #[test]
+    fn live_reconciliation_incomplete_venue_positions_ok_when_local_flat() {
+        let mut input = matching_input();
+        input.venue_position_evidence_complete = false;
+        input.local.positions = crate::live_position_book::LivePositionBook::new();
+        input.venue.positions = crate::live_position_book::LivePositionBook::new();
+
+        let result = reconcile_live_state(input);
+        assert_eq!(result.status(), "passed");
+    }
+
+    #[test]
+    fn live_reconciliation_conditional_maps_match_when_venue_evidence_complete() {
+        let mut input = matching_input();
+        input
+            .local
+            .balance
+            .as_mut()
+            .expect("local balance")
+            .conditional_token_positions
+            .insert("token-up".to_string(), 3.0);
+        let venue_balance = input.venue.balance.as_mut().expect("venue balance");
+        venue_balance.conditional_token_positions_evidence_complete = true;
+        venue_balance
+            .conditional_token_positions
+            .insert("token-up".to_string(), 3.0);
+
+        let result = reconcile_live_state(input);
+        assert_eq!(result.status(), "passed");
     }
 
     #[test]
@@ -475,6 +588,24 @@ mod tests {
         );
 
         assert_mismatch(input, LiveReconciliationMismatch::UnknownVenueTradeStatus);
+    }
+
+    #[test]
+    fn live_reconciliation_retrying_trade_status_halts_fail_closed() {
+        let mut input = matching_input();
+        input.venue.trades.insert(
+            "trade-1".to_string(),
+            VenueTradeState {
+                trade_id: "trade-1".to_string(),
+                order_id: "order-1".to_string(),
+                status: VenueTradeStatus::Retrying,
+            },
+        );
+
+        assert_mismatch(
+            input,
+            LiveReconciliationMismatch::NonterminalVenueTradeStatus,
+        );
     }
 
     #[test]
@@ -576,6 +707,7 @@ mod tests {
             checked_at_ms: 1,
             local,
             venue,
+            venue_position_evidence_complete: true,
         }
     }
 
@@ -585,6 +717,7 @@ mod tests {
             p_usd_reserved: reserved,
             p_usd_total: total,
             conditional_token_positions: BTreeMap::new(),
+            conditional_token_positions_evidence_complete: true,
             balance_snapshot_at: 1,
             source: "fixture".to_string(),
         }

@@ -23,6 +23,7 @@ pub struct LiveAlphaGateInput {
     pub kill_switch_active: bool,
     pub geoblock_status: GeoblockGateStatus,
     pub account_preflight_status: LiveAlphaReadinessStatus,
+    pub heartbeat_required: bool,
     pub heartbeat_status: LiveAlphaReadinessStatus,
     pub reconciliation_status: LiveAlphaReadinessStatus,
     pub approval_status: LiveAlphaReadinessStatus,
@@ -42,6 +43,7 @@ impl Default for LiveAlphaGateInput {
             kill_switch_active: true,
             geoblock_status: GeoblockGateStatus::Unknown,
             account_preflight_status: LiveAlphaReadinessStatus::Unknown,
+            heartbeat_required: true,
             heartbeat_status: LiveAlphaReadinessStatus::Unknown,
             reconciliation_status: LiveAlphaReadinessStatus::Unknown,
             approval_status: LiveAlphaReadinessStatus::Unknown,
@@ -159,12 +161,14 @@ pub fn evaluate_live_alpha_gate(input: LiveAlphaGateInput) -> LiveAlphaGateDecis
         LiveAlphaBlockReason::AccountPreflightFailed,
         LiveAlphaBlockReason::AccountPreflightUnknown,
     );
-    push_readiness_block(
-        input.heartbeat_status,
-        &mut block_reasons,
-        LiveAlphaBlockReason::HeartbeatFailed,
-        LiveAlphaBlockReason::HeartbeatUnknown,
-    );
+    if input.heartbeat_required {
+        push_readiness_block(
+            input.heartbeat_status,
+            &mut block_reasons,
+            LiveAlphaBlockReason::HeartbeatFailed,
+            LiveAlphaBlockReason::HeartbeatUnknown,
+        );
+    }
     push_readiness_block(
         input.reconciliation_status,
         &mut block_reasons,
@@ -253,6 +257,7 @@ mod tests {
             kill_switch_active: false,
             geoblock_status: GeoblockGateStatus::Passed,
             account_preflight_status: LiveAlphaReadinessStatus::Passed,
+            heartbeat_required: true,
             heartbeat_status: LiveAlphaReadinessStatus::Passed,
             reconciliation_status: LiveAlphaReadinessStatus::Passed,
             approval_status: LiveAlphaReadinessStatus::Passed,
@@ -281,6 +286,7 @@ mod tests {
             kill_switch_active: false,
             geoblock_status: GeoblockGateStatus::Passed,
             account_preflight_status: LiveAlphaReadinessStatus::Passed,
+            heartbeat_required: true,
             heartbeat_status: LiveAlphaReadinessStatus::Passed,
             reconciliation_status: LiveAlphaReadinessStatus::Passed,
             approval_status: LiveAlphaReadinessStatus::Passed,
@@ -350,6 +356,33 @@ mod tests {
             .contains(&LiveAlphaBlockReason::ReconciliationFailed));
     }
 
+    #[test]
+    fn live_alpha_gate_blocks_live_capable_mode_on_required_stale_heartbeat() {
+        let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
+            heartbeat_required: true,
+            heartbeat_status: LiveAlphaReadinessStatus::Failed,
+            ..live_order_capable_input(LiveAlphaMode::FillCanary)
+        });
+
+        assert!(!decision.allowed);
+        assert!(decision
+            .block_reasons
+            .contains(&LiveAlphaBlockReason::HeartbeatFailed));
+    }
+
+    #[test]
+    fn live_alpha_gate_can_skip_heartbeat_only_when_not_required() {
+        let decision = evaluate_live_alpha_gate(LiveAlphaGateInput {
+            heartbeat_required: false,
+            heartbeat_status: LiveAlphaReadinessStatus::Unknown,
+            ..live_order_capable_input(LiveAlphaMode::FillCanary)
+        });
+
+        assert!(!decision
+            .block_reasons
+            .contains(&LiveAlphaBlockReason::HeartbeatUnknown));
+    }
+
     fn live_order_capable_input(live_alpha_mode: LiveAlphaMode) -> LiveAlphaGateInput {
         LiveAlphaGateInput {
             live_alpha_enabled: true,
@@ -362,6 +395,7 @@ mod tests {
             kill_switch_active: false,
             geoblock_status: GeoblockGateStatus::Passed,
             account_preflight_status: LiveAlphaReadinessStatus::Passed,
+            heartbeat_required: true,
             heartbeat_status: LiveAlphaReadinessStatus::Passed,
             reconciliation_status: LiveAlphaReadinessStatus::Passed,
             approval_status: LiveAlphaReadinessStatus::Passed,

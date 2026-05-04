@@ -36,6 +36,7 @@ pub enum LiveJournalEventType {
     LiveTradeMatched,
     LiveTradeMined,
     LiveTradeConfirmed,
+    LiveTradeRetrying,
     LiveTradeFailed,
     LiveBalanceSnapshot,
     LiveBalanceDeltaObserved,
@@ -46,6 +47,10 @@ pub enum LiveJournalEventType {
     LiveSettlementObserved,
     LiveReconciliationPassed,
     LiveReconciliationMismatch,
+    LiveHeartbeatStale,
+    LiveStartupRecoveryStarted,
+    LiveStartupRecoveryPassed,
+    LiveStartupRecoveryFailed,
     LiveRiskHalt,
 }
 
@@ -246,7 +251,12 @@ pub fn reduce_live_journal_events(
         if event.event_type == LiveJournalEventType::LiveReconciliationMismatch {
             state.reconciliation_mismatch_count += 1;
         }
-        if event.event_type == LiveJournalEventType::LiveRiskHalt {
+        if matches!(
+            event.event_type,
+            LiveJournalEventType::LiveHeartbeatStale
+                | LiveJournalEventType::LiveStartupRecoveryFailed
+                | LiveJournalEventType::LiveRiskHalt
+        ) {
             state.risk_halted = true;
         }
     }
@@ -663,6 +673,27 @@ mod tests {
 
         assert_eq!(state.position_book.positions().len(), 1);
         assert!(state.risk_halted);
+    }
+
+    #[test]
+    fn risk_halt_reducer_marks_heartbeat_and_startup_recovery_failures() {
+        for event_type in [
+            LiveJournalEventType::LiveHeartbeatStale,
+            LiveJournalEventType::LiveStartupRecoveryFailed,
+            LiveJournalEventType::LiveRiskHalt,
+        ] {
+            let events = vec![LiveJournalEvent::new(
+                "run-1",
+                "event-1",
+                event_type,
+                1,
+                serde_json::json!({"reason":"fixture"}),
+            )];
+
+            let state = reduce_live_journal_events(&events).expect("events reduce");
+
+            assert!(state.risk_halted, "event type {event_type:?} must halt");
+        }
     }
 
     fn temp_path(label: &str) -> PathBuf {

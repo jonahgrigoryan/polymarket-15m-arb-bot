@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn live_alpha_config_rejects_disallowed_la1_taker_flags() {
+    fn live_alpha_config_rejects_disallowed_la2_taker_flags() {
         let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
         config.live_alpha.taker.enabled = true;
 

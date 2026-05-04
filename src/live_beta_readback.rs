@@ -183,6 +183,7 @@ pub struct TradeReadback {
     pub status: TradeReadbackStatus,
     pub transaction_hash: Option<String>,
     pub maker_address: String,
+    pub order_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +296,14 @@ pub struct ReadbackPreflightReport {
     pub venue_state: &'static str,
     pub heartbeat: &'static str,
     pub live_network_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedReadbackPreflightEvidence {
+    pub report: ReadbackPreflightReport,
+    pub collateral: BalanceAllowanceReadback,
+    pub open_orders: Vec<OpenOrderReadback>,
+    pub trades: Vec<TradeReadback>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,6 +481,14 @@ pub fn sample_readback_preflight(
 pub async fn authenticated_readback_preflight(
     input: AuthenticatedReadbackInput,
 ) -> LiveBetaReadbackResult<ReadbackPreflightReport> {
+    Ok(authenticated_readback_preflight_evidence(input)
+        .await?
+        .report)
+}
+
+pub async fn authenticated_readback_preflight_evidence(
+    input: AuthenticatedReadbackInput,
+) -> LiveBetaReadbackResult<AuthenticatedReadbackPreflightEvidence> {
     validate_authenticated_readback_input(&input)?;
 
     let client = ReadOnlyClobReadbackClient::new(
@@ -497,14 +514,19 @@ pub async fn authenticated_readback_preflight(
         prerequisites: input.prerequisites,
         account: input.account,
         venue_state,
-        collateral,
-        open_orders,
-        trades,
+        collateral: collateral.clone(),
+        open_orders: open_orders.clone(),
+        trades: trades.clone(),
         heartbeat,
         required_collateral_allowance_units: input.required_collateral_allowance_units,
     })?;
     report.live_network_enabled = true;
-    Ok(report)
+    Ok(AuthenticatedReadbackPreflightEvidence {
+        report,
+        collateral,
+        open_orders,
+        trades,
+    })
 }
 
 pub fn readback_path_catalog() -> Vec<&'static str> {
@@ -595,7 +617,7 @@ impl ReadOnlyClobReadbackClient {
             let body = self
                 .get_text(TRADES_PATH, &trades_query(&cursor, &self.maker_address))
                 .await?;
-            let page = parse_trades_page_with_cursor(&body)?;
+            let page = parse_trades_page_with_cursor_for_account(&body, &self.maker_address)?;
             trades.extend(page.data);
             let Some(next_cursor) = next_readback_cursor(&cursor, &page.next_cursor)? else {
                 return Ok(trades);
@@ -789,11 +811,25 @@ pub fn parse_trades_page(json: &str) -> LiveBetaReadbackResult<Vec<TradeReadback
 fn parse_trades_page_with_cursor(
     json: &str,
 ) -> LiveBetaReadbackResult<ReadbackPage<TradeReadback>> {
+    parse_trades_page_with_cursor_with_account(json, None)
+}
+
+fn parse_trades_page_with_cursor_for_account(
+    json: &str,
+    account_address: &str,
+) -> LiveBetaReadbackResult<ReadbackPage<TradeReadback>> {
+    parse_trades_page_with_cursor_with_account(json, Some(account_address))
+}
+
+fn parse_trades_page_with_cursor_with_account(
+    json: &str,
+    account_address: Option<&str>,
+) -> LiveBetaReadbackResult<ReadbackPage<TradeReadback>> {
     let wire: TradesPageWire = serde_json::from_str(json).map_err(LiveBetaReadbackError::Parse)?;
     let data = wire
         .data
         .into_iter()
-        .map(TradeReadback::try_from)
+        .map(|trade| trade.into_readback(account_address))
         .collect::<LiveBetaReadbackResult<Vec<_>>>()?;
     Ok(ReadbackPage {
         data,
@@ -930,6 +966,19 @@ struct TradeWire {
     #[serde(default)]
     transaction_hash: Option<String>,
     maker_address: String,
+    #[serde(default)]
+    trader_side: Option<String>,
+    #[serde(default)]
+    taker_order_id: Option<String>,
+    #[serde(default)]
+    maker_orders: Vec<TradeMakerOrderWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TradeMakerOrderWire {
+    order_id: String,
+    #[serde(default)]
+    maker_address: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -962,18 +1011,100 @@ struct ReadbackErrorWire {
     message: Option<String>,
 }
 
-impl TryFrom<TradeWire> for TradeReadback {
-    type Error = LiveBetaReadbackError;
-
-    fn try_from(value: TradeWire) -> Result<Self, Self::Error> {
-        Ok(Self {
-            id: value.id,
-            market: value.market,
-            asset_id: value.asset_id,
-            status: TradeReadbackStatus::from_wire(&value.status),
-            transaction_hash: value.transaction_hash,
-            maker_address: value.maker_address,
+impl TradeWire {
+    fn into_readback(self, account_address: Option<&str>) -> LiveBetaReadbackResult<TradeReadback> {
+        let order_id = self.order_id_for_account(account_address);
+        Ok(TradeReadback {
+            id: self.id,
+            market: self.market,
+            asset_id: self.asset_id,
+            status: TradeReadbackStatus::from_wire(&self.status),
+            transaction_hash: self.transaction_hash,
+            maker_address: self.maker_address,
+            order_id,
         })
+    }
+
+    fn order_id_for_account(&self, account_address: Option<&str>) -> Option<String> {
+        if let Some(trader_side) = self.trader_side.as_deref().map(str::trim) {
+            if trader_side.eq_ignore_ascii_case("TAKER") {
+                return self.taker_order_id.as_deref().and_then(non_empty_order_id);
+            }
+
+            if trader_side.eq_ignore_ascii_case("MAKER") {
+                return self.maker_order_id_for_account(account_address);
+            }
+        }
+
+        self.order_id_for_account_without_trader_side(account_address)
+    }
+
+    fn order_id_for_account_without_trader_side(
+        &self,
+        account_address: Option<&str>,
+    ) -> Option<String> {
+        let normalized_account = account_address
+            .map(str::trim)
+            .filter(|account_address| !account_address.is_empty());
+
+        if let Some(account_address) = normalized_account {
+            if evm_addresses_equal(&self.maker_address, account_address) {
+                return self.maker_order_id_for_account(Some(account_address));
+            }
+
+            if let Some(order_id) = self.maker_order_id_for_account(Some(account_address)) {
+                return Some(order_id);
+            }
+
+            return self.taker_order_id.as_deref().and_then(non_empty_order_id);
+        }
+
+        self.taker_order_id
+            .as_deref()
+            .and_then(non_empty_order_id)
+            .or_else(|| {
+                self.maker_orders
+                    .iter()
+                    .find_map(|order| non_empty_order_id(&order.order_id))
+            })
+    }
+
+    fn maker_order_id_for_account(&self, account_address: Option<&str>) -> Option<String> {
+        let normalized_account = account_address
+            .map(str::trim)
+            .filter(|account_address| !account_address.is_empty());
+
+        if let Some(account_address) = normalized_account {
+            if let Some(order_id) = self
+                .maker_orders
+                .iter()
+                .filter(|order| {
+                    order.maker_address.as_deref().is_some_and(|maker_address| {
+                        evm_addresses_equal(maker_address, account_address)
+                    })
+                })
+                .find_map(|order| non_empty_order_id(&order.order_id))
+            {
+                return Some(order_id);
+            }
+
+            if !evm_addresses_equal(&self.maker_address, account_address) {
+                return None;
+            }
+        }
+
+        self.maker_orders
+            .iter()
+            .find_map(|order| non_empty_order_id(&order.order_id))
+    }
+}
+
+fn non_empty_order_id(order_id: &str) -> Option<String> {
+    let trimmed = order_id.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1555,7 +1686,9 @@ mod tests {
                     "asset_id": "token-1",
                     "status": "TRADE_STATUS_CONFIRMED",
                     "transaction_hash": "{}",
-                    "maker_address": "0x1111111111111111111111111111111111111111"
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "taker_order_id": "order-taker",
+                    "maker_orders": [{{"order_id": "order-maker"}}]
                 }}]
             }}"#,
             valid_tx_hash()
@@ -1567,6 +1700,163 @@ mod tests {
             .transaction_hash
             .as_deref()
             .is_some_and(is_valid_tx_hash));
+        assert_eq!(trades[0].order_id.as_deref(), Some("order-taker"));
+    }
+
+    #[test]
+    fn readback_derives_trade_order_id_from_account_maker_order() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "taker_order_id": "counterparty-taker-order",
+                    "maker_orders": [
+                        {{
+                            "order_id": "local-maker-order",
+                            "maker_address": "0x1111111111111111111111111111111111111111"
+                        }}
+                    ]
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id.as_deref(), Some("local-maker-order"));
+    }
+
+    #[test]
+    fn readback_uses_taker_order_id_when_account_is_not_maker() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x2222222222222222222222222222222222222222",
+                    "taker_order_id": "local-taker-order",
+                    "maker_orders": [
+                        {{
+                            "order_id": "counterparty-maker-order",
+                            "maker_address": "0x2222222222222222222222222222222222222222"
+                        }}
+                    ]
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id.as_deref(), Some("local-taker-order"));
+    }
+
+    #[test]
+    fn readback_missing_trader_side_does_not_use_taker_order_for_account_maker() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "taker_order_id": "counterparty-taker-order"
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id, None);
+    }
+
+    #[test]
+    fn readback_trader_side_taker_uses_taker_order_even_when_maker_address_matches_account() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "trader_side": "TAKER",
+                    "taker_order_id": "local-taker-order",
+                    "maker_orders": [
+                        {{
+                            "order_id": "counterparty-maker-order",
+                            "maker_address": "0x1111111111111111111111111111111111111111"
+                        }}
+                    ]
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id.as_deref(), Some("local-taker-order"));
+    }
+
+    #[test]
+    fn readback_trader_side_maker_does_not_use_counterparty_taker_order() {
+        let json = format!(
+            r#"{{
+                "next_cursor": "",
+                "data": [{{
+                    "id": "trade-confirmed",
+                    "market": "condition-1",
+                    "asset_id": "token-1",
+                    "status": "TRADE_STATUS_CONFIRMED",
+                    "transaction_hash": "{}",
+                    "maker_address": "0x1111111111111111111111111111111111111111",
+                    "trader_side": "MAKER",
+                    "taker_order_id": "counterparty-taker-order",
+                    "maker_orders": [
+                        {{
+                            "order_id": "local-maker-order",
+                            "maker_address": "0x1111111111111111111111111111111111111111"
+                        }}
+                    ]
+                }}]
+            }}"#,
+            valid_tx_hash()
+        );
+        let page = parse_trades_page_with_cursor_for_account(
+            &json,
+            "0x1111111111111111111111111111111111111111",
+        )
+        .expect("trades parse");
+
+        assert_eq!(page.data[0].order_id.as_deref(), Some("local-maker-order"));
     }
 
     #[test]
@@ -1893,6 +2183,7 @@ mod tests {
             status: TradeReadbackStatus::from_wire(status),
             transaction_hash,
             maker_address: "0x1111111111111111111111111111111111111111".to_string(),
+            order_id: Some("order-1".to_string()),
         }
     }
 

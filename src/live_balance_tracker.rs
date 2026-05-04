@@ -5,12 +5,21 @@ use serde::{Deserialize, Serialize};
 pub const MODULE: &str = "live_balance_tracker";
 pub const BALANCE_EPSILON: f64 = 0.000_001;
 
+fn default_conditional_token_positions_evidence_complete() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct LiveBalanceSnapshot {
     pub p_usd_available: f64,
     pub p_usd_reserved: f64,
     pub p_usd_total: f64,
     pub conditional_token_positions: BTreeMap<String, f64>,
+    /// When false, `conditional_token_positions` on this snapshot is not authoritative venue
+    /// readback (e.g. LA2 preflight only populates collateral). Reconciliation must not treat an
+    /// empty map as proof of zero conditional-token exposure at the venue.
+    #[serde(default = "default_conditional_token_positions_evidence_complete")]
+    pub conditional_token_positions_evidence_complete: bool,
     pub balance_snapshot_at: i64,
     pub source: String,
 }
@@ -24,6 +33,12 @@ impl LiveBalanceSnapshot {
                 &self.conditional_token_positions,
                 &other.conditional_token_positions,
             )
+    }
+
+    pub fn matches_p_usd_fields(&self, other: &Self) -> bool {
+        nearly_equal(self.p_usd_available, other.p_usd_available)
+            && nearly_equal(self.p_usd_reserved, other.p_usd_reserved)
+            && nearly_equal(self.p_usd_total, other.p_usd_total)
     }
 }
 
@@ -93,6 +108,7 @@ mod tests {
             p_usd_reserved: reserved,
             p_usd_total: total,
             conditional_token_positions: BTreeMap::new(),
+            conditional_token_positions_evidence_complete: true,
             balance_snapshot_at: 1_777_000_000_000,
             source: "fixture".to_string(),
         }
