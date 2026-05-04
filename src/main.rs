@@ -43,6 +43,7 @@ use polymarket_15m_arb_bot::{
         ReadbackPreflightReport, ReadbackPrerequisites, SignatureType, TradeReadback,
     },
     live_beta_signing,
+    live_executor::{ShadowLiveDecision, ShadowLiveReport},
     live_fill_canary::{
         self, LiveAlphaApprovalArtifact, LiveAlphaFillCanaryCapState, LiveAlphaFillSubmitInput,
     },
@@ -74,7 +75,7 @@ use polymarket_15m_arb_bot::{
     },
     replay::{
         compare_generated_to_recorded_paper_events, compare_replay_results, ReplayEngine,
-        ReplayRunResult,
+        ReplayRunResult, ShadowLiveRuntimeReadiness,
     },
     reporting::deterministic_report_json,
     safety,
@@ -155,6 +156,11 @@ enum Commands {
     Paper {
         #[arg(long, help = "Override generated paper run ID")]
         run_id: Option<String>,
+        #[arg(
+            long,
+            help = "Record LA4 shadow-live decisions alongside paper execution without live order actions"
+        )]
+        shadow_live_alpha: bool,
         #[arg(
             long,
             help = "Write an offline deterministic M9 paper lifecycle fixture session"
@@ -594,15 +600,29 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             Commands::Paper {
                 run_id: paper_run_id,
+                shadow_live_alpha,
                 deterministic_fixture,
                 feed_message_limit,
                 cycles,
             } => {
                 let paper_run_id = paper_run_id.unwrap_or(run_id.clone());
                 if deterministic_fixture {
+                    if shadow_live_alpha {
+                        return Err(
+                            "paper --shadow-live-alpha is supported for runtime paper mode, not deterministic fixture mode"
+                                .into(),
+                        );
+                    }
                     run_deterministic_lifecycle_fixture(&config, &paper_run_id)?;
                 } else {
-                    run_paper_runtime(&config, &paper_run_id, feed_message_limit, cycles).await?;
+                    run_paper_runtime(
+                        &config,
+                        &paper_run_id,
+                        feed_message_limit,
+                        cycles,
+                        shadow_live_alpha,
+                    )
+                    .await?;
                 }
             }
             Commands::Replay {
@@ -786,6 +806,7 @@ async fn run_paper_runtime(
     run_id: &str,
     feed_message_limit: Option<usize>,
     cycles: u64,
+    shadow_live_alpha: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let message_limit =
         feed_message_limit.unwrap_or(usize::from(config.feeds.feed_smoke_message_limit));
@@ -828,6 +849,7 @@ async fn run_paper_runtime(
     println!("run_id={run_id}");
     println!("mode=paper");
     println!("paper_mode_status=runtime_enabled");
+    println!("paper_shadow_live_alpha_enabled={shadow_live_alpha}");
     println!("paper_storage_backend=file_session");
     let reference_provider = if config.reference_feed.is_polymarket_rtds_chainlink_enabled() {
         PROVIDER_POLYMARKET_RTDS_CHAINLINK
@@ -868,6 +890,11 @@ async fn run_paper_runtime(
         "live_order_placement_enabled={}",
         safety::LIVE_ORDER_PLACEMENT_ENABLED
     );
+    let shadow_readiness = ShadowLiveRuntimeReadiness {
+        geoblock_passed: true,
+        heartbeat_healthy: false,
+        reconciliation_clean: false,
+    };
 
     let max_cycles = if cycles == 0 { None } else { Some(cycles) };
     let mut completed_cycles = 0_u64;
@@ -898,7 +925,12 @@ async fn run_paper_runtime(
         let cycle_counts = cycle_counts?;
         completed_cycles += 1;
 
-        let cycle_replay = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+        let cycle_replay = ReplayEngine::replay_from_storage_snapshot_with_shadow(
+            &storage,
+            run_id,
+            shadow_live_alpha,
+            shadow_readiness,
+        )?;
         let new_paper_events = append_new_recorded_paper_events(&storage, run_id, &cycle_replay)?;
         info!(
             %run_id,
@@ -931,7 +963,12 @@ async fn run_paper_runtime(
         }
     }
 
-    let final_result = ReplayEngine::replay_from_storage_snapshot(&storage, run_id)?;
+    let final_result = ReplayEngine::replay_from_storage_snapshot_with_shadow(
+        &storage,
+        run_id,
+        shadow_live_alpha,
+        shadow_readiness,
+    )?;
     let final_check = compare_generated_to_recorded_paper_events(&final_result)?;
     if !final_check.passed {
         return Err(format!(
@@ -945,6 +982,18 @@ async fn run_paper_runtime(
     }
 
     persist_paper_outputs(&storage, run_id, config, &final_result)?;
+    let shadow_report_path = if shadow_live_alpha {
+        Some(persist_shadow_live_outputs(
+            &storage,
+            run_id,
+            config,
+            &final_result.shadow_live_decisions,
+            final_result.report.paper.order_count,
+            final_result.report.paper.fill_count,
+        )?)
+    } else {
+        None
+    };
     let report_path = write_runtime_artifacts(
         &storage,
         run_id,
@@ -971,6 +1020,51 @@ async fn run_paper_runtime(
         "paper_total_pnl={:.6}",
         final_result.report.pnl.totals.total_pnl
     );
+    if let Some(shadow_report_path) = shadow_report_path {
+        let shadow_report = ShadowLiveReport::from_decisions(
+            &final_result.shadow_live_decisions,
+            final_result.report.paper.order_count,
+            final_result.report.paper.fill_count,
+        );
+        println!("shadow_live_alpha_status=ok");
+        println!("shadow_live_report_path={}", shadow_report_path.display());
+        println!(
+            "shadow_live_decision_count={}",
+            shadow_report.decision_count
+        );
+        println!(
+            "shadow_would_submit_count={}",
+            shadow_report.shadow_would_submit_count
+        );
+        println!(
+            "shadow_would_cancel_count={}",
+            shadow_report.shadow_would_cancel_count
+        );
+        println!(
+            "shadow_would_replace_count={}",
+            shadow_report.shadow_would_replace_count
+        );
+        println!(
+            "shadow_rejected_count={}",
+            shadow_report.shadow_rejected_count
+        );
+        println!(
+            "shadow_rejected_count_by_reason={}",
+            format_counts(&shadow_report.shadow_rejected_count_by_reason)
+        );
+        println!(
+            "paper_live_intent_divergence_count={}",
+            shadow_report.paper_live_intent_divergence_count
+        );
+        println!(
+            "shadow_estimated_fee_exposure={:.6}",
+            shadow_report.estimated_fee_exposure
+        );
+        println!(
+            "shadow_estimated_reserved_pusd_exposure={:.6}",
+            shadow_report.estimated_reserved_pusd_exposure
+        );
+    }
 
     Ok(())
 }
@@ -1902,6 +1996,66 @@ fn persist_paper_outputs_at(
         updated_ts,
     })?;
     Ok(())
+}
+
+fn persist_shadow_live_outputs(
+    storage: &FileSessionStorage,
+    run_id: &str,
+    config: &AppConfig,
+    decisions: &[ShadowLiveDecision],
+    paper_order_count: u64,
+    paper_fill_count: u64,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let mut decision_lines = Vec::new();
+    for decision in decisions {
+        serde_json::to_writer(&mut decision_lines, decision)?;
+        decision_lines.push(b'\n');
+    }
+    storage.write_session_artifact(run_id, "shadow_live_decisions.jsonl", &decision_lines)?;
+
+    let mut journal_lines = Vec::new();
+    let journal_events = decisions
+        .iter()
+        .enumerate()
+        .map(|(index, decision)| {
+            decision.to_journal_event(
+                run_id,
+                format!("shadow-live-decision-{index}"),
+                unix_time_ms(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for event in &journal_events {
+        serde_json::to_writer(&mut journal_lines, event)?;
+        journal_lines.push(b'\n');
+    }
+    storage.write_session_artifact(run_id, "shadow_live_journal.jsonl", &journal_lines)?;
+
+    if let Some(journal_path) = config.live_alpha.journal_path() {
+        let journal = LiveOrderJournal::new(journal_path);
+        for event in &journal_events {
+            journal.append(event)?;
+        }
+    }
+
+    let report = ShadowLiveReport::from_decisions(decisions, paper_order_count, paper_fill_count);
+    let report_path = storage.write_session_artifact(
+        run_id,
+        "shadow_live_report.json",
+        &serde_json::to_vec_pretty(&report)?,
+    )?;
+    Ok(report_path)
+}
+
+fn format_counts(counts: &BTreeMap<String, u64>) -> String {
+    if counts.is_empty() {
+        return "none".to_string();
+    }
+    counts
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn write_runtime_artifacts(
@@ -4613,6 +4767,62 @@ mod tests {
     }
 
     #[test]
+    fn paper_shadow_live_alpha_flag_parses_without_live_order_enablement() {
+        let cli = Cli::try_parse_from([
+            "polymarket-15m-arb-bot",
+            "--config",
+            "config/default.toml",
+            "paper",
+            "--shadow-live-alpha",
+        ])
+        .expect("shadow-live paper flag parses");
+
+        match cli.command {
+            Commands::Paper {
+                shadow_live_alpha,
+                deterministic_fixture,
+                ..
+            } => {
+                assert!(shadow_live_alpha);
+                assert!(!deterministic_fixture);
+            }
+            other => panic!("expected paper command, got {other:?}"),
+        }
+        assert!(!safety::LIVE_ORDER_PLACEMENT_ENABLED);
+    }
+
+    #[test]
+    fn shadow_live_outputs_always_include_session_journal() {
+        let run_id = "la4-shadow-journal-test";
+        let unique = monotonic_like_ns();
+        let root = std::env::temp_dir().join(format!("p15m-la4-shadow-{unique}"));
+        let storage = FileSessionStorage::for_run(&root, run_id).expect("storage scopes to run");
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+
+        let report_path = persist_shadow_live_outputs(
+            &storage,
+            run_id,
+            &config,
+            &[sample_shadow_decision()],
+            0,
+            0,
+        )
+        .expect("shadow outputs persist");
+        let journal_path = storage
+            .session_dir(run_id)
+            .expect("session dir resolves")
+            .join("shadow_live_journal.jsonl");
+
+        assert!(report_path.ends_with("shadow_live_report.json"));
+        let journal = std::fs::read_to_string(&journal_path).expect("journal artifact reads");
+        assert!(journal.contains("\"event_type\":\"live_shadow_decision_recorded\""));
+        assert!(journal.contains("\"shadow_decision_id\":\"shadow-decision-1\""));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stale_polymarket_rtds_updates_are_skipped_without_relaxing_other_errors() {
         let stale = ReferenceFeedError::StalePrice {
             provider: PROVIDER_POLYMARKET_RTDS_CHAINLINK,
@@ -5719,6 +5929,48 @@ mod tests {
             },
             lifecycle_state: MarketLifecycleState::Active,
             ineligibility_reason: None,
+        }
+    }
+
+    fn sample_shadow_decision() -> ShadowLiveDecision {
+        ShadowLiveDecision {
+            shadow_decision_id: "shadow-decision-1".to_string(),
+            shadow_intent_id: "shadow-intent-1".to_string(),
+            intent_id: "intent-1".to_string(),
+            strategy_snapshot_id: Some("snapshot-1".to_string()),
+            market_slug: "btc-updown-15m-test".to_string(),
+            condition_id: "condition-1".to_string(),
+            token_id: "token-up".to_string(),
+            side: Side::Buy,
+            would_submit: false,
+            would_cancel: false,
+            would_replace: false,
+            live_eligible: false,
+            risk_eligible: true,
+            post_only_safe: true,
+            inventory_valid: true,
+            balance_valid: true,
+            book_fresh: true,
+            reference_fresh: true,
+            market_time_valid: true,
+            reason_codes: vec!["mode_not_approved".to_string()],
+            expected_order_type: "GTD".to_string(),
+            expected_price: 0.42,
+            expected_size: 5.0,
+            expected_notional: 2.1,
+            expected_edge_bps: 500.0,
+            expected_edge: 0.05,
+            expected_fee: Some(0.0),
+            expected_ttl: Some(60_000),
+            book_snapshot_id: Some("book-1".to_string()),
+            best_bid: Some(0.41),
+            best_ask: Some(0.43),
+            geoblock_passed: false,
+            heartbeat_healthy: false,
+            reconciliation_clean: false,
+            available_pusd: 1_000.0,
+            reserved_pusd: 0.0,
+            open_order_count: 0,
         }
     }
 }

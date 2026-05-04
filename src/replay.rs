@@ -6,8 +6,17 @@ use ring::digest::{digest, SHA256};
 use serde::Serialize;
 
 use crate::config::AppConfig;
-use crate::domain::{Asset, Market, MarketLifecycleState, PaperFill, PaperOrder, PaperOrderStatus};
+use crate::domain::{
+    Asset, Market, MarketLifecycleState, OrderKind, PaperFill, PaperOrder, PaperOrderIntent,
+    PaperOrderStatus, RiskHaltReason,
+};
 use crate::events::{EventEnvelope, NormalizedEvent};
+use crate::execution_intent::ExecutionIntent;
+use crate::live_alpha_config::LiveAlphaMode;
+use crate::live_executor::{
+    ExecutionDecision, ExecutionSink, ShadowLiveContext, ShadowLiveDecision, ShadowLiveExecution,
+    ShadowLiveReasonCode,
+};
 use crate::paper_executor::{
     FillSimulationInput, MarketSettlement, PaperExecutionAuditEvent, PaperExecutionError,
     PaperExecutor, PaperExecutorConfig, PaperPositionBook,
@@ -60,6 +69,7 @@ pub struct ReplayRunResult {
     pub generated_fills: Vec<PaperFill>,
     pub position_snapshots: Vec<PositionSnapshot>,
     pub audit_events: Vec<PaperExecutionAuditEvent>,
+    pub shadow_live_decisions: Vec<ShadowLiveDecision>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +77,25 @@ pub struct ReplayEngine {
     config: AppConfig,
     signal_engine: SignalEngine,
     risk_engine: RiskEngine,
+    shadow_live_enabled: bool,
+    shadow_live_readiness: ShadowLiveRuntimeReadiness,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShadowLiveRuntimeReadiness {
+    pub geoblock_passed: bool,
+    pub heartbeat_healthy: bool,
+    pub reconciliation_clean: bool,
+}
+
+impl ShadowLiveRuntimeReadiness {
+    pub fn passed() -> Self {
+        Self {
+            geoblock_passed: true,
+            heartbeat_healthy: true,
+            reconciliation_clean: true,
+        }
+    }
 }
 
 impl ReplayEngine {
@@ -75,11 +104,23 @@ impl ReplayEngine {
             signal_engine: SignalEngine::from_strategy_config(&config.strategy),
             risk_engine: RiskEngine::from_config(&config.risk),
             config,
+            shadow_live_enabled: false,
+            shadow_live_readiness: ShadowLiveRuntimeReadiness::default(),
         }
     }
 
     pub fn from_config(config: AppConfig) -> Self {
         Self::new(config)
+    }
+
+    pub fn with_shadow_live(mut self, enabled: bool) -> Self {
+        self.shadow_live_enabled = enabled;
+        self
+    }
+
+    pub fn with_shadow_live_readiness(mut self, readiness: ShadowLiveRuntimeReadiness) -> Self {
+        self.shadow_live_readiness = readiness;
+        self
     }
 
     pub fn replay_from_storage(
@@ -97,12 +138,29 @@ impl ReplayEngine {
         storage: &impl StorageBackend,
         run_id: &str,
     ) -> ReplayResult<ReplayRunResult> {
+        Self::replay_from_storage_snapshot_with_shadow(
+            storage,
+            run_id,
+            false,
+            ShadowLiveRuntimeReadiness::default(),
+        )
+    }
+
+    pub fn replay_from_storage_snapshot_with_shadow(
+        storage: &impl StorageBackend,
+        run_id: &str,
+        shadow_live_enabled: bool,
+        shadow_live_readiness: ShadowLiveRuntimeReadiness,
+    ) -> ReplayResult<ReplayRunResult> {
         let snapshot = storage
             .read_config_snapshot(run_id)
             .map_err(ReplayError::Storage)?
             .ok_or_else(|| ReplayError::MissingConfigSnapshot(run_id.to_string()))?;
         let config = config_from_snapshot(snapshot)?;
-        ReplayEngine::new(config).replay_from_storage(storage, run_id)
+        ReplayEngine::new(config)
+            .with_shadow_live(shadow_live_enabled)
+            .with_shadow_live_readiness(shadow_live_readiness)
+            .replay_from_storage(storage, run_id)
     }
 
     pub fn replay_events(
@@ -111,7 +169,13 @@ impl ReplayEngine {
         events: Vec<EventEnvelope>,
     ) -> ReplayResult<ReplayRunResult> {
         let run_id = run_id.into();
-        let replay = ReplayExecution::new(&self.config, &self.signal_engine, &self.risk_engine);
+        let replay = ReplayExecution::new(
+            &self.config,
+            &self.signal_engine,
+            &self.risk_engine,
+            self.shadow_live_enabled,
+            self.shadow_live_readiness,
+        );
         replay.run(run_id, events)
     }
 
@@ -245,17 +309,22 @@ struct ReplayExecution<'a> {
     config: &'a AppConfig,
     signal_engine: &'a SignalEngine,
     risk_engine: &'a RiskEngine,
+    shadow_live_enabled: bool,
+    shadow_live_readiness: ShadowLiveRuntimeReadiness,
+    shadow_live_executor: ShadowLiveExecution,
     state: StateStore,
     paper_executor: PaperExecutor,
     position_book: PaperPositionBook,
     markets: BTreeMap<String, Market>,
     order_timestamps_ms: Vec<i64>,
+    shadow_intent_seq: u64,
     generated_events: Vec<NormalizedEvent>,
     generated_paper_events: Vec<NormalizedEvent>,
     recorded_paper_events: Vec<NormalizedEvent>,
     generated_orders: BTreeMap<String, PaperOrder>,
     generated_fills: Vec<PaperFill>,
     audit_events: Vec<PaperExecutionAuditEvent>,
+    shadow_live_decisions: Vec<ShadowLiveDecision>,
     signals: Vec<SignalReplayRecord>,
     risk_decisions: Vec<RiskReplayRecord>,
 }
@@ -265,22 +334,29 @@ impl<'a> ReplayExecution<'a> {
         config: &'a AppConfig,
         signal_engine: &'a SignalEngine,
         risk_engine: &'a RiskEngine,
+        shadow_live_enabled: bool,
+        shadow_live_readiness: ShadowLiveRuntimeReadiness,
     ) -> Self {
         Self {
             config,
             signal_engine,
             risk_engine,
+            shadow_live_enabled,
+            shadow_live_readiness,
+            shadow_live_executor: ShadowLiveExecution::new(ShadowLiveContext::default()),
             state: StateStore::new(),
             paper_executor: PaperExecutor::new(PaperExecutorConfig::default()),
             position_book: PaperPositionBook::new(),
             markets: BTreeMap::new(),
             order_timestamps_ms: Vec::new(),
+            shadow_intent_seq: 1,
             generated_events: Vec::new(),
             generated_paper_events: Vec::new(),
             recorded_paper_events: Vec::new(),
             generated_orders: BTreeMap::new(),
             generated_fills: Vec::new(),
             audit_events: Vec::new(),
+            shadow_live_decisions: Vec::new(),
             signals: Vec::new(),
             risk_decisions: Vec::new(),
         }
@@ -336,6 +412,7 @@ impl<'a> ReplayExecution<'a> {
             generated_fills: self.generated_fills,
             position_snapshots,
             audit_events: self.audit_events,
+            shadow_live_decisions: self.shadow_live_decisions,
         })
     }
 
@@ -495,31 +572,29 @@ impl<'a> ReplayExecution<'a> {
             .evaluate(&intent, &snapshot, &self.risk_context());
         self.record_risk_decision(market_id, snapshot.market.asset, &risk_decision);
 
-        if !risk_decision.approved {
-            let book = matching_book_for_token(&snapshot, &intent.token_id);
-            let result = self.paper_executor.open_paper_order(
-                intent,
-                &risk_decision,
-                &snapshot.market.fee_parameters,
-                book.as_ref(),
-                now_wall_ts,
-            )?;
-            self.record_paper_result(result);
-            return Ok(());
-        }
-
         let book = matching_book_for_token(&snapshot, &intent.token_id);
+        let shadow_payload = if self.shadow_live_enabled {
+            Some((
+                self.execution_intent_from_paper_intent(&intent, &snapshot),
+                self.shadow_context_for_intent(&intent, &snapshot, &risk_decision),
+            ))
+        } else {
+            None
+        };
         let result = self.paper_executor.open_paper_order(
-            intent,
+            intent.clone(),
             &risk_decision,
             &snapshot.market.fee_parameters,
             book.as_ref(),
             now_wall_ts,
         )?;
-        if result.order.is_some() {
+        if risk_decision.approved && result.order.is_some() {
             self.order_timestamps_ms.push(now_wall_ts);
         }
         self.record_paper_result(result);
+        if let Some((shadow_execution_intent, shadow_context)) = shadow_payload {
+            self.record_shadow_live_decision(shadow_execution_intent, shadow_context);
+        }
         Ok(())
     }
 
@@ -574,6 +649,178 @@ impl<'a> ReplayExecution<'a> {
         }
     }
 
+    fn record_shadow_live_decision(&mut self, intent: ExecutionIntent, context: ShadowLiveContext) {
+        if !self.shadow_live_enabled {
+            return;
+        }
+
+        self.shadow_live_executor.set_context(context);
+        let decision = self.shadow_live_executor.handle_intent(intent);
+        match decision {
+            ExecutionDecision::ShadowLive(decision) => self.shadow_live_decisions.push(*decision),
+            other => panic!("shadow live executor returned unexpected decision: {other:?}"),
+        }
+    }
+
+    fn execution_intent_from_paper_intent(
+        &mut self,
+        intent: &PaperOrderIntent,
+        snapshot: &DecisionSnapshot,
+    ) -> ExecutionIntent {
+        let sequence = self.shadow_intent_seq;
+        self.shadow_intent_seq += 1;
+        let book = matching_book_for_token(snapshot, &intent.token_id);
+        let reference = snapshot.reference_prices.first();
+        let (order_type, time_in_force, post_only) = match intent.order_kind {
+            OrderKind::Maker => ("GTD", "GTD", true),
+            OrderKind::Taker => ("unsupported_taker", "unsupported_taker", false),
+        };
+
+        ExecutionIntent {
+            intent_id: format!("shadow-runtime-intent-{sequence}"),
+            strategy_snapshot_id: format!(
+                "{}:{}:{}:{}",
+                snapshot.market.market_id, intent.token_id, intent.created_ts, sequence
+            ),
+            market_slug: snapshot.market.slug.clone(),
+            condition_id: snapshot.market.condition_id.clone(),
+            token_id: intent.token_id.clone(),
+            asset_symbol: intent.asset.symbol().to_string(),
+            asset: intent.asset,
+            outcome: intent.outcome.clone(),
+            side: intent.side,
+            price: intent.price,
+            size: intent.size,
+            notional: intent.notional,
+            order_type: order_type.to_string(),
+            time_in_force: time_in_force.to_string(),
+            post_only,
+            expiry: Some(snapshot.market.end_ts / 1_000),
+            fair_probability: intent.fair_probability,
+            edge_bps: intent.expected_value_bps,
+            reference_price: reference.map(|price| price.price).unwrap_or_default(),
+            reference_source_timestamp: reference.and_then(|price| price.source_ts),
+            book_snapshot_id: book
+                .as_ref()
+                .and_then(|book| book.hash.clone())
+                .unwrap_or_default(),
+            best_bid: book.as_ref().and_then(|book| book.best_bid),
+            best_ask: book.as_ref().and_then(|book| book.best_ask),
+            spread: book.as_ref().and_then(|book| book.spread),
+            created_at: intent.created_ts,
+        }
+    }
+
+    fn shadow_context_for_intent(
+        &self,
+        intent: &PaperOrderIntent,
+        snapshot: &DecisionSnapshot,
+        risk_decision: &RiskGateDecision,
+    ) -> ShadowLiveContext {
+        let book_fresh = book_freshness_for_intent(snapshot, &intent.token_id)
+            .map(|freshness| freshness.is_fresh())
+            .unwrap_or(false);
+        let reference_fresh = !snapshot.reference_freshness.is_empty()
+            && snapshot
+                .reference_freshness
+                .iter()
+                .all(|freshness| !freshness.is_stale);
+        let inventory_by_token = snapshot
+            .positions
+            .iter()
+            .filter(|position| position.size > 0.0)
+            .map(|position| (position.token_id.clone(), position.size))
+            .collect::<BTreeMap<_, _>>();
+        let open_orders = self.open_paper_orders();
+        let current_market_notional: f64 = snapshot
+            .positions
+            .iter()
+            .filter(|position| position.market_id == intent.market_id)
+            .map(|position| position.size.abs() * position.average_price)
+            .sum::<f64>()
+            + open_orders
+                .iter()
+                .filter(|order| order.market_id == intent.market_id)
+                .map(|order| open_order_notional(order))
+                .sum::<f64>();
+        let current_asset_notional: f64 = snapshot
+            .positions
+            .iter()
+            .filter(|position| position.asset == intent.asset)
+            .map(|position| position.size.abs() * position.average_price)
+            .sum::<f64>()
+            + open_orders
+                .iter()
+                .filter(|order| order.asset == intent.asset)
+                .map(|order| open_order_notional(order))
+                .sum::<f64>();
+        let current_total_live_notional: f64 = snapshot
+            .positions
+            .iter()
+            .map(|position| position.size.abs() * position.average_price)
+            .sum::<f64>()
+            + open_orders
+                .iter()
+                .map(|order| open_order_notional(order))
+                .sum::<f64>();
+        let reserved_pusd: f64 = open_orders
+            .iter()
+            .map(|order| open_order_reserved_pusd(order))
+            .sum();
+        let available_pusd = (self.config.paper.starting_balance
+            + self.position_book.total_realized_pnl()
+            - reserved_pusd)
+            .max(0.0);
+
+        ShadowLiveContext {
+            mode_approved: self.config.live_alpha.enabled
+                && self.config.live_alpha.mode == LiveAlphaMode::Shadow,
+            risk_approved: risk_decision.approved,
+            risk_reason_codes: shadow_reason_codes_from_risk(risk_decision),
+            geoblock_passed: self.shadow_live_readiness.geoblock_passed,
+            heartbeat_healthy: self.shadow_live_readiness.heartbeat_healthy,
+            reconciliation_clean: self.shadow_live_readiness.reconciliation_clean,
+            book_fresh,
+            reference_fresh,
+            now_ms: Some(snapshot.snapshot_wall_ts),
+            market_end_ms: Some(snapshot.market.end_ts),
+            no_trade_seconds_before_close: self
+                .config
+                .live_alpha
+                .risk
+                .no_trade_seconds_before_close,
+            available_pusd,
+            reserved_pusd,
+            max_available_pusd_usage: self.config.live_alpha.risk.max_available_pusd_usage,
+            max_reserved_pusd: self.config.live_alpha.risk.max_reserved_pusd,
+            inventory_by_token,
+            open_order_count: open_orders.len() as u64,
+            max_open_orders: self.config.live_alpha.risk.max_open_orders,
+            current_market_notional,
+            max_market_notional: self.config.live_alpha.risk.max_per_market_notional,
+            current_asset_notional,
+            max_asset_notional: self.config.live_alpha.risk.max_per_asset_notional,
+            current_total_live_notional,
+            max_single_order_notional: self.config.live_alpha.risk.max_single_order_notional,
+            max_total_live_notional: self.config.live_alpha.risk.max_total_live_notional,
+            min_edge_bps: self.config.live_alpha.maker.min_edge_bps as f64,
+            fee_parameters: snapshot.market.fee_parameters.clone(),
+        }
+    }
+
+    fn open_paper_orders(&self) -> Vec<&PaperOrder> {
+        self.paper_executor
+            .orders()
+            .into_iter()
+            .filter(|order| {
+                matches!(
+                    order.status,
+                    PaperOrderStatus::Open | PaperOrderStatus::PartiallyFilled
+                )
+            })
+            .collect()
+    }
+
     fn mark_positions(&mut self, updated_ts: i64) {
         for snapshot in self.position_book.position_snapshots(updated_ts) {
             let Some(book) = self.state.order_books().token_snapshot(&snapshot.token_id) else {
@@ -623,6 +870,64 @@ fn matching_book_for_token(
             }
             book
         })
+}
+
+fn book_freshness_for_intent<'a>(
+    snapshot: &'a DecisionSnapshot,
+    token_id: &str,
+) -> Option<&'a crate::state::BookFreshness> {
+    snapshot.book_freshness.iter().find(|freshness| {
+        freshness.token_id == token_id
+            && (freshness.market_id == snapshot.market.market_id
+                || freshness.market_id == snapshot.market.condition_id)
+    })
+}
+
+fn shadow_reason_codes_from_risk(decision: &RiskGateDecision) -> Vec<ShadowLiveReasonCode> {
+    let mut reasons = decision
+        .risk_state
+        .active_halts
+        .iter()
+        .chain(
+            decision
+                .violations
+                .iter()
+                .map(|violation| &violation.reason),
+        )
+        .map(|reason| match reason {
+            RiskHaltReason::Geoblocked => ShadowLiveReasonCode::GeoblockNotPassed,
+            RiskHaltReason::StaleReference => ShadowLiveReasonCode::ReferenceStale,
+            RiskHaltReason::StaleBook => ShadowLiveReasonCode::BookStale,
+            RiskHaltReason::MaxLossPerMarket | RiskHaltReason::MaxNotionalPerMarket => {
+                ShadowLiveReasonCode::MaxMarketNotionalReached
+            }
+            RiskHaltReason::MaxNotionalPerAsset
+            | RiskHaltReason::MaxTotalNotional
+            | RiskHaltReason::MaxCorrelatedNotional => {
+                ShadowLiveReasonCode::MaxAssetNotionalReached
+            }
+            RiskHaltReason::OrderRateExceeded
+            | RiskHaltReason::DailyDrawdown
+            | RiskHaltReason::StorageUnavailable
+            | RiskHaltReason::IneligibleMarket
+            | RiskHaltReason::Unknown => ShadowLiveReasonCode::LiveRiskRejected,
+        })
+        .collect::<Vec<_>>();
+    reasons.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    reasons.dedup();
+    reasons
+}
+
+fn open_order_notional(order: &PaperOrder) -> f64 {
+    let remaining_size = (order.size - order.filled_size).max(0.0);
+    remaining_size * order.price
+}
+
+fn open_order_reserved_pusd(order: &PaperOrder) -> f64 {
+    match order.side {
+        crate::domain::Side::Buy => open_order_notional(order),
+        crate::domain::Side::Sell => 0.0,
+    }
 }
 
 fn mark_price(book: &TokenBookSnapshot) -> Option<f64> {
@@ -782,6 +1087,7 @@ mod tests {
         PaperOrder, PaperOrderStatus, ReferencePrice, Side,
     };
     use crate::events::EventType;
+    use crate::live_executor::ShadowLiveReport;
     use crate::reference_feed::{
         PROVIDER_POLYMARKET_RTDS_CHAINLINK, SOURCE_POLYMARKET_RTDS_CHAINLINK, SOURCE_PYTH_PROXY,
     };
@@ -1058,6 +1364,131 @@ mod tests {
         assert_eq!(result.generated_orders[0].market_id, asset_market_id(asset));
         assert_eq!(result.generated_orders[0].token_id, up_token_id);
         assert_eq!(result.generated_paper_events.len(), 1);
+    }
+
+    #[test]
+    fn shadow_live_replay_records_decisions_without_changing_paper_outputs() {
+        let config = config();
+        let events = synthetic_events();
+
+        let baseline = ReplayEngine::new(config.clone())
+            .replay_events(RUN_ID, events.clone())
+            .expect("baseline replay succeeds");
+        let shadow = ReplayEngine::new(config)
+            .with_shadow_live(true)
+            .replay_events(RUN_ID, events)
+            .expect("shadow replay succeeds");
+
+        assert_eq!(baseline.generated_orders, shadow.generated_orders);
+        assert_eq!(baseline.generated_fills, shadow.generated_fills);
+        assert_eq!(
+            baseline.generated_paper_events,
+            shadow.generated_paper_events
+        );
+        assert!(!shadow.shadow_live_decisions.is_empty());
+        assert!(shadow
+            .shadow_live_decisions
+            .iter()
+            .all(|decision| !decision.would_cancel && !decision.would_replace));
+        assert!(shadow.shadow_live_decisions.iter().all(|decision| {
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason == "mode_not_approved")
+        }));
+        assert!(shadow.shadow_live_decisions.iter().all(|decision| {
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason == "geoblock_not_passed")
+        }));
+
+        let report = ShadowLiveReport::from_decisions(
+            &shadow.shadow_live_decisions,
+            shadow.report.paper.order_count,
+            shadow.report.paper.fill_count,
+        );
+        assert_eq!(report.paper_fill_count, shadow.report.paper.fill_count);
+        assert_eq!(
+            report.decision_count,
+            shadow.shadow_live_decisions.len() as u64
+        );
+    }
+
+    #[test]
+    fn shadow_live_replay_can_would_submit_with_approved_shadow_readiness() {
+        let mut config = config();
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::Shadow;
+        config.live_alpha.risk.max_available_pusd_usage = 100.0;
+        config.live_alpha.risk.max_reserved_pusd = 100.0;
+        config.live_alpha.risk.max_single_order_notional = 100.0;
+        config.live_alpha.risk.max_per_market_notional = 100.0;
+        config.live_alpha.risk.max_per_asset_notional = 100.0;
+        config.live_alpha.risk.max_total_live_notional = 300.0;
+        config.live_alpha.risk.max_open_orders = 5;
+        config.live_alpha.risk.no_trade_seconds_before_close = 60;
+        config.live_alpha.maker.min_edge_bps = 0;
+        let asset = Asset::Eth;
+        let up_token_id = asset_up_token_id(asset);
+        let down_token_id = asset_down_token_id(asset);
+        let decision_ts = START_TS + 320_000;
+        let events = vec![
+            timed_envelope(
+                1,
+                START_TS + 300_000,
+                NormalizedEvent::MarketDiscovered {
+                    market: market_for_asset(asset),
+                },
+            ),
+            timed_envelope(
+                2,
+                decision_ts - 4,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &up_token_id, 0.47, 0.55),
+                },
+            ),
+            timed_envelope(
+                3,
+                decision_ts - 3,
+                NormalizedEvent::BookSnapshot {
+                    book: condition_book_for_asset(asset, &down_token_id, 0.45, 0.53),
+                },
+            ),
+            timed_envelope(
+                4,
+                decision_ts - 2,
+                NormalizedEvent::ReferenceTick {
+                    price: reference_for_asset(
+                        asset,
+                        asset.chainlink_resolution_source(),
+                        100.0,
+                        decision_ts - 2,
+                    ),
+                },
+            ),
+            timed_envelope(
+                5,
+                decision_ts - 1,
+                NormalizedEvent::PredictiveTick {
+                    price: reference_for_asset(asset, "binance", 102.0, decision_ts - 1),
+                },
+            ),
+        ];
+
+        let result = ReplayEngine::new(config)
+            .with_shadow_live(true)
+            .with_shadow_live_readiness(ShadowLiveRuntimeReadiness::passed())
+            .replay_events(RUN_ID, events)
+            .expect("shadow replay succeeds");
+
+        assert_eq!(result.report.paper.order_count, 1);
+        assert_eq!(result.shadow_live_decisions.len(), 1);
+        let decision = &result.shadow_live_decisions[0];
+        assert!(decision.would_submit);
+        assert!(decision.reason_codes.is_empty());
+        assert!(!decision.would_cancel);
+        assert!(!decision.would_replace);
     }
 
     #[test]
