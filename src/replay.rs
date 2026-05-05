@@ -901,10 +901,10 @@ fn shadow_reason_codes_from_risk(decision: &RiskGateDecision) -> Vec<ShadowLiveR
             RiskHaltReason::MaxLossPerMarket | RiskHaltReason::MaxNotionalPerMarket => {
                 ShadowLiveReasonCode::MaxMarketNotionalReached
             }
-            RiskHaltReason::MaxNotionalPerAsset
-            | RiskHaltReason::MaxTotalNotional
-            | RiskHaltReason::MaxCorrelatedNotional => {
-                ShadowLiveReasonCode::MaxAssetNotionalReached
+            RiskHaltReason::MaxNotionalPerAsset => ShadowLiveReasonCode::MaxAssetNotionalReached,
+            RiskHaltReason::MaxTotalNotional => ShadowLiveReasonCode::MaxTotalLiveNotionalReached,
+            RiskHaltReason::MaxCorrelatedNotional => {
+                ShadowLiveReasonCode::MaxCorrelatedNotionalReached
             }
             RiskHaltReason::OrderRateExceeded
             | RiskHaltReason::DailyDrawdown
@@ -1084,13 +1084,14 @@ mod tests {
     use super::*;
     use crate::domain::{
         FeeParameters, Market, OrderBookLevel, OrderBookSnapshot, OrderKind, OutcomeToken,
-        PaperOrder, PaperOrderStatus, ReferencePrice, Side,
+        PaperOrder, PaperOrderStatus, ReferencePrice, RiskState, Side,
     };
     use crate::events::EventType;
     use crate::live_executor::ShadowLiveReport;
     use crate::reference_feed::{
         PROVIDER_POLYMARKET_RTDS_CHAINLINK, SOURCE_POLYMARKET_RTDS_CHAINLINK, SOURCE_PYTH_PROXY,
     };
+    use crate::risk_engine::RiskViolation;
     use crate::storage::{ConfigSnapshot, InMemoryStorage};
 
     const DEFAULT_CONFIG: &str = include_str!("../config/default.toml");
@@ -1489,6 +1490,47 @@ mod tests {
         assert!(decision.reason_codes.is_empty());
         assert!(!decision.would_cancel);
         assert!(!decision.would_replace);
+    }
+
+    #[test]
+    fn shadow_reason_codes_preserve_notional_risk_halt_specificity() {
+        let decision = RiskGateDecision {
+            approved: false,
+            violations: vec![
+                RiskViolation {
+                    reason: RiskHaltReason::MaxNotionalPerAsset,
+                    message: "asset notional exceeded".to_string(),
+                },
+                RiskViolation {
+                    reason: RiskHaltReason::MaxTotalNotional,
+                    message: "total notional exceeded".to_string(),
+                },
+                RiskViolation {
+                    reason: RiskHaltReason::MaxCorrelatedNotional,
+                    message: "correlated notional exceeded".to_string(),
+                },
+            ],
+            risk_state: RiskState {
+                halted: true,
+                active_halts: Vec::new(),
+                reason: None,
+                updated_ts: START_TS,
+            },
+        };
+
+        let reasons = shadow_reason_codes_from_risk(&decision)
+            .into_iter()
+            .map(ShadowLiveReasonCode::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            reasons,
+            vec![
+                "max_asset_notional_reached",
+                "max_correlated_notional_reached",
+                "max_total_live_notional_reached",
+            ]
+        );
     }
 
     #[test]

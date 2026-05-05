@@ -133,6 +133,7 @@ Commands run:
 ```bash
 cargo test --offline live_executor
 cargo test --offline shadow_live
+cargo test --offline shadow_reason_codes_preserve_notional_risk_halt_specificity
 cargo test --offline execution_intent
 cargo test --offline live_risk_engine
 cargo run --offline -- --config config/default.toml validate --local-only
@@ -149,12 +150,13 @@ Results:
 
 - `cargo test --offline live_executor`: PASS, 14 lib tests.
 - `cargo test --offline shadow_live`: PASS, 14 lib tests and 2 main tests.
+- `cargo test --offline shadow_reason_codes_preserve_notional_risk_halt_specificity`: PASS, 1 lib test.
 - `cargo test --offline execution_intent`: PASS, 4 lib tests.
 - `cargo test --offline live_risk_engine`: PASS, 1 lib test.
 - `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac8208df5aaff8-3134-0`.
 - `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: PASS, run ID `18ac840bae3411d0-4b98-0`; 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 322 lib tests, 24 main tests, 0 doc tests.
+- `cargo test --offline`: PASS, 323 lib tests, 24 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - Order/cancel scan: completed with expected historical hits from config, paper simulation, LA3 fill canary code, prior live-beta canary/cancel modules, docs/status text, and LA4 inert shadow `GTD`/`SELL` modeling. No new LA4 live submit, live cancel, cancel-all, cancel/replace, FOK/FAK, or strategy-to-live order route was added.
@@ -169,6 +171,7 @@ Unit-level examples:
 - Post-only crossing -> `post_only_would_cross`, `would_submit=false`.
 - Heartbeat/reconciliation/geoblock/mode failures -> `heartbeat_not_healthy`, `reconciliation_not_clean`, `geoblock_not_passed`, `mode_not_approved`.
 - Risk engine mapping -> stale book and max market notional risk rejections map into shadow reason codes.
+- Notional risk halt mapping -> per-asset, total-live, and correlated-notional halts map to distinct shadow reason codes.
 
 ## Review Fixes Applied
 
@@ -177,6 +180,7 @@ Unit-level examples:
 - Runtime shadow replay has explicit readiness input instead of hard-coding geoblock/heartbeat/reconciliation inside replay. The default paper command remains fail-closed for heartbeat and reconciliation because no live heartbeat/reconciliation evidence is collected in LA4.
 - A regression test proves replay can produce `would_submit=true` when shadow mode, live readiness, risk, book, reference, balance, and notional context are all approved.
 - Every persisted shadow run writes a session-local `shadow_live_journal.jsonl`, even when the optional global live journal path is not configured.
+- PR #33 CodeRabbit P2 fix: `RiskHaltReason::MaxTotalNotional` now maps to `max_total_live_notional_reached` and `RiskHaltReason::MaxCorrelatedNotional` maps to `max_correlated_notional_reached` instead of collapsing into `max_asset_notional_reached`. Regression coverage: `shadow_reason_codes_preserve_notional_risk_halt_specificity`.
 
 ## Safety Notes
 
