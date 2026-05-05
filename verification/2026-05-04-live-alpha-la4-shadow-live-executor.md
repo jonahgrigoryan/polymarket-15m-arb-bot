@@ -75,22 +75,17 @@ cargo run --offline -- --config config/default.toml paper --shadow-live-alpha
 
 Latest post-readiness-patch rerun:
 
-- Status: FAIL-CLOSED before market capture.
-- Run ID: `18ac88cf514d0080-7e22-0`
-- Blocker: geoblock rejected this Codex session as `US/CA`.
-- Live order placed: no.
-
-Previous successful runtime evidence from the allowed-session PR #33 verification:
-
 - Status: PASS.
-- Run ID: `18ac8770bb0d6f10-6d8f-0`
-- Duration: 35.40 seconds wall time.
-- Session path: `reports/sessions/18ac8770bb0d6f10-6d8f-0`
+- Run ID: `18ac897030a989d8-8894-0`
+- Duration: 30.33 seconds wall time.
+- Session path: `reports/sessions/18ac897030a989d8-8894-0`
 - Markets observed: 3.
-  - BTC `btc-updown-15m-1777944600`
-  - ETH `eth-updown-15m-1777944600`
-  - SOL `sol-updown-15m-1777944600`
+  - BTC `btc-updown-15m-1777946400`
+  - ETH `eth-updown-15m-1777946400`
+  - SOL `sol-updown-15m-1777946400`
 - Live market evidence: true.
+- Live readiness evidence: false; default config is inert and does not collect authenticated live readback.
+- Shadow runtime readiness: geoblock passed, heartbeat unhealthy, reconciliation not clean.
 - Normalized events: 130.
 - Raw messages: 66.
 - Signal evaluations: 130.
@@ -108,7 +103,7 @@ Previous successful runtime evidence from the allowed-session PR #33 verificatio
 - Estimated reserved pUSD exposure: 0.000000.
 - Live order placed: no.
 
-Earlier run `18ac8234fb5c45f0-3bf3-0` also failed closed before market capture under `US/CA` geoblock. The successful allowed-session rerun above remains the latest completed LA4 runtime evidence; the post-readiness-patch Codex rerun could not complete because geoblock again returned `US/CA`.
+Earlier runs `18ac8234fb5c45f0-3bf3-0` and `18ac88cf514d0080-7e22-0` failed closed before market capture under `US/CA` geoblock. The successful rerun above replaces those geoblock-blocked attempts as the current LA4 runtime evidence.
 
 ## Test Evidence
 
@@ -169,7 +164,7 @@ Results:
 - `cargo test --offline execution_intent`: PASS, 4 lib tests.
 - `cargo test --offline live_risk_engine`: PASS, 1 lib test.
 - `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac88ce52bf6dc8-7df0-0`.
-- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: latest post-readiness-patch rerun FAIL-CLOSED before market capture, run ID `18ac88cf514d0080-7e22-0`, geoblock `US/CA`, no live order; previous successful allowed-session PR #33 runtime evidence remains run ID `18ac8770bb0d6f10-6d8f-0` with 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
+- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: PASS, run ID `18ac897030a989d8-8894-0`; geoblock passed, 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
 - `cargo fmt --check`: PASS.
 - `cargo test --offline`: PASS, 325 lib tests, 26 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
