@@ -58,6 +58,7 @@ Implementation consequence: LA4 does not call order, cancel, batch, or heartbeat
   - `insufficient_pusd`
   - `insufficient_inventory_for_sell`
   - `max_open_orders_reached`
+  - `max_market_loss_reached`
   - `max_market_notional_reached`
   - `max_asset_notional_reached`
   - `heartbeat_not_healthy`
@@ -192,7 +193,7 @@ Unit-level examples:
 - PR #33 review P1 fix: `run_paper_runtime` no longer hard-codes shadow heartbeat/reconciliation readiness to false. It derives geoblock from the actual runtime geoblock result, derives heartbeat from live readback heartbeat/no-open-orders evidence, derives reconciliation from startup recovery, and remains fail-closed when live readback evidence is absent. Regression coverage: `shadow_live_runtime_readiness_uses_live_readback_startup_and_heartbeat_state` and `shadow_live_runtime_readiness_fails_closed_without_live_readback_evidence`.
 - A regression test proves replay can produce `would_submit=true` when shadow mode, live readiness, risk, book, reference, balance, and notional context are all approved.
 - Every persisted shadow run writes a session-local `shadow_live_journal.jsonl`, even when the optional global live journal path is not configured.
-- PR #33 CodeRabbit P2 fix: `RiskHaltReason::MaxTotalNotional` now maps to `max_total_live_notional_reached` and `RiskHaltReason::MaxCorrelatedNotional` maps to `max_correlated_notional_reached` instead of collapsing into `max_asset_notional_reached`. Regression coverage: `shadow_reason_codes_preserve_notional_risk_halt_specificity`.
+- PR #33 review P2 fix: `RiskHaltReason::MaxLossPerMarket` now maps to `max_market_loss_reached` instead of `max_market_notional_reached`. `RiskHaltReason::MaxTotalNotional` maps to `max_total_live_notional_reached` and `RiskHaltReason::MaxCorrelatedNotional` maps to `max_correlated_notional_reached` instead of collapsing into `max_asset_notional_reached`. Regression coverage: `shadow_reason_codes_preserve_notional_risk_halt_specificity`.
 - PR #33 review P1 fix: runtime shadow `available_pusd` now subtracts open filled long-position cost in addition to open buy-order reserves. Regression coverage: `shadow_context_subtracts_filled_long_cost_from_available_pusd`.
 - PR #33 review P2 fix: sell-side shadow decisions skip new-pUSD collateral checks and rely on inventory validation. Regression coverage: `shadow_live_sell_intent_does_not_require_new_pusd_collateral`.
 

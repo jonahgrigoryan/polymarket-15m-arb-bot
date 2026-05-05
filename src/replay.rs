@@ -900,9 +900,8 @@ fn shadow_reason_codes_from_risk(decision: &RiskGateDecision) -> Vec<ShadowLiveR
             RiskHaltReason::Geoblocked => ShadowLiveReasonCode::GeoblockNotPassed,
             RiskHaltReason::StaleReference => ShadowLiveReasonCode::ReferenceStale,
             RiskHaltReason::StaleBook => ShadowLiveReasonCode::BookStale,
-            RiskHaltReason::MaxLossPerMarket | RiskHaltReason::MaxNotionalPerMarket => {
-                ShadowLiveReasonCode::MaxMarketNotionalReached
-            }
+            RiskHaltReason::MaxLossPerMarket => ShadowLiveReasonCode::MaxMarketLossReached,
+            RiskHaltReason::MaxNotionalPerMarket => ShadowLiveReasonCode::MaxMarketNotionalReached,
             RiskHaltReason::MaxNotionalPerAsset => ShadowLiveReasonCode::MaxAssetNotionalReached,
             RiskHaltReason::MaxTotalNotional => ShadowLiveReasonCode::MaxTotalLiveNotionalReached,
             RiskHaltReason::MaxCorrelatedNotional => {
@@ -1522,6 +1521,14 @@ mod tests {
             approved: false,
             violations: vec![
                 RiskViolation {
+                    reason: RiskHaltReason::MaxLossPerMarket,
+                    message: "market loss exceeded".to_string(),
+                },
+                RiskViolation {
+                    reason: RiskHaltReason::MaxNotionalPerMarket,
+                    message: "market notional exceeded".to_string(),
+                },
+                RiskViolation {
                     reason: RiskHaltReason::MaxNotionalPerAsset,
                     message: "asset notional exceeded".to_string(),
                 },
@@ -1552,6 +1559,8 @@ mod tests {
             vec![
                 "max_asset_notional_reached",
                 "max_correlated_notional_reached",
+                "max_market_loss_reached",
+                "max_market_notional_reached",
                 "max_total_live_notional_reached",
             ]
         );
