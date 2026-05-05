@@ -825,6 +825,25 @@ async fn run_paper_runtime(
 
     let geoblock = compliance_client(config)?.check_geoblock().await?;
     ComplianceError::fail_if_blocked(&geoblock)?;
+    let geoblock_gate_status = safety::GeoblockGateStatus::from_blocked(geoblock.blocked);
+    let shadow_readback_validation = if shadow_live_alpha
+        && config.live_alpha.enabled
+        && config.live_alpha.mode == LiveAlphaMode::Shadow
+    {
+        shadow_live_readback_validation_for_paper(config, geoblock_gate_status).await?
+    } else {
+        None
+    };
+    let shadow_readiness = shadow_live_runtime_readiness_for_paper(
+        config,
+        run_id,
+        unix_time_ms(),
+        geoblock_gate_status,
+        shadow_readback_validation.as_ref(),
+    );
+    let live_readiness_evidence = shadow_readback_validation
+        .as_ref()
+        .is_some_and(|validation| validation.report.live_network_enabled);
     storage.insert_config_snapshot(ConfigSnapshot::from_config(run_id, unix_time_ms(), config)?)?;
 
     let discovery = MarketDiscoveryClient::new(
@@ -864,7 +883,21 @@ async fn run_paper_runtime(
     println!("reference_feed_mode={}", config.reference_feed.provider);
     println!("reference_provider={reference_provider}");
     println!("settlement_reference_evidence={settlement_reference_evidence}");
-    println!("live_readiness_evidence=false");
+    println!("live_readiness_evidence={live_readiness_evidence}");
+    if shadow_live_alpha {
+        println!(
+            "shadow_live_runtime_geoblock_passed={}",
+            shadow_readiness.geoblock_passed
+        );
+        println!(
+            "shadow_live_runtime_heartbeat_healthy={}",
+            shadow_readiness.heartbeat_healthy
+        );
+        println!(
+            "shadow_live_runtime_reconciliation_clean={}",
+            shadow_readiness.reconciliation_clean
+        );
+    }
     println!(
         "paper_session_dir={}",
         storage.session_dir(run_id)?.display()
@@ -890,12 +923,6 @@ async fn run_paper_runtime(
         "live_order_placement_enabled={}",
         safety::LIVE_ORDER_PLACEMENT_ENABLED
     );
-    let shadow_readiness = ShadowLiveRuntimeReadiness {
-        geoblock_passed: true,
-        heartbeat_healthy: false,
-        reconciliation_clean: false,
-    };
-
     let max_cycles = if cycles == 0 { None } else { Some(cycles) };
     let mut completed_cycles = 0_u64;
     loop {
@@ -4268,6 +4295,89 @@ fn lb4_readback_prerequisites(
     }
 }
 
+async fn shadow_live_readback_validation_for_paper(
+    config: &AppConfig,
+    geoblock_gate_status: safety::GeoblockGateStatus,
+) -> Result<Option<ReadbackPreflightValidation>, Box<dyn std::error::Error>> {
+    if geoblock_gate_status != safety::GeoblockGateStatus::Passed {
+        return Ok(None);
+    }
+
+    let prerequisites = lb4_readback_prerequisites(config, geoblock_gate_status);
+    if !lb4_prerequisites_ready(prerequisites) {
+        return Ok(Some(ReadbackPreflightValidation::from_report(
+            live_beta_readback::sample_readback_preflight(prerequisites)?,
+        )));
+    }
+
+    let secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    if !secret_report.all_present() {
+        return Ok(Some(ReadbackPreflightValidation::from_report(
+            live_beta_readback::sample_readback_preflight(prerequisites)?,
+        )));
+    }
+
+    Ok(Some(live_alpha_authenticated_readback(config).await?))
+}
+
+fn shadow_live_runtime_readiness_for_paper(
+    config: &AppConfig,
+    run_id: &str,
+    checked_at_ms: i64,
+    geoblock_status: safety::GeoblockGateStatus,
+    readback_validation: Option<&ReadbackPreflightValidation>,
+) -> ShadowLiveRuntimeReadiness {
+    let startup_recovery_input = live_alpha_startup_recovery_input_for_validate(
+        config,
+        run_id,
+        checked_at_ms,
+        geoblock_status,
+        readback_validation,
+    );
+    let startup_recovery = live_startup_recovery::evaluate_startup_recovery(startup_recovery_input);
+
+    ShadowLiveRuntimeReadiness {
+        geoblock_passed: geoblock_status == safety::GeoblockGateStatus::Passed,
+        heartbeat_healthy: shadow_live_heartbeat_healthy_for_paper(config, readback_validation),
+        reconciliation_clean: startup_recovery.status == LiveStartupRecoveryStatus::Passed,
+    }
+}
+
+fn shadow_live_heartbeat_healthy_for_paper(
+    config: &AppConfig,
+    readback_validation: Option<&ReadbackPreflightValidation>,
+) -> bool {
+    if !config.live_alpha.heartbeat_required {
+        return true;
+    }
+
+    let Some(validation) = readback_validation else {
+        return false;
+    };
+    let report = &validation.report;
+    if !report.live_network_enabled
+        || report
+            .block_reasons
+            .iter()
+            .any(|reason| reason.starts_with("heartbeat_"))
+    {
+        return false;
+    }
+
+    match report.heartbeat {
+        value if value == live_beta_readback::HeartbeatReadiness::Healthy.as_str() => true,
+        value
+            if value == live_beta_readback::HeartbeatReadiness::NotStartedNoOpenOrders.as_str() =>
+        {
+            report.open_order_count == 0
+        }
+        _ => false,
+    }
+}
+
 fn live_alpha_startup_recovery_input_for_validate(
     config: &AppConfig,
     run_id: &str,
@@ -5276,6 +5386,105 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadow_live_runtime_readiness_uses_live_readback_startup_and_heartbeat_state() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::Shadow;
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la4-shadow-readiness-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        LiveOrderJournal::new(&path)
+            .append(
+                &polymarket_15m_arb_bot::live_order_journal::LiveJournalEvent::new(
+                    "previous-run",
+                    "balance-1",
+                    polymarket_15m_arb_bot::live_order_journal::LiveJournalEventType::LiveBalanceSnapshot,
+                    900,
+                    serde_json::json!({
+                        "p_usd_available": 1.0,
+                        "p_usd_reserved": 0.0,
+                        "p_usd_total": 1.0,
+                        "conditional_token_positions": {},
+                        "balance_snapshot_at": 900,
+                        "source": "fixture"
+                    }),
+                ),
+            )
+            .expect("journal event appends");
+        let validation = ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 0,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 1_000_000,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 1_000_000,
+                allowance_units: 1_000_000,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        };
+
+        let readiness = shadow_live_runtime_readiness_for_paper(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        assert_eq!(readiness, ShadowLiveRuntimeReadiness::passed());
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn shadow_live_runtime_readiness_fails_closed_without_live_readback_evidence() {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::Shadow;
+        let validation = ReadbackPreflightValidation::from_report(ReadbackPreflightReport {
+            status: "passed",
+            block_reasons: Vec::new(),
+            open_order_count: 0,
+            trade_count: 0,
+            reserved_pusd_units: 0,
+            required_collateral_allowance_units: 1_000_000,
+            available_pusd_units: 1_000_000,
+            venue_state: "trading_enabled",
+            heartbeat: "not_started_no_open_orders",
+            live_network_enabled: false,
+        });
+
+        let readiness = shadow_live_runtime_readiness_for_paper(
+            &config,
+            "test-run",
+            1_000,
+            safety::GeoblockGateStatus::Passed,
+            Some(&validation),
+        );
+
+        assert!(readiness.geoblock_passed);
+        assert!(!readiness.heartbeat_healthy);
+        assert!(!readiness.reconciliation_clean);
     }
 
     #[test]

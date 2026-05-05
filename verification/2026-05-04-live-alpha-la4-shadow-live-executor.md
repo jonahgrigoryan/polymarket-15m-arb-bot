@@ -73,7 +73,14 @@ Command:
 cargo run --offline -- --config config/default.toml paper --shadow-live-alpha
 ```
 
-Result in this Codex session:
+Latest post-readiness-patch rerun:
+
+- Status: FAIL-CLOSED before market capture.
+- Run ID: `18ac88cf514d0080-7e22-0`
+- Blocker: geoblock rejected this Codex session as `US/CA`.
+- Live order placed: no.
+
+Previous successful runtime evidence from the allowed-session PR #33 verification:
 
 - Status: PASS.
 - Run ID: `18ac8770bb0d6f10-6d8f-0`
@@ -101,7 +108,7 @@ Result in this Codex session:
 - Estimated reserved pUSD exposure: 0.000000.
 - Live order placed: no.
 
-Earlier run `18ac8234fb5c45f0-3bf3-0` failed closed before market capture under `US/CA` geoblock. The successful rerun above replaces that as the current LA4 runtime evidence after the PR #33 review fixes.
+Earlier run `18ac8234fb5c45f0-3bf3-0` also failed closed before market capture under `US/CA` geoblock. The successful allowed-session rerun above remains the latest completed LA4 runtime evidence; the post-readiness-patch Codex rerun could not complete because geoblock again returned `US/CA`.
 
 ## Test Evidence
 
@@ -120,12 +127,13 @@ cargo run --offline -- --config config/default.toml validate --local-only
 Observed results:
 
 - `live_executor`: PASS, 15 lib tests.
-- `shadow_live`: PASS, 15 lib tests and 2 main tests.
+- `shadow_live`: PASS, 15 lib tests and 4 main tests.
 - `execution_intent`: PASS, 4 lib tests.
 - `live_risk_engine`: PASS, 1 lib test.
 - Runtime integration regression: PASS; enabling shadow preserves generated paper orders, fills, and paper events.
 - CLI flag regression: PASS; `paper --shadow-live-alpha` parses while `LIVE_ORDER_PLACEMENT_ENABLED=false`.
-- `validate --local-only`: PASS, run ID `18ac876ce7f96be0-6d0f-0`; `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_shadow_executor_enabled=false`, `live_alpha_gate_status=blocked`.
+- Shadow readiness regression: PASS; paper runtime readiness uses live readback/startup/heartbeat evidence when present and fails closed without live readback evidence.
+- `validate --local-only`: PASS, run ID `18ac88ce52bf6dc8-7df0-0`; `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_shadow_executor_enabled=false`, `live_alpha_gate_status=blocked`.
 
 ## Final Closeout Verification
 
@@ -137,6 +145,7 @@ cargo test --offline shadow_live
 cargo test --offline shadow_reason_codes_preserve_notional_risk_halt_specificity
 cargo test --offline shadow_context_subtracts_filled_long_cost_from_available_pusd
 cargo test --offline shadow_live_sell_intent_does_not_require_new_pusd_collateral
+cargo test --offline shadow_live_runtime_readiness
 cargo test --offline execution_intent
 cargo test --offline live_risk_engine
 cargo run --offline -- --config config/default.toml validate --local-only
@@ -156,12 +165,13 @@ Results:
 - `cargo test --offline shadow_reason_codes_preserve_notional_risk_halt_specificity`: PASS, 1 lib test.
 - `cargo test --offline shadow_context_subtracts_filled_long_cost_from_available_pusd`: PASS, 1 lib test.
 - `cargo test --offline shadow_live_sell_intent_does_not_require_new_pusd_collateral`: PASS, 1 lib test.
+- `cargo test --offline shadow_live_runtime_readiness`: PASS, 2 main tests.
 - `cargo test --offline execution_intent`: PASS, 4 lib tests.
 - `cargo test --offline live_risk_engine`: PASS, 1 lib test.
-- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac876ce7f96be0-6d0f-0`.
-- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: PASS, run ID `18ac8770bb0d6f10-6d8f-0`; 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
+- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac88ce52bf6dc8-7df0-0`.
+- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: latest post-readiness-patch rerun FAIL-CLOSED before market capture, run ID `18ac88cf514d0080-7e22-0`, geoblock `US/CA`, no live order; previous successful allowed-session PR #33 runtime evidence remains run ID `18ac8770bb0d6f10-6d8f-0` with 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 325 lib tests, 24 main tests, 0 doc tests.
+- `cargo test --offline`: PASS, 325 lib tests, 26 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - Order/cancel scan: completed with expected historical hits from config, paper simulation, LA3 fill canary code, prior live-beta canary/cancel modules, docs/status text, and LA4 inert shadow `GTD`/`SELL` modeling. No new LA4 live submit, live cancel, cancel-all, cancel/replace, FOK/FAK, or strategy-to-live order route was added.
@@ -183,7 +193,8 @@ Unit-level examples:
 
 - Paper/live divergence now compares paper order count to shadow would-submit count, not paper fills. This avoids falsely flagging normal unfilled maker orders as divergence.
 - Shadow balance/risk context now carries reserved pUSD, max available pUSD usage, max reserved pUSD, single-order notional, and total live notional limits.
-- Runtime shadow replay has explicit readiness input instead of hard-coding geoblock/heartbeat/reconciliation inside replay. The default paper command remains fail-closed for heartbeat and reconciliation because no live heartbeat/reconciliation evidence is collected in LA4.
+- Runtime shadow replay has explicit readiness input instead of hard-coding geoblock/heartbeat/reconciliation inside replay.
+- PR #33 review P1 fix: `run_paper_runtime` no longer hard-codes shadow heartbeat/reconciliation readiness to false. It derives geoblock from the actual runtime geoblock result, derives heartbeat from live readback heartbeat/no-open-orders evidence, derives reconciliation from startup recovery, and remains fail-closed when live readback evidence is absent. Regression coverage: `shadow_live_runtime_readiness_uses_live_readback_startup_and_heartbeat_state` and `shadow_live_runtime_readiness_fails_closed_without_live_readback_evidence`.
 - A regression test proves replay can produce `would_submit=true` when shadow mode, live readiness, risk, book, reference, balance, and notional context are all approved.
 - Every persisted shadow run writes a session-local `shadow_live_journal.jsonl`, even when the optional global live journal path is not configured.
 - PR #33 CodeRabbit P2 fix: `RiskHaltReason::MaxTotalNotional` now maps to `max_total_live_notional_reached` and `RiskHaltReason::MaxCorrelatedNotional` maps to `max_correlated_notional_reached` instead of collapsing into `max_asset_notional_reached`. Regression coverage: `shadow_reason_codes_preserve_notional_risk_halt_specificity`.
