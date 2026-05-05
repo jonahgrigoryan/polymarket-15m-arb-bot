@@ -25,12 +25,13 @@ LA4 records what the live executor would have decided for strategy intents, but 
 Official Polymarket documentation was rechecked before coding LA4 shadow order semantics:
 
 - Create orders: `https://docs.polymarket.com/trading/orders/create`
+- CLOB order mechanics and allowances: `https://docs.polymarket.com/developers/CLOB/orders/onchain-order-info`
 - L2 client methods: `https://docs.polymarket.com/trading/clients/l2`
 - Fees: `https://docs.polymarket.com/trading/fees`
 - Geoblock: `https://docs.polymarket.com/api-reference/geoblock`
 - User channel: `https://docs.polymarket.com/market-data/websocket/user-channel`
 
-Implementation consequence: LA4 does not call order, cancel, batch, or heartbeat/user WebSocket write paths. Post-only crossing is modeled as a shadow reject reason. Fee exposure is estimated only for reporting.
+Implementation consequence: LA4 does not call order, cancel, batch, or heartbeat/user WebSocket write paths. Post-only crossing is modeled as a shadow reject reason. Fee exposure is estimated only for reporting. Buy-side shadow cash checks reserve pUSD collateral; sell-side shadow checks require token inventory instead of new pUSD collateral.
 
 ## Implemented Behavior
 
@@ -75,13 +76,13 @@ cargo run --offline -- --config config/default.toml paper --shadow-live-alpha
 Result in this Codex session:
 
 - Status: PASS.
-- Run ID: `18ac840bae3411d0-4b98-0`
-- Duration: 40.47 seconds wall time.
-- Session path: `reports/sessions/18ac840bae3411d0-4b98-0`
+- Run ID: `18ac8770bb0d6f10-6d8f-0`
+- Duration: 35.40 seconds wall time.
+- Session path: `reports/sessions/18ac8770bb0d6f10-6d8f-0`
 - Markets observed: 3.
-  - BTC `btc-updown-15m-1777941000`
-  - ETH `eth-updown-15m-1777941000`
-  - SOL `sol-updown-15m-1777941000`
+  - BTC `btc-updown-15m-1777944600`
+  - ETH `eth-updown-15m-1777944600`
+  - SOL `sol-updown-15m-1777944600`
 - Live market evidence: true.
 - Normalized events: 130.
 - Raw messages: 66.
@@ -100,7 +101,7 @@ Result in this Codex session:
 - Estimated reserved pUSD exposure: 0.000000.
 - Live order placed: no.
 
-Earlier run `18ac8234fb5c45f0-3bf3-0` failed closed before market capture under `US/CA` geoblock. The successful rerun above replaces that as the current LA4 runtime evidence.
+Earlier run `18ac8234fb5c45f0-3bf3-0` failed closed before market capture under `US/CA` geoblock. The successful rerun above replaces that as the current LA4 runtime evidence after the PR #33 review fixes.
 
 ## Test Evidence
 
@@ -118,13 +119,13 @@ cargo run --offline -- --config config/default.toml validate --local-only
 
 Observed results:
 
-- `live_executor`: PASS, 14 lib tests.
-- `shadow_live`: PASS, 14 lib tests and 2 main tests.
+- `live_executor`: PASS, 15 lib tests.
+- `shadow_live`: PASS, 15 lib tests and 2 main tests.
 - `execution_intent`: PASS, 4 lib tests.
 - `live_risk_engine`: PASS, 1 lib test.
 - Runtime integration regression: PASS; enabling shadow preserves generated paper orders, fills, and paper events.
 - CLI flag regression: PASS; `paper --shadow-live-alpha` parses while `LIVE_ORDER_PLACEMENT_ENABLED=false`.
-- `validate --local-only`: PASS, run ID `18ac8208df5aaff8-3134-0`; `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_shadow_executor_enabled=false`, `live_alpha_gate_status=blocked`.
+- `validate --local-only`: PASS, run ID `18ac876ce7f96be0-6d0f-0`; `live_order_placement_enabled=false`, `live_alpha_enabled=false`, `live_alpha_mode=disabled`, `live_alpha_shadow_executor_enabled=false`, `live_alpha_gate_status=blocked`.
 
 ## Final Closeout Verification
 
@@ -134,6 +135,8 @@ Commands run:
 cargo test --offline live_executor
 cargo test --offline shadow_live
 cargo test --offline shadow_reason_codes_preserve_notional_risk_halt_specificity
+cargo test --offline shadow_context_subtracts_filled_long_cost_from_available_pusd
+cargo test --offline shadow_live_sell_intent_does_not_require_new_pusd_collateral
 cargo test --offline execution_intent
 cargo test --offline live_risk_engine
 cargo run --offline -- --config config/default.toml validate --local-only
@@ -148,15 +151,17 @@ rg -n -i "(private[_ -]?key|secret|api[_ -]?key|passphrase|mnemonic|seed|POLY_AP
 
 Results:
 
-- `cargo test --offline live_executor`: PASS, 14 lib tests.
-- `cargo test --offline shadow_live`: PASS, 14 lib tests and 2 main tests.
+- `cargo test --offline live_executor`: PASS, 15 lib tests.
+- `cargo test --offline shadow_live`: PASS, 15 lib tests and 2 main tests.
 - `cargo test --offline shadow_reason_codes_preserve_notional_risk_halt_specificity`: PASS, 1 lib test.
+- `cargo test --offline shadow_context_subtracts_filled_long_cost_from_available_pusd`: PASS, 1 lib test.
+- `cargo test --offline shadow_live_sell_intent_does_not_require_new_pusd_collateral`: PASS, 1 lib test.
 - `cargo test --offline execution_intent`: PASS, 4 lib tests.
 - `cargo test --offline live_risk_engine`: PASS, 1 lib test.
-- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac8208df5aaff8-3134-0`.
-- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: PASS, run ID `18ac840bae3411d0-4b98-0`; 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
+- `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac876ce7f96be0-6d0f-0`.
+- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: PASS, run ID `18ac8770bb0d6f10-6d8f-0`; 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
 - `cargo fmt --check`: PASS.
-- `cargo test --offline`: PASS, 323 lib tests, 24 main tests, 0 doc tests.
+- `cargo test --offline`: PASS, 325 lib tests, 24 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
 - `git diff --check`: PASS.
 - Order/cancel scan: completed with expected historical hits from config, paper simulation, LA3 fill canary code, prior live-beta canary/cancel modules, docs/status text, and LA4 inert shadow `GTD`/`SELL` modeling. No new LA4 live submit, live cancel, cancel-all, cancel/replace, FOK/FAK, or strategy-to-live order route was added.
@@ -172,6 +177,7 @@ Unit-level examples:
 - Heartbeat/reconciliation/geoblock/mode failures -> `heartbeat_not_healthy`, `reconciliation_not_clean`, `geoblock_not_passed`, `mode_not_approved`.
 - Risk engine mapping -> stale book and max market notional risk rejections map into shadow reason codes.
 - Notional risk halt mapping -> per-asset, total-live, and correlated-notional halts map to distinct shadow reason codes.
+- Cash/inventory mapping -> filled buy inventory reduces available pUSD, while sell intents require token inventory and do not reserve new pUSD collateral.
 
 ## Review Fixes Applied
 
@@ -181,6 +187,8 @@ Unit-level examples:
 - A regression test proves replay can produce `would_submit=true` when shadow mode, live readiness, risk, book, reference, balance, and notional context are all approved.
 - Every persisted shadow run writes a session-local `shadow_live_journal.jsonl`, even when the optional global live journal path is not configured.
 - PR #33 CodeRabbit P2 fix: `RiskHaltReason::MaxTotalNotional` now maps to `max_total_live_notional_reached` and `RiskHaltReason::MaxCorrelatedNotional` maps to `max_correlated_notional_reached` instead of collapsing into `max_asset_notional_reached`. Regression coverage: `shadow_reason_codes_preserve_notional_risk_halt_specificity`.
+- PR #33 review P1 fix: runtime shadow `available_pusd` now subtracts open filled long-position cost in addition to open buy-order reserves. Regression coverage: `shadow_context_subtracts_filled_long_cost_from_available_pusd`.
+- PR #33 review P2 fix: sell-side shadow decisions skip new-pUSD collateral checks and rely on inventory validation. Regression coverage: `shadow_live_sell_intent_does_not_require_new_pusd_collateral`.
 
 ## Safety Notes
 

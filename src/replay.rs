@@ -767,10 +767,12 @@ impl<'a> ReplayExecution<'a> {
             .iter()
             .map(|order| open_order_reserved_pusd(order))
             .sum();
-        let available_pusd = (self.config.paper.starting_balance
-            + self.position_book.total_realized_pnl()
-            - reserved_pusd)
-            .max(0.0);
+        let available_pusd = shadow_available_pusd(
+            self.config.paper.starting_balance,
+            self.position_book.total_realized_pnl(),
+            reserved_pusd,
+            &snapshot.positions,
+        );
 
         ShadowLiveContext {
             mode_approved: self.config.live_alpha.enabled
@@ -928,6 +930,28 @@ fn open_order_reserved_pusd(order: &PaperOrder) -> f64 {
         crate::domain::Side::Buy => open_order_notional(order),
         crate::domain::Side::Sell => 0.0,
     }
+}
+
+fn shadow_available_pusd(
+    starting_balance: f64,
+    realized_pnl: f64,
+    reserved_pusd: f64,
+    positions: &[PositionSnapshot],
+) -> f64 {
+    if !starting_balance.is_finite() || !realized_pnl.is_finite() || !reserved_pusd.is_finite() {
+        return 0.0;
+    }
+
+    let mut open_long_cost = 0.0;
+    for position in positions.iter().filter(|position| position.size > 0.0) {
+        let cost = position.size * position.average_price;
+        if !cost.is_finite() || cost < 0.0 {
+            return 0.0;
+        }
+        open_long_cost += cost;
+    }
+
+    (starting_balance + realized_pnl - open_long_cost - reserved_pusd).max(0.0)
 }
 
 fn mark_price(book: &TokenBookSnapshot) -> Option<f64> {
@@ -1530,6 +1554,31 @@ mod tests {
                 "max_correlated_notional_reached",
                 "max_total_live_notional_reached",
             ]
+        );
+    }
+
+    #[test]
+    fn shadow_context_subtracts_filled_long_cost_from_available_pusd() {
+        let asset = Asset::Btc;
+        let positions = vec![PositionSnapshot {
+            market_id: asset_market_id(asset),
+            token_id: asset_up_token_id(asset),
+            asset,
+            size: 10.0,
+            average_price: 0.40,
+            realized_pnl: 0.0,
+            unrealized_pnl: 0.0,
+            updated_ts: START_TS + 20,
+        }];
+
+        assert_close(shadow_available_pusd(1_000.0, 0.0, 0.0, &positions), 996.0);
+        let reduced_positions = vec![PositionSnapshot {
+            size: 6.0,
+            ..positions[0].clone()
+        }];
+        assert_close(
+            shadow_available_pusd(1_000.0, 1.2, 0.0, &reduced_positions),
+            998.8,
         );
     }
 

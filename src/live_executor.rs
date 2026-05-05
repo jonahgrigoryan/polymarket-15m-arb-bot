@@ -321,7 +321,10 @@ impl ShadowLiveReport {
             if decision.would_submit {
                 report.shadow_would_submit_count += 1;
                 report.estimated_fee_exposure += decision.expected_fee.unwrap_or_default();
-                report.estimated_reserved_pusd_exposure += decision.expected_notional;
+                if decision.side == Side::Buy {
+                    report.estimated_reserved_pusd_exposure +=
+                        decision.expected_notional + decision.expected_fee.unwrap_or_default();
+                }
             }
             if decision.would_cancel {
                 report.shadow_would_cancel_count += 1;
@@ -415,14 +418,21 @@ impl ExecutionSink for ShadowLiveExecution {
             reasons.push(ShadowLiveReasonCode::PostOnlyWouldCross);
         }
         let expected_fee = expected_fee(&intent, &context);
-        let expected_reserved = intent.notional + expected_fee.unwrap_or_default();
-        let available_sufficient =
-            context.available_pusd.is_finite() && context.available_pusd >= expected_reserved;
-        let available_usage_valid = context.max_available_pusd_usage > 0.0
-            && expected_reserved <= context.max_available_pusd_usage;
-        let reserved_valid = context.reserved_pusd.is_finite()
-            && context.max_reserved_pusd >= 0.0
-            && context.reserved_pusd + expected_reserved <= context.max_reserved_pusd;
+        let collateral_required = intent.side == Side::Buy;
+        let expected_reserved = if collateral_required {
+            intent.notional + expected_fee.unwrap_or_default()
+        } else {
+            0.0
+        };
+        let available_sufficient = !collateral_required
+            || (context.available_pusd.is_finite() && context.available_pusd >= expected_reserved);
+        let available_usage_valid = !collateral_required
+            || (context.max_available_pusd_usage > 0.0
+                && expected_reserved <= context.max_available_pusd_usage);
+        let reserved_valid = !collateral_required
+            || (context.reserved_pusd.is_finite()
+                && context.max_reserved_pusd >= 0.0
+                && context.reserved_pusd + expected_reserved <= context.max_reserved_pusd);
         let single_order_notional_valid = context.max_single_order_notional > 0.0
             && intent.notional <= context.max_single_order_notional;
         let total_live_notional_valid = context.max_total_live_notional > 0.0
@@ -713,6 +723,39 @@ mod tests {
 
         assert_rejects(&decision, "insufficient_inventory_for_sell");
         assert!(!decision.inventory_valid);
+    }
+
+    #[test]
+    fn shadow_live_sell_intent_does_not_require_new_pusd_collateral() {
+        let mut intent = sample_intent();
+        intent.side = Side::Sell;
+        intent.price = 0.46;
+        intent.notional = intent.price * intent.size;
+        intent.best_bid = Some(0.45);
+        let mut context = approved_context();
+        context.available_pusd = 0.0;
+        context.max_available_pusd_usage = 0.0;
+        context.max_reserved_pusd = 0.0;
+        context
+            .inventory_by_token
+            .insert(intent.token_id.clone(), intent.size);
+        let mut executor = ShadowLiveExecution::new(context);
+
+        let decision = shadow_decision(executor.handle_intent(intent));
+
+        assert!(decision.would_submit);
+        assert!(decision.balance_valid);
+        assert!(decision.inventory_valid);
+        assert!(!decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "insufficient_pusd"));
+        assert!(!decision
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "reserved_pusd_exceeded"));
+        let report = ShadowLiveReport::from_decisions(&[decision], 1, 0);
+        assert_eq!(report.estimated_reserved_pusd_exposure, 0.0);
     }
 
     #[test]
