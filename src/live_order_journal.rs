@@ -51,6 +51,7 @@ pub enum LiveJournalEventType {
     LiveStartupRecoveryStarted,
     LiveStartupRecoveryPassed,
     LiveStartupRecoveryFailed,
+    LiveShadowDecisionRecorded,
     LiveFillCanaryStarted,
     LiveFillCanaryApproved,
     LiveFillCanaryRejected,

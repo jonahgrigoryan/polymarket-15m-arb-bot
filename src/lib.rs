@@ -13,6 +13,7 @@ pub mod live_beta_cancel;
 pub mod live_beta_order_lifecycle;
 pub mod live_beta_readback;
 pub mod live_beta_signing;
+pub mod live_executor;
 pub mod live_fill_canary;
 pub mod live_heartbeat;
 pub mod live_order_journal;
@@ -53,6 +54,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_beta_order_lifecycle::MODULE,
         live_beta_readback::MODULE,
         live_beta_signing::MODULE,
+        live_executor::MODULE,
         live_heartbeat::MODULE,
         live_order_journal::MODULE,
         live_position_book::MODULE,
