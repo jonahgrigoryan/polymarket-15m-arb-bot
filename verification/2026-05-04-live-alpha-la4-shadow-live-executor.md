@@ -74,19 +74,33 @@ cargo run --offline -- --config config/default.toml paper --shadow-live-alpha
 
 Result in this Codex session:
 
-- Status: FAIL-CLOSED before market capture.
-- Run ID: `18ac8234fb5c45f0-3bf3-0`
-- Duration: 4.71 seconds wall time, exiting during geoblock preflight.
-- Geoblock result: `country=US`, `region=CA`
-- Error: `trading unavailable from geoblocked location country=Some("US") region=Some("CA")`
-- Markets observed: `0`
-- Paper fills: `0`
-- Shadow would-submit count: `0`
-- Shadow would-cancel count: `0`
-- Shadow rejected count by reason: not produced because runtime stopped before capture/replay.
+- Status: PASS.
+- Run ID: `18ac840bae3411d0-4b98-0`
+- Duration: 40.47 seconds wall time.
+- Session path: `reports/sessions/18ac840bae3411d0-4b98-0`
+- Markets observed: 3.
+  - BTC `btc-updown-15m-1777941000`
+  - ETH `eth-updown-15m-1777941000`
+  - SOL `sol-updown-15m-1777941000`
+- Live market evidence: true.
+- Normalized events: 130.
+- Raw messages: 66.
+- Signal evaluations: 130.
+- Signal intents emitted: 0.
+- Signal skip reason: `missing_reference_price` 130.
+- Paper orders: 0.
+- Paper fills: 0.
+- Shadow decision count: 0.
+- Shadow would-submit count: 0.
+- Shadow would-cancel count: 0.
+- Shadow would-replace count: 0.
+- Shadow rejected count by reason: none.
+- Paper/live intent divergence count: 0.
+- Estimated fee exposure: 0.000000.
+- Estimated reserved pUSD exposure: 0.000000.
 - Live order placed: no.
 
-This was not bypassed. An approved-host/session rerun is required before merge if the merge gate requires the exact runtime command to complete.
+Earlier run `18ac8234fb5c45f0-3bf3-0` failed closed before market capture under `US/CA` geoblock. The successful rerun above replaces that as the current LA4 runtime evidence.
 
 ## Test Evidence
 
@@ -138,7 +152,7 @@ Results:
 - `cargo test --offline execution_intent`: PASS, 4 lib tests.
 - `cargo test --offline live_risk_engine`: PASS, 1 lib test.
 - `cargo run --offline -- --config config/default.toml validate --local-only`: PASS, run ID `18ac8208df5aaff8-3134-0`.
-- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: FAIL-CLOSED at geoblock preflight from `US/CA`, run ID `18ac8234fb5c45f0-3bf3-0`; no markets observed, no paper fills, no shadow decisions, no live order.
+- `cargo run --offline -- --config config/default.toml paper --shadow-live-alpha`: PASS, run ID `18ac840bae3411d0-4b98-0`; 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, no live order.
 - `cargo fmt --check`: PASS.
 - `cargo test --offline`: PASS, 322 lib tests, 24 main tests, 0 doc tests.
 - `cargo clippy --offline -- -D warnings`: PASS.
