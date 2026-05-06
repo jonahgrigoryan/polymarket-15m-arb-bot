@@ -233,24 +233,30 @@ Remaining Cursor review blockers were fixed after that binding patch:
 - A second command using the same approval ID fails closed on the existing cap before any submit.
 - The human-approved LA5 live-submit path now explicitly requires the compile-time `live-alpha-orders` feature, `LIVE_ORDER_PLACEMENT_ENABLED=true`, and `kill_switch_active=false` before accepting the approval for live execution.
 
+An additional P1 review blocker was fixed for accepted-order cleanup:
+
+- Once the venue accepts an LA5 maker order, heartbeat, authenticated readback, exact order readback, reconciliation, reconciliation-journal, and cancel-rate-slot failures now route through a best-effort exact-cancel cleanup before the original error is propagated.
+- Cleanup is limited to the accepted order ID. It records `cleanup_cancel_confirmed`, `cleanup_cancel_not_confirmed`, or `cleanup_cancel_failed` evidence in the LA5 journal without masking the original blocker.
+- The normal cancel decision now treats unknown or otherwise nonterminal order status as needing exact cancel; only clearly `CANCELED` or fully `FILLED` statuses skip the cancel request.
+
 Regression coverage added:
 
 ```text
-cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 13 focused tests.
+cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 15 focused tests.
 cargo test --offline live_maker_micro --lib: PASS, 4 focused tests.
 ```
 
 ## Final Verification
 
-Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, and the remaining approval-reuse/live-submit gate hardening:
+Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, and post-acceptance cleanup hardening:
 
 ```text
 cargo fmt --check: PASS
-cargo test --offline: PASS, 342 library tests, 39 binary tests, 0 doc tests
+cargo test --offline: PASS, 342 library tests, 41 binary tests, 0 doc tests
 cargo clippy --offline -- -D warnings: PASS
 git diff --check: PASS
-cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad110004674960-7f54-0
-cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad110003072108-7f53-0
+cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad142d1d87fc48-9976-0
+cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad142c910e4128-9977-0
 four-handle presence check after sourcing .env: PASS
 LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only.
 ```

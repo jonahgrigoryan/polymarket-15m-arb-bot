@@ -3991,7 +3991,7 @@ async fn run_live_alpha_maker_micro_live_session(
             )
             .into());
         }
-        append_la5_journal_event(
+        if let Err(error) = append_la5_journal_event(
             &journal,
             run_id,
             LiveJournalEventType::MakerOrderAccepted,
@@ -4002,55 +4002,127 @@ async fn run_live_alpha_maker_micro_live_session(
                 "status": submission.venue_status,
                 "trade_ids": submission.trade_ids,
             }),
-        )?;
+        ) {
+            return Err(la5_cleanup_accepted_order_before_error(
+                &journal,
+                run_id,
+                &submission.order_id,
+                &plan.intent_id,
+                sequence,
+                "accepted_journal_append_failed",
+                error.to_string(),
+                || async {
+                    cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                        .await
+                },
+            )
+            .await);
+        }
 
-        let heartbeat_id =
-            maintain_la5_heartbeat_until_cancel(&submit_input, plan.cancel_after_unix).await?;
+        macro_rules! la5_try_after_accept {
+            ($expr:expr, $reason:expr) => {
+                match $expr {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(la5_cleanup_accepted_order_before_error(
+                            &journal,
+                            run_id,
+                            &submission.order_id,
+                            &plan.intent_id,
+                            sequence,
+                            $reason,
+                            error.to_string(),
+                            || async {
+                                cancel_exact_maker_order_with_official_sdk(
+                                    &submit_input,
+                                    &submission.order_id,
+                                )
+                                .await
+                            },
+                        )
+                        .await);
+                    }
+                }
+            };
+        }
+
+        let heartbeat_id = la5_try_after_accept!(
+            maintain_la5_heartbeat_until_cancel(&submit_input, plan.cancel_after_unix).await,
+            "heartbeat_maintenance_failed"
+        );
         println!("live_alpha_maker_micro_order_{sequence}_heartbeat_id={heartbeat_id}");
 
-        let post_order_readback = live_alpha_authenticated_readback(config).await?;
-        let order_readback =
-            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+        let post_order_readback = la5_try_after_accept!(
+            live_alpha_authenticated_readback(config).await,
+            "post_order_account_readback_failed"
+        );
+        let order_readback = la5_try_after_accept!(
+            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await,
+            "post_order_exact_readback_failed"
+        );
         let order_trade_ids = la5_order_trade_ids(
             &baseline_trade_ids,
             &post_order_readback.trades,
             &submission,
             &order_readback,
         );
-        let open_reconciliation = reconcile_la5_order_state(
-            run_id,
-            &submission.order_id,
-            &order_readback,
-            &post_order_readback,
-            &order_trade_ids,
-            false,
-        )?;
-        append_la5_reconciliation_event(
-            &journal,
-            run_id,
-            &submission.order_id,
-            &open_reconciliation,
-        )?;
+        let open_reconciliation = la5_try_after_accept!(
+            reconcile_la5_order_state(
+                run_id,
+                &submission.order_id,
+                &order_readback,
+                &post_order_readback,
+                &order_trade_ids,
+                false,
+            ),
+            "post_order_reconciliation_error"
+        );
+        la5_try_after_accept!(
+            append_la5_reconciliation_event(
+                &journal,
+                run_id,
+                &submission.order_id,
+                &open_reconciliation,
+            ),
+            "post_order_reconciliation_journal_failed"
+        );
         if open_reconciliation.status() != "passed" {
-            return Err(format!(
-                "LA5 post-submit reconciliation failed: {}",
-                open_reconciliation.mismatch_list()
+            return Err(la5_cleanup_accepted_order_before_error(
+                &journal,
+                run_id,
+                &submission.order_id,
+                &plan.intent_id,
+                sequence,
+                "post_order_reconciliation_failed",
+                format!(
+                    "LA5 post-submit reconciliation failed: {}",
+                    open_reconciliation.mismatch_list()
+                ),
+                || async {
+                    cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                        .await
+                },
             )
-            .into());
+            .await);
         }
 
-        wait_for_la5_rate_slot(
-            &cancel_timestamps,
-            config.live_alpha.risk.max_cancel_rate_per_min,
-            started,
-            max_duration_sec,
-        )
-        .await?;
-        let latest_order =
-            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+        la5_try_after_accept!(
+            wait_for_la5_rate_slot(
+                &cancel_timestamps,
+                config.live_alpha.risk.max_cancel_rate_per_min,
+                started,
+                max_duration_sec,
+            )
+            .await,
+            "cancel_rate_slot_unavailable"
+        );
+        let latest_order = la5_try_after_accept!(
+            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await,
+            "pre_cancel_exact_readback_failed"
+        );
         let mut cancel_request_sent = false;
         let mut exact_cancel_confirmed = false;
-        if la5_order_status_is_live(&latest_order) {
+        if la5_order_status_needs_cancel(&latest_order) {
             cancel_request_sent = true;
             let canceled_ids =
                 cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
@@ -4748,10 +4820,10 @@ fn venue_trade_status_from_readback(status: TradeReadbackStatus) -> VenueTradeSt
     }
 }
 
-fn la5_order_status_is_live(order: &LiveMakerOrderReadbackReport) -> bool {
-    matches!(
+fn la5_order_status_needs_cancel(order: &LiveMakerOrderReadbackReport) -> bool {
+    !matches!(
         venue_order_status_from_la5_order(order),
-        VenueOrderStatus::Live | VenueOrderStatus::PartiallyFilled
+        VenueOrderStatus::Canceled | VenueOrderStatus::Filled
     )
 }
 
@@ -4761,6 +4833,110 @@ fn la5_order_status_is_filled(order: &LiveMakerOrderReadbackReport) -> bool {
 
 fn la5_order_status_is_canceled(order: &LiveMakerOrderReadbackReport) -> bool {
     venue_order_status_from_la5_order(order) == VenueOrderStatus::Canceled
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct La5PostAcceptanceCleanupReport {
+    reason: String,
+    order_id: String,
+    attempted: bool,
+    confirmed: bool,
+    canceled_ids: Vec<String>,
+    cleanup_error: Option<String>,
+    journal_error: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn la5_cleanup_accepted_order_before_error<F, Fut, E>(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    order_id: &str,
+    intent_id: &str,
+    sequence: u64,
+    reason: &str,
+    original_error: String,
+    cancel_exact: F,
+) -> Box<dyn std::error::Error>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, E>>,
+    E: std::fmt::Display,
+{
+    let mut report = La5PostAcceptanceCleanupReport {
+        reason: reason.to_string(),
+        order_id: order_id.to_string(),
+        attempted: true,
+        confirmed: false,
+        canceled_ids: Vec::new(),
+        cleanup_error: None,
+        journal_error: None,
+    };
+
+    match cancel_exact().await {
+        Ok(canceled_ids) => {
+            report.confirmed = canceled_ids
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(order_id));
+            report.canceled_ids = canceled_ids;
+            let event_type = if report.confirmed {
+                LiveJournalEventType::MakerOrderCanceled
+            } else {
+                LiveJournalEventType::MakerReconciliationFailed
+            };
+            let status = if report.confirmed {
+                "cleanup_cancel_confirmed"
+            } else {
+                "cleanup_cancel_not_confirmed"
+            };
+            if let Err(error) = append_la5_journal_event(
+                journal,
+                run_id,
+                event_type,
+                serde_json::json!({
+                    "status": status,
+                    "order_id": order_id,
+                    "intent_id": intent_id,
+                    "sequence": sequence,
+                    "cleanup_reason": reason,
+                    "canceled_ids": report.canceled_ids.clone(),
+                }),
+            ) {
+                report.journal_error = Some(error.to_string());
+            }
+        }
+        Err(error) => {
+            report.cleanup_error = Some(error.to_string());
+            if let Err(journal_error) = append_la5_journal_event(
+                journal,
+                run_id,
+                LiveJournalEventType::MakerReconciliationFailed,
+                serde_json::json!({
+                    "status": "cleanup_cancel_failed",
+                    "order_id": order_id,
+                    "intent_id": intent_id,
+                    "sequence": sequence,
+                    "cleanup_reason": reason,
+                    "cleanup_error": report.cleanup_error.clone(),
+                }),
+            ) {
+                report.journal_error = Some(journal_error.to_string());
+            }
+        }
+    }
+
+    let mut message = format!(
+        "{original_error}; cleanup_cancel_attempted={}; cleanup_cancel_confirmed={}",
+        report.attempted, report.confirmed
+    );
+    if let Some(error) = &report.cleanup_error {
+        message.push_str("; cleanup_cancel_error=");
+        message.push_str(error);
+    }
+    if let Some(error) = &report.journal_error {
+        message.push_str("; cleanup_journal_error=");
+        message.push_str(error);
+    }
+    message.into()
 }
 
 fn append_la5_reconciliation_event(
@@ -8288,6 +8464,97 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             .to_string();
 
         assert!(error.contains("live_order_placement_disabled"));
+    }
+
+    #[tokio::test]
+    async fn la5_post_acceptance_cleanup_confirms_exact_cancel_before_error() {
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la5-cleanup-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        let journal = LiveOrderJournal::new(&path);
+        let order_id =
+            "0x1111111111111111111111111111111111111111111111111111111111111111".to_string();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_for_cleanup = called.clone();
+        let order_id_for_cleanup = order_id.clone();
+
+        let error = la5_cleanup_accepted_order_before_error(
+            &journal,
+            "run-cleanup-ok",
+            &order_id,
+            "intent-cleanup-ok",
+            1,
+            "post_order_readback_failed",
+            "readback transport failed".to_string(),
+            || async move {
+                called_for_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok::<Vec<String>, &'static str>(vec![order_id_for_cleanup])
+            },
+        )
+        .await
+        .to_string();
+
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(error.contains("readback transport failed"));
+        assert!(error.contains("cleanup_cancel_attempted=true"));
+        assert!(error.contains("cleanup_cancel_confirmed=true"));
+        let contents = fs::read_to_string(&path).expect("cleanup journal reads");
+        assert!(contents.contains("maker_order_canceled"));
+        assert!(contents.contains("cleanup_cancel_confirmed"));
+        let replay = journal
+            .replay_state("run-cleanup-ok")
+            .expect("cleanup journal replays");
+        assert!(replay.canceled_orders.contains(&order_id));
+
+        fs::remove_file(path).expect("test cleanup journal removed");
+    }
+
+    #[tokio::test]
+    async fn la5_post_acceptance_cleanup_preserves_original_error_when_cancel_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la5-cleanup-fail-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        let journal = LiveOrderJournal::new(&path);
+        let order_id =
+            "0x2222222222222222222222222222222222222222222222222222222222222222".to_string();
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_for_cleanup = called.clone();
+
+        let error = la5_cleanup_accepted_order_before_error(
+            &journal,
+            "run-cleanup-fail",
+            &order_id,
+            "intent-cleanup-fail",
+            1,
+            "cancel_rate_slot_unavailable",
+            "LA5 rate limit configured as zero".to_string(),
+            || async move {
+                called_for_cleanup.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err::<Vec<String>, &'static str>("cancel transport failed")
+            },
+        )
+        .await
+        .to_string();
+
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(error.contains("LA5 rate limit configured as zero"));
+        assert!(error.contains("cleanup_cancel_attempted=true"));
+        assert!(error.contains("cleanup_cancel_confirmed=false"));
+        assert!(error.contains("cleanup_cancel_error=cancel transport failed"));
+        let contents = fs::read_to_string(&path).expect("cleanup journal reads");
+        assert!(contents.contains("maker_reconciliation_failed"));
+        assert!(contents.contains("cleanup_cancel_failed"));
+        let replay = journal
+            .replay_state("run-cleanup-fail")
+            .expect("cleanup journal replays");
+        assert_eq!(replay.reconciliation_mismatch_count, 1);
+        assert!(!replay.canceled_orders.contains(&order_id));
+
+        fs::remove_file(path).expect("test cleanup journal removed");
     }
 
     #[test]
