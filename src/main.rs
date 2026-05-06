@@ -4761,7 +4761,7 @@ fn reconcile_la5_order_state(
         ..LocalLiveState::default()
     };
     local.known_orders.insert(order_id.to_string());
-    if expect_flat {
+    if expect_flat && !la5_order_status_is_filled(order) {
         local.canceled_orders.insert(order_id.to_string());
     }
     for trade_id in trade_ids {
@@ -8626,6 +8626,73 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         validate_la5_plan_fits_duration_cap(&plan, Instant::now(), 60)
             .expect("duration cap leaves room for quote TTL and cancel");
+    }
+
+    #[test]
+    fn la5_final_reconciliation_treats_filled_order_with_trade_evidence_as_flat() {
+        let order_id = "filled-order-1";
+        let trade_id = "trade-filled-order-1".to_string();
+        let order = LiveMakerOrderReadbackReport {
+            order_id: order_id.to_string(),
+            venue_status: "matched".to_string(),
+            market: "market-1".to_string(),
+            token_id: "token-up".to_string(),
+            side: "BUY".to_string(),
+            original_size: 5.0,
+            size_matched: 5.0,
+            remaining_size: 0.0,
+            price: 0.17,
+            outcome: "Up".to_string(),
+            order_type: "GTD".to_string(),
+            expiration_unix: 1_000_090,
+            associate_trades: Vec::new(),
+        };
+        let mut readback = la5_test_readback();
+        readback.report.trade_count += 1;
+        readback.trades.push(TradeReadback {
+            id: trade_id.clone(),
+            market: "market-1".to_string(),
+            asset_id: "token-up".to_string(),
+            status: live_beta_readback::TradeReadbackStatus::Confirmed,
+            transaction_hash: Some(format!("0x{}", "1".repeat(64))),
+            maker_address: "0x1111111111111111111111111111111111111111".to_string(),
+            order_id: Some(order_id.to_string()),
+        });
+        let trade_ids = vec![trade_id];
+
+        let result = reconcile_la5_order_state(
+            "run-filled-flat",
+            order_id,
+            &order,
+            &readback,
+            &trade_ids,
+            true,
+        )
+        .expect("filled order reconciliation evaluates");
+
+        assert_eq!(result.status(), "passed");
+        assert!(result.mismatches().is_empty());
+
+        let missing_trade_result = reconcile_la5_order_state(
+            "run-filled-missing-trade",
+            order_id,
+            &order,
+            &readback,
+            &[],
+            true,
+        )
+        .expect("filled order without trade evidence evaluates");
+
+        assert_eq!(missing_trade_result.status(), "halt_required");
+        assert!(missing_trade_result
+            .mismatches()
+            .contains(&LiveReconciliationMismatch::UnexpectedFill));
+        assert!(
+            !missing_trade_result
+                .mismatches()
+                .contains(&LiveReconciliationMismatch::CancelNotConfirmed),
+            "filled terminal orders should not be modeled as locally canceled"
+        );
     }
 
     #[tokio::test]
