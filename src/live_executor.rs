@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::{FeeParameters, OrderKind, Side};
 use crate::execution_intent::ExecutionIntent;
+use crate::live_alpha_config::LiveAlphaMakerConfig;
+use crate::live_maker_micro::{build_live_maker_order_plan, LiveMakerOrderPlan};
 use crate::live_order_journal::{LiveJournalEvent, LiveJournalEventType};
+use crate::live_risk_engine::LiveRiskApproved;
 use crate::paper_executor::fee_paid;
 
 pub const MODULE: &str = "live_executor";
@@ -46,6 +49,7 @@ pub enum ExecutionDecision {
         intent_id: String,
     },
     ShadowLive(Box<ShadowLiveDecision>),
+    LiveMaker(Box<LiveMakerDecision>),
     InertLive {
         mode: ExecutionMode,
         intent_id: String,
@@ -76,12 +80,71 @@ impl ExecutionSink for PaperExecution {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct LiveMakerDecision {
+    pub intent_id: String,
+    pub would_submit: bool,
+    pub not_submitted: bool,
+    pub reason_codes: Vec<String>,
+    pub order_plan: Option<LiveMakerOrderPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveMakerExecutionContext {
+    pub risk_approval: LiveRiskApproved,
+    pub maker_config: LiveAlphaMakerConfig,
+    pub now_unix: u64,
+    pub human_approved: bool,
+}
+
 #[derive(Debug, Default)]
-pub struct LiveMakerExecution;
+pub struct LiveMakerExecution {
+    context: Option<LiveMakerExecutionContext>,
+}
+
+impl LiveMakerExecution {
+    pub fn new(context: LiveMakerExecutionContext) -> Self {
+        Self {
+            context: Some(context),
+        }
+    }
+}
 
 impl ExecutionSink for LiveMakerExecution {
     fn handle_intent(&mut self, intent: ExecutionIntent) -> ExecutionDecision {
-        inert_live_decision(ExecutionMode::LiveMaker, intent.intent_id)
+        let Some(context) = &self.context else {
+            return inert_live_decision(ExecutionMode::LiveMaker, intent.intent_id);
+        };
+        let intent_id = intent.intent_id.clone();
+        let mut reason_codes = Vec::new();
+        if !context.human_approved {
+            reason_codes.push("human_approval_missing".to_string());
+        }
+        match build_live_maker_order_plan(
+            &intent,
+            &context.risk_approval,
+            &context.maker_config,
+            context.now_unix,
+        ) {
+            Ok(plan) => ExecutionDecision::LiveMaker(Box::new(LiveMakerDecision {
+                intent_id,
+                would_submit: context.human_approved,
+                not_submitted: !context.human_approved,
+                reason_codes,
+                order_plan: Some(plan),
+            })),
+            Err(error) => {
+                reason_codes.push("maker_order_plan_invalid".to_string());
+                reason_codes.push(error.to_string());
+                ExecutionDecision::LiveMaker(Box::new(LiveMakerDecision {
+                    intent_id,
+                    would_submit: false,
+                    not_submitted: true,
+                    reason_codes,
+                    order_plan: None,
+                }))
+            }
+        }
     }
 }
 
@@ -848,7 +911,7 @@ mod tests {
         assert!(!decision.would_cancel);
         assert!(!decision.would_replace);
 
-        let mut maker = LiveMakerExecution;
+        let mut maker = LiveMakerExecution::default();
         let maker_decision = maker.handle_intent(intent.clone());
         assert!(matches!(
             maker_decision,
@@ -867,6 +930,49 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn live_executor_maker_builds_post_only_gtd_plan_after_risk_approval() {
+        let intent = sample_intent();
+        let approval = LiveRiskApproved {
+            intent_id: intent.intent_id.clone(),
+            approved_token_id: intent.token_id.clone(),
+            approved_outcome: intent.outcome.clone(),
+            approved_notional: intent.notional,
+            approved_size: intent.size,
+            approved_ttl_seconds: 30,
+            approved_side: Side::Buy,
+            reason_codes: Vec::new(),
+        };
+        let mut maker = LiveMakerExecution::new(LiveMakerExecutionContext {
+            risk_approval: approval,
+            maker_config: LiveAlphaMakerConfig {
+                enabled: true,
+                post_only: true,
+                order_type: "GTD".to_string(),
+                ttl_seconds: 30,
+                min_edge_bps: 0,
+                replace_tolerance_bps: 0,
+                min_quote_lifetime_ms: 0,
+            },
+            now_unix: 1_777_000_100,
+            human_approved: true,
+        });
+
+        let decision = maker.handle_intent(intent);
+        let ExecutionDecision::LiveMaker(decision) = decision else {
+            panic!("expected live maker decision");
+        };
+        let plan = decision.order_plan.expect("order plan exists");
+
+        assert!(decision.would_submit);
+        assert!(!decision.not_submitted);
+        assert_eq!(plan.post_only, true);
+        assert_eq!(plan.order_type, "GTD");
+        assert_eq!(plan.effective_quote_ttl_seconds, 30);
+        assert_eq!(plan.cancel_after_unix, 1_777_000_130);
+        assert_eq!(plan.gtd_expiration_unix, 1_777_000_190);
     }
 
     #[test]

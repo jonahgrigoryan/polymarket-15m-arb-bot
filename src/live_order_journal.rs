@@ -61,6 +61,21 @@ pub enum LiveJournalEventType {
     LiveFillReconciled,
     LiveFillSettlementObserved,
     LiveRiskHalt,
+    MakerMicroStarted,
+    MakerMicroApprovalAccepted,
+    MakerRiskApproved,
+    MakerRiskRejected,
+    MakerRiskHalt,
+    MakerOrderSubmitAttempted,
+    MakerOrderAccepted,
+    MakerOrderRejected,
+    MakerOrderCanceled,
+    MakerOrderFilled,
+    MakerOrderPartiallyFilled,
+    MakerReconciliationPassed,
+    MakerReconciliationFailed,
+    MakerMicroStopped,
+    MakerMicroHalted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -200,6 +215,7 @@ pub fn reduce_live_journal_events(
     let mut state = LiveJournalState::default();
 
     for event in events {
+        validate_typed_payload(event)?;
         let event_order_id = payload_string(&event.payload, "order_id");
         if let Some(intent_id) = payload_string(&event.payload, "intent_id") {
             state.intents.insert(intent_id);
@@ -213,10 +229,12 @@ pub fn reduce_live_journal_events(
         }
         if let Some(order_id) = &event_order_id {
             match event.event_type {
-                LiveJournalEventType::LiveOrderPartiallyFilled => {
+                LiveJournalEventType::LiveOrderPartiallyFilled
+                | LiveJournalEventType::MakerOrderPartiallyFilled => {
                     state.partially_filled_orders.insert(order_id.clone());
                 }
-                LiveJournalEventType::LiveOrderCanceled => {
+                LiveJournalEventType::LiveOrderCanceled
+                | LiveJournalEventType::MakerOrderCanceled => {
                     state.canceled_orders.insert(order_id.clone());
                 }
                 _ => {}
@@ -257,7 +275,11 @@ pub fn reduce_live_journal_events(
             )?;
             state.position_book.upsert_position(position);
         }
-        if event.event_type == LiveJournalEventType::LiveReconciliationMismatch {
+        if matches!(
+            event.event_type,
+            LiveJournalEventType::LiveReconciliationMismatch
+                | LiveJournalEventType::MakerReconciliationFailed
+        ) {
             state.reconciliation_mismatch_count += 1;
         }
         if matches!(
@@ -265,6 +287,8 @@ pub fn reduce_live_journal_events(
             LiveJournalEventType::LiveHeartbeatStale
                 | LiveJournalEventType::LiveStartupRecoveryFailed
                 | LiveJournalEventType::LiveRiskHalt
+                | LiveJournalEventType::MakerRiskHalt
+                | LiveJournalEventType::MakerMicroHalted
         ) {
             state.risk_halted = true;
         }
@@ -278,6 +302,12 @@ impl LiveJournalEventType {
         matches!(
             self,
             Self::LiveOrderSubmitAccepted
+                | Self::MakerOrderSubmitAttempted
+                | Self::MakerOrderAccepted
+                | Self::MakerOrderRejected
+                | Self::MakerOrderCanceled
+                | Self::MakerOrderFilled
+                | Self::MakerOrderPartiallyFilled
                 | Self::LiveFillAttempted
                 | Self::LiveFillSucceeded
                 | Self::LiveFillFailed
@@ -304,7 +334,47 @@ impl LiveJournalEventType {
                 | Self::LiveTradeConfirmed
                 | Self::LiveFillSucceeded
                 | Self::LiveFillReconciled
+                | Self::MakerOrderFilled
         )
+    }
+}
+
+fn validate_typed_payload(event: &LiveJournalEvent) -> LiveJournalResult<()> {
+    match event.event_type {
+        LiveJournalEventType::MakerRiskApproved
+        | LiveJournalEventType::MakerRiskRejected
+        | LiveJournalEventType::MakerRiskHalt
+        | LiveJournalEventType::MakerOrderSubmitAttempted
+        | LiveJournalEventType::MakerOrderRejected => {
+            require_payload_string(event, "intent_id")?;
+        }
+        LiveJournalEventType::MakerOrderAccepted
+        | LiveJournalEventType::MakerOrderCanceled
+        | LiveJournalEventType::MakerOrderFilled
+        | LiveJournalEventType::MakerOrderPartiallyFilled => {
+            require_payload_string(event, "order_id")?;
+        }
+        LiveJournalEventType::MakerReconciliationPassed
+        | LiveJournalEventType::MakerReconciliationFailed => {
+            require_payload_string(event, "status")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn require_payload_string(event: &LiveJournalEvent, key: &'static str) -> LiveJournalResult<()> {
+    if payload_string(&event.payload, key)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(LiveJournalError::MalformedTypedPayload {
+            event_id: event.event_id.clone(),
+            event_type: event.event_type,
+            reason: format!("missing non-empty {key}"),
+        })
     }
 }
 
@@ -397,6 +467,11 @@ pub enum LiveJournalError {
         event_type: LiveJournalEventType,
         source: serde_json::Error,
     },
+    MalformedTypedPayload {
+        event_id: String,
+        event_type: LiveJournalEventType,
+        reason: String,
+    },
 }
 
 impl Display for LiveJournalError {
@@ -418,6 +493,16 @@ impl Display for LiveJournalError {
                     "live journal payload for {event_type:?} event {event_id} failed to decode: {source}"
                 )
             }
+            Self::MalformedTypedPayload {
+                event_id,
+                event_type,
+                reason,
+            } => {
+                write!(
+                    formatter,
+                    "live journal payload for {event_type:?} event {event_id} is malformed: {reason}"
+                )
+            }
         }
     }
 }
@@ -428,6 +513,7 @@ impl Error for LiveJournalError {
             Self::Io { source, .. } => Some(source),
             Self::Serialize(source) => Some(source),
             Self::MalformedPayload { source, .. } => Some(source),
+            Self::MalformedTypedPayload { .. } => None,
         }
     }
 }
@@ -603,6 +689,93 @@ mod tests {
             state.trade_order_ids_by_trade.get("trade-1"),
             Some(&"order-1".to_string())
         );
+    }
+
+    #[test]
+    fn live_order_journal_reducer_tracks_la5_maker_order_lifecycle() {
+        let events = vec![
+            LiveJournalEvent::new(
+                "run-1",
+                "event-1",
+                LiveJournalEventType::MakerRiskApproved,
+                1,
+                serde_json::json!({"intent_id":"intent-1"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-2",
+                LiveJournalEventType::MakerOrderSubmitAttempted,
+                2,
+                serde_json::json!({"intent_id":"intent-1"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-3",
+                LiveJournalEventType::MakerOrderAccepted,
+                3,
+                serde_json::json!({"order_id":"order-1","status":"live"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-4",
+                LiveJournalEventType::MakerOrderPartiallyFilled,
+                4,
+                serde_json::json!({"order_id":"order-1","trade_id":"trade-1"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-5",
+                LiveJournalEventType::MakerOrderCanceled,
+                5,
+                serde_json::json!({"order_id":"order-1","status":"canceled"}),
+            ),
+            LiveJournalEvent::new(
+                "run-1",
+                "event-6",
+                LiveJournalEventType::MakerReconciliationPassed,
+                6,
+                serde_json::json!({"status":"passed"}),
+            ),
+        ];
+
+        let state = reduce_live_journal_events(&events).expect("events reduce");
+
+        assert!(state.intents.contains("intent-1"));
+        assert!(state.orders.contains_key("order-1"));
+        assert!(state.partially_filled_orders.contains("order-1"));
+        assert!(state.canceled_orders.contains("order-1"));
+        assert_eq!(state.reconciliation_mismatch_count, 0);
+    }
+
+    #[test]
+    fn live_order_journal_replay_fails_closed_on_malformed_la5_payload() {
+        let events = vec![LiveJournalEvent::new(
+            "run-1",
+            "event-1",
+            LiveJournalEventType::MakerOrderAccepted,
+            1,
+            serde_json::json!({"intent_id":"intent-1"}),
+        )];
+
+        let error = reduce_live_journal_events(&events).expect_err("malformed payload fails");
+
+        assert!(error.to_string().contains("missing non-empty order_id"));
+    }
+
+    #[test]
+    fn live_order_journal_allows_la5_submit_attempt_before_order_id_exists() {
+        let events = vec![LiveJournalEvent::new(
+            "run-1",
+            "event-1",
+            LiveJournalEventType::MakerOrderSubmitAttempted,
+            1,
+            serde_json::json!({"intent_id":"intent-1"}),
+        )];
+
+        let state = reduce_live_journal_events(&events).expect("pre-submit event reduces");
+
+        assert!(state.intents.contains("intent-1"));
+        assert!(state.orders.is_empty());
     }
 
     #[test]

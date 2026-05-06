@@ -6,7 +6,7 @@ use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use polymarket_15m_arb_bot::{
@@ -41,17 +41,31 @@ use polymarket_15m_arb_bot::{
         self, AccountPreflight, AuthenticatedReadbackInput, AuthenticatedReadbackPreflightEvidence,
         BalanceAllowanceReadback, L2ReadbackCredentials, OpenOrderReadback,
         ReadbackPreflightReport, ReadbackPrerequisites, SignatureType, TradeReadback,
+        TradeReadbackStatus,
     },
     live_beta_signing,
-    live_executor::{ShadowLiveDecision, ShadowLiveReport},
+    live_executor::{
+        ExecutionDecision, ExecutionSink, LiveMakerExecution, LiveMakerExecutionContext,
+        ShadowLiveDecision, ShadowLiveReport,
+    },
     live_fill_canary::{
         self, LiveAlphaApprovalArtifact, LiveAlphaFillCanaryCapState, LiveAlphaFillSubmitInput,
+    },
+    live_maker_micro::{
+        cancel_exact_maker_order_with_official_sdk, post_maker_heartbeat_with_official_sdk,
+        read_maker_order_with_official_sdk, submit_maker_order_with_official_sdk,
+        LiveMakerOrderPlan, LiveMakerOrderReadbackReport, LiveMakerSubmissionReport,
+        LiveMakerSubmitInput,
     },
     live_order_journal::{
         reduce_live_journal_events, LiveJournalEvent, LiveJournalEventType, LiveOrderJournal,
     },
     live_position_book::LivePositionBook,
-    live_reconciliation::{LiveReconciliationInput, LocalLiveState},
+    live_reconciliation::{
+        reconcile_live_state, LiveReconciliationInput, LocalLiveState, VenueLiveState,
+        VenueOrderState, VenueOrderStatus, VenueTradeState, VenueTradeStatus,
+    },
+    live_risk_engine::{LiveRiskContext, LiveRiskDecision, LiveRiskEngine},
     live_startup_recovery::{
         self, LiveStartupRecoveryBlockReason, LiveStartupRecoveryInput, LiveStartupRecoveryReport,
         LiveStartupRecoveryStatus, StartupRecoveryCheckStatus,
@@ -86,6 +100,7 @@ use polymarket_15m_arb_bot::{
         PostgresMarketStore, RawMessage, RiskEvent, StorageBackend, StorageError,
     },
 };
+use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::net::TcpListener;
@@ -343,6 +358,31 @@ enum Commands {
         )]
         order_cap_state: PathBuf,
     },
+    /// Dry-run or execute the gated LA5 maker-only micro path.
+    LiveAlphaMakerMicro {
+        #[arg(long, help = "Validate LA5 maker risk/order shape without submitting")]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Final gated mode; may submit only after approval artifact and all gates pass"
+        )]
+        human_approved: bool,
+        #[arg(long, help = "Approval ID from the LA5 approval artifact")]
+        approval_id: Option<String>,
+        #[arg(
+            long,
+            help = "Local LA5 approval artifact with exact account/risk/session bounds"
+        )]
+        approval_artifact: Option<PathBuf>,
+        #[arg(long, default_value_t = 3, help = "Sequential LA5 order cap")]
+        max_orders: u64,
+        #[arg(
+            long,
+            default_value_t = 300,
+            help = "LA5 session duration cap in seconds"
+        )]
+        max_duration_sec: u64,
+    },
 }
 
 impl Commands {
@@ -355,6 +395,7 @@ impl Commands {
             Commands::LiveCancel { .. } => "live-cancel",
             Commands::LiveAlphaPreflight { .. } => "live-alpha-preflight",
             Commands::LiveAlphaFillCanary { .. } => "live-alpha-fill-canary",
+            Commands::LiveAlphaMakerMicro { .. } => "live-alpha-maker-micro",
         }
     }
 
@@ -367,6 +408,7 @@ impl Commands {
             Commands::LiveCancel { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaPreflight { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaFillCanary { .. } => RuntimeMode::Validate,
+            Commands::LiveAlphaMakerMicro { .. } => RuntimeMode::Validate,
         }
     }
 }
@@ -759,6 +801,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     approval_id,
                     &approval_artifact,
                     &order_cap_state,
+                )
+                .await?;
+            }
+            Commands::LiveAlphaMakerMicro {
+                dry_run,
+                human_approved,
+                approval_id,
+                approval_artifact,
+                max_orders,
+                max_duration_sec,
+            } => {
+                run_live_alpha_maker_micro_command(
+                    &config,
+                    &run_id,
+                    LiveAlphaMakerMicroCommandArgs {
+                        dry_run,
+                        human_approved,
+                        approval_id,
+                        approval_artifact,
+                        max_orders,
+                        max_duration_sec,
+                    },
                 )
                 .await?;
             }
@@ -2788,6 +2852,1433 @@ async fn run_live_alpha_fill_canary_command(
     Ok(())
 }
 
+struct LiveAlphaMakerMicroCommandArgs {
+    dry_run: bool,
+    human_approved: bool,
+    approval_id: Option<String>,
+    approval_artifact: Option<PathBuf>,
+    max_orders: u64,
+    max_duration_sec: u64,
+}
+
+async fn run_live_alpha_maker_micro_command(
+    config: &AppConfig,
+    run_id: &str,
+    args: LiveAlphaMakerMicroCommandArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let LiveAlphaMakerMicroCommandArgs {
+        dry_run,
+        human_approved,
+        approval_id,
+        approval_artifact,
+        max_orders,
+        max_duration_sec,
+    } = args;
+    if dry_run == human_approved {
+        return Err(
+            "live-alpha-maker-micro requires exactly one of --dry-run or --human-approved".into(),
+        );
+    }
+    if max_orders == 0 || max_orders > 3 {
+        return Err("LA5 max-orders must be between 1 and 3".into());
+    }
+    if max_duration_sec == 0 || max_duration_sec > 300 {
+        return Err("LA5 max-duration-sec must be between 1 and 300".into());
+    }
+    if !config.live_alpha.enabled
+        || config.live_alpha.mode != LiveAlphaMode::MakerMicro
+        || !config.live_alpha.maker.enabled
+    {
+        return Err(
+            "LA5 maker micro requires live_alpha.enabled=true, mode=maker_micro, and maker.enabled=true"
+                .into(),
+        );
+    }
+
+    if human_approved {
+        if !live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED {
+            return Err("LA5 live maker submit requires --features live-alpha-orders".into());
+        }
+        let approval_id = approval_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or("live-alpha-maker-micro --human-approved requires --approval-id")?;
+        let approval_artifact = approval_artifact
+            .as_deref()
+            .ok_or("live-alpha-maker-micro --human-approved requires --approval-artifact")?;
+        let approval_text = fs::read_to_string(approval_artifact)?;
+        validate_la5_approval_artifact_text(&approval_text, approval_id)?;
+
+        println!("live_alpha_maker_micro_approval_id={approval_id}");
+        println!(
+            "live_alpha_maker_micro_approval_artifact={}",
+            approval_artifact.display()
+        );
+        return run_live_alpha_maker_micro_live_session(
+            config,
+            run_id,
+            approval_id,
+            max_orders,
+            max_duration_sec,
+        )
+        .await;
+    }
+
+    let now_ms = unix_time_ms();
+    let now_unix = unix_time_secs();
+    let intent = sample_la5_maker_intent(now_ms);
+    let risk_context = live_risk_context_for_la5_dry_run(config, now_ms);
+    let risk_decision =
+        LiveRiskEngine::new(config.live_alpha.risk.clone()).evaluate(&intent, &risk_context);
+    let approval = match risk_decision {
+        LiveRiskDecision::Approved(approval) => approval,
+        LiveRiskDecision::Rejected(rejected) => {
+            println!("live_alpha_maker_micro_status=blocked");
+            println!(
+                "live_alpha_maker_micro_block_reasons={}",
+                rejected.reason_codes.join(",")
+            );
+            return Err(format!(
+                "LA5 maker micro dry-run risk rejected: {}",
+                rejected.reason_codes.join(",")
+            )
+            .into());
+        }
+        LiveRiskDecision::Halt(halt) => {
+            println!("live_alpha_maker_micro_status=halted");
+            println!("live_alpha_maker_micro_halt_reason={}", halt.reason);
+            return Err(format!("LA5 maker micro dry-run halted: {}", halt.reason).into());
+        }
+    };
+
+    let mut maker_execution = LiveMakerExecution::new(LiveMakerExecutionContext {
+        risk_approval: approval.clone(),
+        maker_config: config.live_alpha.maker.clone(),
+        now_unix,
+        human_approved,
+    });
+    let maker_decision = maker_execution.handle_intent(intent.clone());
+    let ExecutionDecision::LiveMaker(maker_decision) = maker_decision else {
+        return Err("LA5 maker execution returned a non-maker decision".into());
+    };
+    let plan = maker_decision
+        .order_plan
+        .clone()
+        .ok_or("LA5 maker execution did not build an order plan")?;
+
+    println!("live_alpha_maker_micro_status=ok");
+    println!("run_id={run_id}");
+    if dry_run {
+        println!("live_alpha_maker_micro_not_submitted=true");
+    }
+    println!("live_alpha_maker_micro_max_orders={max_orders}");
+    println!("live_alpha_maker_micro_max_duration_sec={max_duration_sec}");
+    println!(
+        "live_alpha_maker_micro_effective_quote_ttl_seconds={}",
+        plan.effective_quote_ttl_seconds
+    );
+    println!(
+        "live_alpha_maker_micro_gtd_expiration_unix={}",
+        plan.gtd_expiration_unix
+    );
+    println!(
+        "live_alpha_maker_micro_cancel_after_unix={}",
+        plan.cancel_after_unix
+    );
+    println!(
+        "live_alpha_maker_micro_order_plan={}",
+        serde_json::to_string(&plan)?
+    );
+
+    if dry_run {
+        return Ok(());
+    }
+    Ok(())
+}
+
+fn validate_la5_approval_artifact_text(
+    text: &str,
+    approval_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut errors = Vec::<String>::new();
+    if !text.contains(approval_id) {
+        errors.push("approval_id_missing".to_string());
+    }
+    if !text.contains("Status: LA5 APPROVED FOR THIS RUN ONLY") {
+        errors.push("approval_status_missing".to_string());
+    }
+    if text.contains("[human name after reviewing PR]")
+        || text.contains("[execution date]")
+        || text.contains("PENDING")
+        || text.contains("TBD")
+    {
+        errors.push("human_approval_or_live_readback_pending".to_string());
+    }
+    for field in LA5_APPROVAL_REQUIRED_FIELDS {
+        match la5_approval_table_value(text, field) {
+            Some(value) if la5_approval_value_is_final(&value) => {}
+            Some(_) => errors.push(format!("approval_field_pending:{field}")),
+            None => errors.push(format!("approval_field_missing:{field}")),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        errors.sort_unstable();
+        errors.dedup();
+        Err(format!("LA5 approval artifact is not final: {}", errors.join(",")).into())
+    }
+}
+
+const LA5_APPROVAL_REQUIRED_FIELDS: &[&str] = &[
+    "approved_wallet",
+    "approved_funder",
+    "max_single_order_notional",
+    "max_total_live_notional",
+    "max_available_pusd_usage",
+    "max_reserved_pusd",
+    "max_fee_spend",
+    "max_orders",
+    "max_open_orders",
+    "max_duration_sec",
+    "no_trade_seconds_before_close",
+    "ttl_seconds",
+    "venue_gtd_expiration_delta",
+    "signature_type",
+    "available_pusd_units",
+    "reserved_pusd_units",
+    "open_order_count",
+    "heartbeat_status",
+    "funder_allowance_units",
+    "rollback_owner",
+    "monitoring_owner",
+    "approval_id",
+    "approval_date",
+];
+
+fn la5_approval_table_value(text: &str, field: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
+        if cells.len() >= 3 && cells[1] == field {
+            Some(cells[2].trim_matches('`').trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn la5_approval_value_is_final(value: &str) -> bool {
+    let trimmed = value.trim();
+    let upper = trimmed.to_ascii_uppercase();
+    !trimmed.is_empty()
+        && !upper.contains("PENDING")
+        && !upper.contains("TBD")
+        && !upper.contains("TODO")
+        && !upper.contains("BLOCKED")
+        && !upper.contains("UNAVAILABLE")
+        && !upper.contains("NOT RUN")
+        && !upper.contains("UNKNOWN")
+        && !upper.contains("MISSING")
+        && !trimmed.starts_with('[')
+        && !trimmed.ends_with(']')
+}
+
+fn sample_la5_maker_intent(
+    now_ms: i64,
+) -> polymarket_15m_arb_bot::execution_intent::ExecutionIntent {
+    polymarket_15m_arb_bot::execution_intent::ExecutionIntent {
+        intent_id: "la5-dry-run-intent-1".to_string(),
+        strategy_snapshot_id: "la5-dry-run-snapshot".to_string(),
+        market_slug: "btc-updown-15m-la5-dry-run".to_string(),
+        condition_id: "la5-dry-run-condition".to_string(),
+        token_id: "token-up".to_string(),
+        asset_symbol: "BTC".to_string(),
+        asset: Asset::Btc,
+        outcome: "Up".to_string(),
+        side: Side::Buy,
+        price: 0.20,
+        size: 1.0,
+        notional: 0.20,
+        order_type: "GTD".to_string(),
+        time_in_force: "GTD".to_string(),
+        post_only: true,
+        expiry: None,
+        fair_probability: 0.23,
+        edge_bps: 300.0,
+        reference_price: 100_000.0,
+        reference_source_timestamp: Some(now_ms),
+        book_snapshot_id: "la5-dry-run-book".to_string(),
+        best_bid: Some(0.19),
+        best_ask: Some(0.21),
+        spread: Some(0.02),
+        created_at: now_ms,
+    }
+}
+
+fn live_risk_context_for_la5_dry_run(config: &AppConfig, now_ms: i64) -> LiveRiskContext {
+    LiveRiskContext {
+        now_ms: Some(now_ms),
+        market_end_ms: Some(now_ms.saturating_add(900_000)),
+        effective_quote_ttl_seconds: config.live_alpha.maker.ttl_seconds,
+        available_pusd: config.live_alpha.risk.max_available_pusd_usage,
+        reserved_pusd: 0.0,
+        up_token_id: Some("token-up".to_string()),
+        down_token_id: Some("token-down".to_string()),
+        open_order_count: 0,
+        open_orders_per_market: 0,
+        open_orders_per_asset: 0,
+        book_age_ms: Some(0),
+        reference_age_ms: Some(0),
+        geoblock_passed: true,
+        heartbeat_healthy: true,
+        reconciliation_clean: true,
+        ..LiveRiskContext::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct La5MakerMarketIntent {
+    intent: polymarket_15m_arb_bot::execution_intent::ExecutionIntent,
+    market: Market,
+    best_bid: f64,
+    best_ask: f64,
+    best_bid_size: Option<f64>,
+    best_ask_size: Option<f64>,
+    tick_size: f64,
+    min_order_size: f64,
+    book_snapshot_id: String,
+    book_age_ms: u64,
+    reference_snapshot_id: String,
+    reference_age_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct La5MakerOrderOutcome {
+    sequence: u64,
+    intent_id: String,
+    market_slug: String,
+    token_id: String,
+    outcome: String,
+    side: Side,
+    price: f64,
+    size: f64,
+    notional: f64,
+    gtd_expiration_unix: u64,
+    cancel_after_unix: u64,
+    order_id: String,
+    accepted_status: String,
+    final_status: String,
+    canceled: bool,
+    cancel_request_sent: bool,
+    exact_cancel_confirmed: bool,
+    venue_final_canceled: bool,
+    filled: bool,
+    trade_ids: Vec<String>,
+    pre_submit_available_pusd_units: u64,
+    post_order_available_pusd_units: u64,
+    final_available_pusd_units: u64,
+    final_reserved_pusd_units: u64,
+    reconciliation_status: String,
+    reconciliation_mismatches: String,
+}
+
+async fn run_live_alpha_maker_micro_live_session(
+    config: &AppConfig,
+    run_id: &str,
+    approval_id: &str,
+    max_orders: u64,
+    max_duration_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let journal_path = config
+        .live_alpha
+        .journal_path()
+        .ok_or("LA5 requires live_alpha.journal_path for journal/replay evidence")?;
+    let journal = LiveOrderJournal::new(journal_path);
+    journal.replay()?;
+
+    append_la5_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::MakerMicroStarted,
+        serde_json::json!({
+            "approval_id": approval_id,
+            "max_orders": max_orders,
+            "max_duration_sec": max_duration_sec,
+        }),
+    )?;
+    append_la5_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::MakerMicroApprovalAccepted,
+        serde_json::json!({
+            "approval_id": approval_id,
+            "scope": "exactly_3_maker_only_post_only_gtd_micro_orders",
+        }),
+    )?;
+
+    let geoblock = run_geoblock_validation(config).await?;
+    if geoblock.blocked {
+        append_la5_journal_event(
+            &journal,
+            run_id,
+            LiveJournalEventType::MakerMicroHalted,
+            serde_json::json!({
+                "status": "halted",
+                "reason": "geoblock_not_passed",
+                "geoblock_result": geoblock_result_label(&geoblock),
+            }),
+        )?;
+        return Err(format!(
+            "LA5 live maker blocked: {}",
+            geoblock_result_label(&geoblock)
+        )
+        .into());
+    }
+
+    let account = lb4_account_preflight(config)?;
+    let canary_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.canary_secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    if !canary_secret_report.all_present() {
+        append_la5_journal_event(
+            &journal,
+            run_id,
+            LiveJournalEventType::MakerMicroHalted,
+            serde_json::json!({"status": "halted", "reason": "canary_private_key_handle_missing"}),
+        )?;
+        return Err("LA5 live maker blocked: canary_private_key_handle_missing".into());
+    }
+
+    let initial_readback = live_alpha_authenticated_readback(config).await?;
+    require_la5_pre_submit_readback("initial", &initial_readback)?;
+    let baseline_trade_ids = initial_readback
+        .trades
+        .iter()
+        .map(|trade| trade.id.clone())
+        .collect::<BTreeSet<_>>();
+    let initial_allowance_units = initial_readback
+        .collateral
+        .as_ref()
+        .map(|collateral| collateral.allowance_units)
+        .ok_or("LA5 live readback missing collateral allowance evidence")?;
+
+    println!("live_alpha_maker_micro_live_readback_status=passed");
+    println!(
+        "live_alpha_maker_micro_available_pusd_units={}",
+        initial_readback.report.available_pusd_units
+    );
+    println!(
+        "live_alpha_maker_micro_reserved_pusd_units={}",
+        initial_readback.report.reserved_pusd_units
+    );
+    println!(
+        "live_alpha_maker_micro_open_order_count={}",
+        initial_readback.report.open_order_count
+    );
+    println!("live_alpha_maker_micro_funder_allowance_units={initial_allowance_units}");
+    println!(
+        "live_alpha_maker_micro_heartbeat={}",
+        initial_readback.report.heartbeat
+    );
+    println!(
+        "live_alpha_maker_micro_baseline_trade_count={}",
+        initial_readback.trades.len()
+    );
+
+    let started = Instant::now();
+    let mut outcomes = Vec::<La5MakerOrderOutcome>::new();
+    let mut submit_timestamps = Vec::<Instant>::new();
+    let mut cancel_timestamps = Vec::<Instant>::new();
+    let mut cumulative_notional = 0.0_f64;
+
+    for sequence in 1..=max_orders {
+        if started.elapsed() >= Duration::from_secs(max_duration_sec) {
+            return Err(
+                "LA5 live maker blocked: max_duration_elapsed_before_exact_order_count".into(),
+            );
+        }
+        wait_for_la5_rate_slot(
+            &submit_timestamps,
+            config.live_alpha.risk.max_submit_rate_per_min,
+            started,
+            max_duration_sec,
+        )
+        .await?;
+
+        let pre_submit_readback = live_alpha_authenticated_readback(config).await?;
+        require_la5_pre_submit_readback("pre_submit", &pre_submit_readback)?;
+        let market_intent = select_la5_maker_market_intent(
+            config,
+            sequence,
+            max_orders,
+            cumulative_notional,
+            pre_submit_readback.report.available_pusd_units,
+        )
+        .await?;
+        let risk_context = la5_live_risk_context(
+            config,
+            &market_intent,
+            &pre_submit_readback,
+            cumulative_notional,
+            recent_count_last_min(&submit_timestamps),
+        )?;
+        let risk_decision = LiveRiskEngine::new(config.live_alpha.risk.clone())
+            .evaluate(&market_intent.intent, &risk_context);
+        let approval = match risk_decision {
+            LiveRiskDecision::Approved(approval) => {
+                append_la5_journal_event(
+                    &journal,
+                    run_id,
+                    LiveJournalEventType::MakerRiskApproved,
+                    serde_json::json!({
+                        "intent_id": approval.intent_id,
+                        "approved_notional": approval.approved_notional,
+                        "approved_ttl_seconds": approval.approved_ttl_seconds,
+                        "approved_side": approval.approved_side,
+                        "reason_codes": approval.reason_codes,
+                    }),
+                )?;
+                approval
+            }
+            LiveRiskDecision::Rejected(rejected) => {
+                append_la5_journal_event(
+                    &journal,
+                    run_id,
+                    LiveJournalEventType::MakerRiskRejected,
+                    serde_json::json!({
+                        "intent_id": rejected.intent_id,
+                        "reason_codes": rejected.reason_codes,
+                    }),
+                )?;
+                return Err(format!(
+                    "LA5 live maker risk rejected: {}",
+                    rejected.reason_codes.join(",")
+                )
+                .into());
+            }
+            LiveRiskDecision::Halt(halt) => {
+                append_la5_journal_event(
+                    &journal,
+                    run_id,
+                    LiveJournalEventType::MakerRiskHalt,
+                    serde_json::json!({
+                        "intent_id": halt.intent_id,
+                        "reason": halt.reason,
+                    }),
+                )?;
+                return Err(format!("LA5 live maker risk halted: {}", halt.reason).into());
+            }
+        };
+
+        let mut maker_execution = LiveMakerExecution::new(LiveMakerExecutionContext {
+            risk_approval: approval,
+            maker_config: config.live_alpha.maker.clone(),
+            now_unix: unix_time_secs(),
+            human_approved: true,
+        });
+        let ExecutionDecision::LiveMaker(decision) =
+            maker_execution.handle_intent(market_intent.intent.clone())
+        else {
+            return Err("LA5 maker execution returned a non-maker decision".into());
+        };
+        let plan = decision
+            .order_plan
+            .clone()
+            .ok_or("LA5 maker execution did not build an order plan")?;
+        let submit_input = la5_maker_submit_input(config, &account, plan.clone());
+
+        append_la5_journal_event(
+            &journal,
+            run_id,
+            LiveJournalEventType::MakerOrderSubmitAttempted,
+            serde_json::json!({
+                "intent_id": plan.intent_id,
+                "sequence": sequence,
+                "market_slug": market_intent.market.slug,
+                "condition_id": market_intent.market.condition_id,
+                "token_id": plan.token_id,
+                "outcome": plan.outcome,
+                "side": plan.side,
+                "price": plan.price,
+                "size": plan.size,
+                "notional": plan.notional,
+                "order_type": plan.order_type,
+                "post_only": plan.post_only,
+                "best_bid": market_intent.best_bid,
+                "best_ask": market_intent.best_ask,
+                "best_bid_size": market_intent.best_bid_size,
+                "best_ask_size": market_intent.best_ask_size,
+                "tick_size": market_intent.tick_size,
+                "min_order_size": market_intent.min_order_size,
+                "book_snapshot_id": market_intent.book_snapshot_id,
+                "book_age_ms": market_intent.book_age_ms,
+                "reference_snapshot_id": market_intent.reference_snapshot_id,
+                "reference_age_ms": market_intent.reference_age_ms,
+                "effective_quote_ttl_seconds": plan.effective_quote_ttl_seconds,
+                "gtd_expiration_unix": plan.gtd_expiration_unix,
+                "cancel_after_unix": plan.cancel_after_unix,
+            }),
+        )?;
+
+        let submitted_at = Instant::now();
+        let submission = match submit_maker_order_with_official_sdk(submit_input.clone()).await {
+            Ok(submission) => submission,
+            Err(error) => {
+                append_la5_journal_event(
+                    &journal,
+                    run_id,
+                    LiveJournalEventType::MakerOrderRejected,
+                    serde_json::json!({
+                        "intent_id": plan.intent_id,
+                        "sequence": sequence,
+                        "status": "submit_error",
+                        "error": error.to_string(),
+                    }),
+                )?;
+                return Err(format!("LA5 maker submit failed before acceptance: {error}").into());
+            }
+        };
+        submit_timestamps.push(submitted_at);
+        println!(
+            "live_alpha_maker_micro_order_{sequence}_submission={}",
+            serde_json::to_string(&submission)?
+        );
+        if !submission.success || submission.order_id.trim().is_empty() {
+            append_la5_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::MakerOrderRejected,
+                serde_json::json!({
+                    "intent_id": plan.intent_id,
+                    "sequence": sequence,
+                    "status": submission.venue_status,
+                    "order_id": submission.order_id,
+                }),
+            )?;
+            return Err(format!(
+                "LA5 maker submit rejected by venue: status={}",
+                submission.venue_status
+            )
+            .into());
+        }
+        append_la5_journal_event(
+            &journal,
+            run_id,
+            LiveJournalEventType::MakerOrderAccepted,
+            serde_json::json!({
+                "intent_id": plan.intent_id,
+                "order_id": submission.order_id,
+                "sequence": sequence,
+                "status": submission.venue_status,
+                "trade_ids": submission.trade_ids,
+            }),
+        )?;
+
+        let heartbeat_id =
+            maintain_la5_heartbeat_until_cancel(&submit_input, plan.cancel_after_unix).await?;
+        println!("live_alpha_maker_micro_order_{sequence}_heartbeat_id={heartbeat_id}");
+
+        let post_order_readback = live_alpha_authenticated_readback(config).await?;
+        let order_readback =
+            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+        let order_trade_ids = la5_order_trade_ids(
+            &baseline_trade_ids,
+            &post_order_readback.trades,
+            &submission,
+            &order_readback,
+        );
+        let open_reconciliation = reconcile_la5_order_state(
+            run_id,
+            &submission.order_id,
+            &order_readback,
+            &post_order_readback,
+            &order_trade_ids,
+            false,
+        )?;
+        append_la5_reconciliation_event(
+            &journal,
+            run_id,
+            &submission.order_id,
+            &open_reconciliation,
+        )?;
+        if open_reconciliation.status() != "passed" {
+            return Err(format!(
+                "LA5 post-submit reconciliation failed: {}",
+                open_reconciliation.mismatch_list()
+            )
+            .into());
+        }
+
+        wait_for_la5_rate_slot(
+            &cancel_timestamps,
+            config.live_alpha.risk.max_cancel_rate_per_min,
+            started,
+            max_duration_sec,
+        )
+        .await?;
+        let latest_order =
+            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+        let mut cancel_request_sent = false;
+        let mut exact_cancel_confirmed = false;
+        if la5_order_status_is_live(&latest_order) {
+            cancel_request_sent = true;
+            let canceled_ids =
+                cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                    .await?;
+            cancel_timestamps.push(Instant::now());
+            exact_cancel_confirmed = canceled_ids
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(&submission.order_id));
+            if !exact_cancel_confirmed {
+                append_la5_journal_event(
+                    &journal,
+                    run_id,
+                    LiveJournalEventType::MakerReconciliationFailed,
+                    serde_json::json!({
+                        "status": "cancel_not_confirmed",
+                        "order_id": submission.order_id,
+                        "canceled_ids": canceled_ids,
+                    }),
+                )?;
+                return Err("LA5 exact cancel did not return the submitted order ID".into());
+            }
+            append_la5_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::MakerOrderCanceled,
+                serde_json::json!({
+                    "order_id": submission.order_id,
+                    "intent_id": plan.intent_id,
+                    "sequence": sequence,
+                    "status": "cancel_requested",
+                }),
+            )?;
+        }
+
+        let final_order =
+            read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+        let venue_final_canceled = la5_order_status_is_canceled(&final_order);
+        let final_readback = live_alpha_authenticated_readback(config).await?;
+        let final_trade_ids = la5_order_trade_ids(
+            &baseline_trade_ids,
+            &final_readback.trades,
+            &submission,
+            &final_order,
+        );
+        let filled = la5_order_status_is_filled(&final_order) || !final_trade_ids.is_empty();
+        if filled {
+            append_la5_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::MakerOrderFilled,
+                serde_json::json!({
+                    "order_id": submission.order_id,
+                    "intent_id": plan.intent_id,
+                    "sequence": sequence,
+                    "status": final_order.venue_status,
+                    "trade_ids": final_trade_ids,
+                }),
+            )?;
+        }
+        let final_reconciliation = reconcile_la5_order_state(
+            run_id,
+            &submission.order_id,
+            &final_order,
+            &final_readback,
+            &final_trade_ids,
+            true,
+        )?;
+        append_la5_reconciliation_event(
+            &journal,
+            run_id,
+            &submission.order_id,
+            &final_reconciliation,
+        )?;
+        if final_reconciliation.status() != "passed" {
+            return Err(format!(
+                "LA5 final reconciliation failed: {}",
+                final_reconciliation.mismatch_list()
+            )
+            .into());
+        }
+        if final_readback.report.open_order_count != 0
+            || final_readback.report.reserved_pusd_units != 0
+        {
+            return Err(format!(
+                "LA5 final readback not flat after order {}: open_orders={}, reserved_pusd_units={}",
+                submission.order_id,
+                final_readback.report.open_order_count,
+                final_readback.report.reserved_pusd_units
+            )
+            .into());
+        }
+
+        cumulative_notional += plan.notional;
+        outcomes.push(La5MakerOrderOutcome {
+            sequence,
+            intent_id: plan.intent_id.clone(),
+            market_slug: market_intent.market.slug.clone(),
+            token_id: plan.token_id.clone(),
+            outcome: plan.outcome.clone(),
+            side: plan.side,
+            price: plan.price,
+            size: plan.size,
+            notional: plan.notional,
+            gtd_expiration_unix: plan.gtd_expiration_unix,
+            cancel_after_unix: plan.cancel_after_unix,
+            order_id: submission.order_id.clone(),
+            accepted_status: submission.venue_status.clone(),
+            final_status: final_order.venue_status.clone(),
+            canceled: venue_final_canceled,
+            cancel_request_sent,
+            exact_cancel_confirmed,
+            venue_final_canceled,
+            filled,
+            trade_ids: final_trade_ids,
+            pre_submit_available_pusd_units: pre_submit_readback.report.available_pusd_units,
+            post_order_available_pusd_units: post_order_readback.report.available_pusd_units,
+            final_available_pusd_units: final_readback.report.available_pusd_units,
+            final_reserved_pusd_units: final_readback.report.reserved_pusd_units,
+            reconciliation_status: final_reconciliation.status().to_string(),
+            reconciliation_mismatches: final_reconciliation.mismatch_list(),
+        });
+    }
+
+    if outcomes.len() != max_orders as usize {
+        return Err(format!(
+            "LA5 exact order count mismatch: expected {max_orders}, observed {}",
+            outcomes.len()
+        )
+        .into());
+    }
+    append_la5_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::MakerMicroStopped,
+        serde_json::json!({
+            "status": "completed",
+            "orders": outcomes,
+            "cumulative_notional": cumulative_notional,
+        }),
+    )?;
+    let replay_state = journal.replay_state(run_id)?;
+    if replay_state.reconciliation_mismatch_count != 0 || replay_state.risk_halted {
+        return Err(
+            "LA5 journal replay found mismatch or risk halt after completed session".into(),
+        );
+    }
+
+    println!("live_alpha_maker_micro_status=completed");
+    println!("run_id={run_id}");
+    println!("live_alpha_maker_micro_orders_submitted={}", outcomes.len());
+    println!("live_alpha_maker_micro_cumulative_notional={cumulative_notional:.6}");
+    println!(
+        "live_alpha_maker_micro_order_outcomes={}",
+        serde_json::to_string(&outcomes)?
+    );
+    println!("live_alpha_maker_micro_journal_replay_status=passed");
+    Ok(())
+}
+
+fn require_la5_pre_submit_readback(
+    label: &str,
+    readback: &ReadbackPreflightValidation,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !readback.report.live_network_enabled {
+        return Err(format!("LA5 {label} readback blocked: live_network_disabled").into());
+    }
+    if !readback.report.passed() {
+        return Err(format!(
+            "LA5 {label} readback blocked: {}",
+            readback.report.block_reasons.join(",")
+        )
+        .into());
+    }
+    if readback.report.open_order_count != 0 {
+        return Err(format!("LA5 {label} readback blocked: open_orders_nonzero").into());
+    }
+    if readback.report.reserved_pusd_units != 0 {
+        return Err(format!("LA5 {label} readback blocked: reserved_pusd_nonzero").into());
+    }
+    if !matches!(
+        readback.report.heartbeat,
+        "not_started_no_open_orders" | "healthy"
+    ) {
+        return Err(format!(
+            "LA5 {label} readback blocked: heartbeat_status={}",
+            readback.report.heartbeat
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn select_la5_maker_market_intent(
+    config: &AppConfig,
+    sequence: u64,
+    max_orders: u64,
+    cumulative_notional: f64,
+    available_pusd_units: u64,
+) -> Result<La5MakerMarketIntent, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    let markets = select_paper_markets(&discovery_run.markets, now_ms)?;
+    let mut blockers = Vec::new();
+    for market in markets {
+        match build_la5_market_intent_from_market(
+            config,
+            sequence,
+            max_orders,
+            cumulative_notional,
+            available_pusd_units,
+            now_ms,
+            market,
+        )
+        .await
+        {
+            Ok(intent) => return Ok(intent),
+            Err(error) => blockers.push(error.to_string()),
+        }
+    }
+    Err(format!(
+        "LA5 could not select a current BTC/ETH/SOL maker market: {}",
+        blockers.join(";")
+    )
+    .into())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_la5_market_intent_from_market(
+    config: &AppConfig,
+    sequence: u64,
+    max_orders: u64,
+    cumulative_notional: f64,
+    available_pusd_units: u64,
+    now_ms: i64,
+    market: Market,
+) -> Result<La5MakerMarketIntent, Box<dyn std::error::Error>> {
+    if market.end_ts
+        <= now_ms.saturating_add(
+            (config.live_alpha.risk.no_trade_seconds_before_close as i64).saturating_mul(1_000),
+        )
+    {
+        return Err(format!("{} past_or_inside_no_trade_window", market.slug).into());
+    }
+    let outcome = market
+        .outcomes
+        .iter()
+        .find(|outcome| outcome.outcome.eq_ignore_ascii_case("Up"))
+        .or_else(|| market.outcomes.first())
+        .ok_or_else(|| format!("{} missing outcome token", market.slug))?
+        .clone();
+    let book = fetch_live_alpha_book(config, &outcome.token_id)
+        .await?
+        .ok_or_else(|| format!("{} missing CLOB book", market.slug))?;
+    let (best_bid, best_bid_size) =
+        best_bid(&book).ok_or_else(|| format!("{} missing best bid", market.slug))?;
+    let (best_ask, best_ask_size) =
+        best_ask(&book).ok_or_else(|| format!("{} missing best ask", market.slug))?;
+    if best_bid >= best_ask {
+        return Err(format!("{} crossed_or_locked_book", market.slug).into());
+    }
+    let book_snapshot_id = book
+        .hash
+        .clone()
+        .unwrap_or_else(|| format!("{}:{}", book.market_id, book.token_id));
+    let book_age_ms = book
+        .source_ts
+        .and_then(|source_ts| age_ms(now_ms, source_ts))
+        .ok_or_else(|| format!("{} missing book timestamp", market.slug))?;
+    if book_age_ms > config.live_alpha.risk.max_book_staleness_ms {
+        return Err(format!("{} book_stale age_ms={book_age_ms}", market.slug).into());
+    }
+    let reference = live_alpha_reference_evidence(config, market.asset).await?;
+    let reference_snapshot_id = reference
+        .snapshot_id
+        .clone()
+        .ok_or_else(|| format!("{} missing reference snapshot", market.slug))?;
+    let reference_age_ms = reference
+        .age_ms
+        .ok_or_else(|| format!("{} missing reference age", market.slug))?;
+    if reference_age_ms > config.live_alpha.risk.max_reference_staleness_ms {
+        return Err(format!("{} reference_stale age_ms={reference_age_ms}", market.slug).into());
+    }
+    let reference_price = reference
+        .price
+        .ok_or_else(|| format!("{} missing reference price", market.slug))?;
+    let max_order_notional = la5_max_order_notional(config, max_orders, cumulative_notional);
+    let available_pusd = fixed6_units_to_decimal(available_pusd_units);
+    let max_order_notional = max_order_notional.min(available_pusd);
+    let price = la5_post_only_buy_price(
+        best_bid,
+        best_ask,
+        market.tick_size,
+        market.min_order_size,
+        max_order_notional,
+    )
+    .ok_or_else(|| format!("{} no_safe_post_only_price_under_caps", market.slug))?;
+    let size = market.min_order_size;
+    let notional = round_decimal(price * size);
+    if notional > max_order_notional + 1e-9 {
+        return Err(format!("{} notional_exceeds_la5_cap", market.slug).into());
+    }
+    let fair_probability = (price + (config.live_alpha.maker.min_edge_bps as f64 / 10_000.0))
+        .max(price)
+        .min(0.99);
+    let intent = polymarket_15m_arb_bot::execution_intent::ExecutionIntent {
+        intent_id: format!(
+            "la5-{sequence}-{}-{}",
+            market.asset.symbol().to_ascii_lowercase(),
+            now_ms
+        ),
+        strategy_snapshot_id: format!("la5-live-{sequence}-{reference_snapshot_id}"),
+        market_slug: market.slug.clone(),
+        condition_id: market.condition_id.clone(),
+        token_id: outcome.token_id.clone(),
+        asset_symbol: asset_symbol(market.asset).to_string(),
+        asset: market.asset,
+        outcome: outcome.outcome.clone(),
+        side: Side::Buy,
+        price,
+        size,
+        notional,
+        order_type: "GTD".to_string(),
+        time_in_force: "GTD".to_string(),
+        post_only: true,
+        expiry: None,
+        fair_probability,
+        edge_bps: ((fair_probability - price) * 10_000.0).max(0.0),
+        reference_price,
+        reference_source_timestamp: Some(now_ms.saturating_sub(reference_age_ms as i64)),
+        book_snapshot_id: book_snapshot_id.clone(),
+        best_bid: Some(best_bid),
+        best_ask: Some(best_ask),
+        spread: Some(best_ask - best_bid),
+        created_at: now_ms,
+    };
+    let tick_size = market.tick_size;
+    let min_order_size = market.min_order_size;
+    Ok(La5MakerMarketIntent {
+        intent,
+        market,
+        best_bid,
+        best_ask,
+        best_bid_size,
+        best_ask_size,
+        tick_size,
+        min_order_size,
+        book_snapshot_id,
+        book_age_ms,
+        reference_snapshot_id,
+        reference_age_ms,
+    })
+}
+
+fn la5_live_risk_context(
+    config: &AppConfig,
+    market: &La5MakerMarketIntent,
+    readback: &ReadbackPreflightValidation,
+    cumulative_notional: f64,
+    submit_count_last_min: u64,
+) -> Result<LiveRiskContext, Box<dyn std::error::Error>> {
+    Ok(LiveRiskContext {
+        now_ms: Some(unix_time_ms()),
+        market_end_ms: Some(market.market.end_ts),
+        effective_quote_ttl_seconds: config.live_alpha.maker.ttl_seconds,
+        available_pusd: fixed6_units_to_decimal(readback.report.available_pusd_units),
+        reserved_pusd: fixed6_units_to_decimal(readback.report.reserved_pusd_units),
+        up_token_id: market
+            .market
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.outcome.eq_ignore_ascii_case("Up"))
+            .map(|outcome| outcome.token_id.clone()),
+        down_token_id: market
+            .market
+            .outcomes
+            .iter()
+            .find(|outcome| outcome.outcome.eq_ignore_ascii_case("Down"))
+            .map(|outcome| outcome.token_id.clone()),
+        open_order_count: readback.report.open_order_count as u64,
+        open_orders_per_market: readback
+            .open_orders
+            .iter()
+            .filter(|order| {
+                order
+                    .market
+                    .eq_ignore_ascii_case(&market.market.condition_id)
+            })
+            .count() as u64,
+        open_orders_per_asset: readback.report.open_order_count as u64,
+        current_market_notional: cumulative_notional,
+        current_asset_notional: cumulative_notional,
+        current_total_live_notional: cumulative_notional,
+        submit_count_last_min,
+        book_age_ms: Some(market.book_age_ms),
+        reference_age_ms: Some(market.reference_age_ms),
+        geoblock_passed: true,
+        heartbeat_healthy: matches!(
+            readback.report.heartbeat,
+            "not_started_no_open_orders" | "healthy"
+        ),
+        reconciliation_clean: true,
+        ..LiveRiskContext::default()
+    })
+}
+
+fn la5_maker_submit_input(
+    config: &AppConfig,
+    account: &AccountPreflight,
+    plan: LiveMakerOrderPlan,
+) -> LiveMakerSubmitInput {
+    LiveMakerSubmitInput {
+        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+        signer_handle: config.live_beta.secret_handles.canary_private_key.clone(),
+        l2_access_handle: config.live_beta.secret_handles.clob_l2_access.clone(),
+        l2_secret_handle: config.live_beta.secret_handles.clob_l2_credential.clone(),
+        l2_passphrase_handle: config.live_beta.secret_handles.clob_l2_passphrase.clone(),
+        wallet_address: account.wallet_address.clone(),
+        funder_address: account.funder_address.clone(),
+        signature_type: account.signature_type,
+        plan,
+    }
+}
+
+async fn maintain_la5_heartbeat_until_cancel(
+    input: &LiveMakerSubmitInput,
+    cancel_after_unix: u64,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut heartbeat_id: Option<String> = None;
+    loop {
+        heartbeat_id =
+            Some(post_maker_heartbeat_with_official_sdk(input, heartbeat_id.as_deref()).await?);
+        let now = unix_time_secs();
+        if now >= cancel_after_unix {
+            break;
+        }
+        let remaining = cancel_after_unix.saturating_sub(now);
+        tokio::time::sleep(Duration::from_secs(remaining.min(5))).await;
+    }
+    heartbeat_id.ok_or_else(|| "LA5 heartbeat did not return an id".into())
+}
+
+async fn wait_for_la5_rate_slot(
+    attempts: &[Instant],
+    max_per_min: u64,
+    started: Instant,
+    max_duration_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if max_per_min == 0 {
+        return Err("LA5 rate limit configured as zero".into());
+    }
+    loop {
+        let recent = recent_count_last_min(attempts);
+        if recent < max_per_min {
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(max_duration_sec) {
+            return Err("LA5 max duration elapsed while waiting for rate limit slot".into());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+fn recent_count_last_min(attempts: &[Instant]) -> u64 {
+    attempts
+        .iter()
+        .filter(|attempt| attempt.elapsed() < Duration::from_secs(60))
+        .count() as u64
+}
+
+fn la5_max_order_notional(config: &AppConfig, max_orders: u64, cumulative_notional: f64) -> f64 {
+    let risk = &config.live_alpha.risk;
+    let per_order_session_cap = risk.max_total_live_notional / max_orders as f64;
+    [
+        risk.max_single_order_notional,
+        risk.max_available_pusd_usage,
+        risk.max_reserved_pusd,
+        per_order_session_cap,
+        risk.max_total_live_notional
+            .saturating_sub_f64(cumulative_notional),
+    ]
+    .into_iter()
+    .filter(|value| value.is_finite() && *value > 0.0)
+    .fold(f64::INFINITY, f64::min)
+}
+
+trait SaturatingSubF64 {
+    fn saturating_sub_f64(self, rhs: f64) -> f64;
+}
+
+impl SaturatingSubF64 for f64 {
+    fn saturating_sub_f64(self, rhs: f64) -> f64 {
+        if self > rhs && self.is_finite() && rhs.is_finite() {
+            self - rhs
+        } else {
+            0.0
+        }
+    }
+}
+
+fn la5_post_only_buy_price(
+    best_bid: f64,
+    best_ask: f64,
+    tick_size: f64,
+    min_order_size: f64,
+    max_notional: f64,
+) -> Option<f64> {
+    if !la5_valid_price(best_bid)
+        || !la5_valid_price(best_ask)
+        || best_bid >= best_ask
+        || tick_size <= 0.0
+        || min_order_size <= 0.0
+        || max_notional <= 0.0
+    {
+        return None;
+    }
+    let book_cap = if best_bid > tick_size {
+        best_bid - tick_size
+    } else {
+        best_bid
+    };
+    let cap_price = (max_notional / min_order_size)
+        .min(book_cap)
+        .min(best_ask - tick_size);
+    let price = floor_to_tick(cap_price, tick_size);
+    (price > 0.0 && price < best_ask).then_some(price)
+}
+
+fn la5_valid_price(value: f64) -> bool {
+    value.is_finite() && value > 0.0 && value < 1.0
+}
+
+fn floor_to_tick(value: f64, tick_size: f64) -> f64 {
+    round_decimal((value / tick_size).floor() * tick_size)
+}
+
+fn round_decimal(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn best_bid(book: &OrderBookSnapshot) -> Option<(f64, Option<f64>)> {
+    book.bids
+        .iter()
+        .max_by(|left, right| left.price.total_cmp(&right.price))
+        .map(|level| (level.price, Some(level.size)))
+}
+
+fn best_ask(book: &OrderBookSnapshot) -> Option<(f64, Option<f64>)> {
+    book.asks
+        .iter()
+        .min_by(|left, right| left.price.total_cmp(&right.price))
+        .map(|level| (level.price, Some(level.size)))
+}
+
+fn la5_order_trade_ids(
+    baseline_trade_ids: &BTreeSet<String>,
+    trades: &[TradeReadback],
+    submission: &LiveMakerSubmissionReport,
+    order: &LiveMakerOrderReadbackReport,
+) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    for id in submission
+        .trade_ids
+        .iter()
+        .chain(order.associate_trades.iter())
+    {
+        if !id.trim().is_empty() {
+            ids.insert(id.clone());
+        }
+    }
+    for trade in trades {
+        if baseline_trade_ids.contains(&trade.id) {
+            continue;
+        }
+        if trade
+            .order_id
+            .as_deref()
+            .is_some_and(|order_id| order_id.eq_ignore_ascii_case(&order.order_id))
+        {
+            ids.insert(trade.id.clone());
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn reconcile_la5_order_state(
+    run_id: &str,
+    order_id: &str,
+    order: &LiveMakerOrderReadbackReport,
+    readback: &ReadbackPreflightValidation,
+    trade_ids: &[String],
+    expect_flat: bool,
+) -> Result<
+    polymarket_15m_arb_bot::live_reconciliation::LiveReconciliationResult,
+    Box<dyn std::error::Error>,
+> {
+    let checked_at_ms = unix_time_ms();
+    let collateral = readback
+        .collateral
+        .as_ref()
+        .ok_or("LA5 reconciliation missing collateral readback")?;
+    let balance = balance_snapshot_from_readback(&readback.report, collateral, checked_at_ms);
+    let mut local = LocalLiveState {
+        balance: Some(balance.clone()),
+        ..LocalLiveState::default()
+    };
+    local.known_orders.insert(order_id.to_string());
+    if expect_flat {
+        local.canceled_orders.insert(order_id.to_string());
+    }
+    for trade_id in trade_ids {
+        local.known_trades.insert(trade_id.clone());
+        local.trade_order_ids.insert(order_id.to_string());
+        local
+            .trade_order_ids_by_trade
+            .insert(trade_id.clone(), order_id.to_string());
+    }
+
+    let mut venue = VenueLiveState {
+        balance: Some(balance),
+        ..VenueLiveState::default()
+    };
+    venue.orders.insert(
+        order_id.to_string(),
+        VenueOrderState {
+            order_id: order_id.to_string(),
+            status: venue_order_status_from_la5_order(order),
+            matched_size: order.size_matched,
+            remaining_size: order.remaining_size,
+        },
+    );
+    for trade in readback
+        .trades
+        .iter()
+        .filter(|trade| trade_ids.contains(&trade.id))
+    {
+        venue.trades.insert(
+            trade.id.clone(),
+            VenueTradeState {
+                trade_id: trade.id.clone(),
+                order_id: trade
+                    .order_id
+                    .clone()
+                    .unwrap_or_else(|| order_id.to_string()),
+                status: venue_trade_status_from_readback(trade.status),
+            },
+        );
+    }
+
+    Ok(reconcile_live_state(LiveReconciliationInput {
+        run_id: run_id.to_string(),
+        checked_at_ms,
+        local,
+        venue,
+        venue_position_evidence_complete: false,
+    }))
+}
+
+fn venue_order_status_from_la5_order(order: &LiveMakerOrderReadbackReport) -> VenueOrderStatus {
+    match order.venue_status.to_ascii_lowercase().as_str() {
+        "live" => {
+            if order.size_matched > 0.0 {
+                VenueOrderStatus::PartiallyFilled
+            } else {
+                VenueOrderStatus::Live
+            }
+        }
+        "matched" => {
+            if order.remaining_size <= 0.0 {
+                VenueOrderStatus::Filled
+            } else {
+                VenueOrderStatus::PartiallyFilled
+            }
+        }
+        "canceled" => VenueOrderStatus::Canceled,
+        _ => VenueOrderStatus::Unknown,
+    }
+}
+
+fn venue_trade_status_from_readback(status: TradeReadbackStatus) -> VenueTradeStatus {
+    match status {
+        TradeReadbackStatus::Matched => VenueTradeStatus::Matched,
+        TradeReadbackStatus::Mined => VenueTradeStatus::Mined,
+        TradeReadbackStatus::Confirmed => VenueTradeStatus::Confirmed,
+        TradeReadbackStatus::Retrying => VenueTradeStatus::Retrying,
+        TradeReadbackStatus::Failed => VenueTradeStatus::Failed,
+        TradeReadbackStatus::Unknown => VenueTradeStatus::Unknown,
+    }
+}
+
+fn la5_order_status_is_live(order: &LiveMakerOrderReadbackReport) -> bool {
+    matches!(
+        venue_order_status_from_la5_order(order),
+        VenueOrderStatus::Live | VenueOrderStatus::PartiallyFilled
+    )
+}
+
+fn la5_order_status_is_filled(order: &LiveMakerOrderReadbackReport) -> bool {
+    venue_order_status_from_la5_order(order) == VenueOrderStatus::Filled
+}
+
+fn la5_order_status_is_canceled(order: &LiveMakerOrderReadbackReport) -> bool {
+    venue_order_status_from_la5_order(order) == VenueOrderStatus::Canceled
+}
+
+fn append_la5_reconciliation_event(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    order_id: &str,
+    result: &polymarket_15m_arb_bot::live_reconciliation::LiveReconciliationResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event_type = if result.status() == "passed" {
+        LiveJournalEventType::MakerReconciliationPassed
+    } else {
+        LiveJournalEventType::MakerReconciliationFailed
+    };
+    append_la5_journal_event(
+        journal,
+        run_id,
+        event_type,
+        serde_json::json!({
+            "status": result.status(),
+            "order_id": order_id,
+            "mismatches": result.mismatch_list(),
+        }),
+    )
+}
+
+fn append_la5_journal_event(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    event_type: LiveJournalEventType,
+    payload: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = LiveJournalEvent::new(
+        run_id.to_string(),
+        format!(
+            "{}-la5-{}-{}",
+            run_id,
+            unix_time_ms(),
+            event_type_label(event_type)
+        ),
+        event_type,
+        unix_time_ms(),
+        payload,
+    );
+    journal.append(&event)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_live_alpha_preflight_command_result(
     config: &AppConfig,
@@ -3190,6 +4681,7 @@ async fn fetch_live_alpha_book(
 struct LiveAlphaReferenceEvidence {
     snapshot_id: Option<String>,
     age_ms: Option<u64>,
+    price: Option<f64>,
 }
 
 async fn live_alpha_reference_evidence(
@@ -3204,6 +4696,7 @@ async fn live_alpha_reference_evidence(
         return Ok(LiveAlphaReferenceEvidence {
             snapshot_id: None,
             age_ms: None,
+            price: None,
         });
     }
     let recv_wall_ts = unix_time_ms();
@@ -3257,6 +4750,7 @@ async fn live_alpha_rtds_chainlink_reference_evidence(
     Ok(LiveAlphaReferenceEvidence {
         snapshot_id: None,
         age_ms: None,
+        price: None,
     })
 }
 
@@ -3271,6 +4765,7 @@ fn live_alpha_reference_evidence_from_events(
         return LiveAlphaReferenceEvidence {
             snapshot_id: None,
             age_ms: None,
+            price: None,
         };
     };
     let source_ts = price.source_ts.unwrap_or(price.recv_wall_ts);
@@ -3282,6 +4777,7 @@ fn live_alpha_reference_evidence_from_events(
             source_ts
         )),
         age_ms: age_ms(price.recv_wall_ts, source_ts),
+        price: Some(price.price),
     }
 }
 
@@ -4033,6 +5529,12 @@ async fn run_lb4_readback_preflight_validation(
         "live_beta_readback_preflight_available_pusd_units={}",
         report.available_pusd_units
     );
+    if let Some(collateral) = &validation.collateral {
+        println!(
+            "live_beta_readback_preflight_funder_allowance_units={}",
+            collateral.allowance_units
+        );
+    }
     println!(
         "live_beta_readback_preflight_venue_state={}",
         report.venue_state
@@ -6105,6 +7607,103 @@ mod tests {
             live_alpha_fill_canary_pre_submit_not_submitted(false, true),
             None
         );
+    }
+
+    #[test]
+    fn la5_approval_artifact_rejects_pending_live_readback_fields() {
+        let artifact = r#"
+Status: PENDING LIVE READBACK AND HUMAN APPROVAL
+
+| Field | Value |
+| --- | --- |
+| approved_wallet | `0x1111111111111111111111111111111111111111` |
+| approval_id | PENDING EXECUTION RUN ID |
+"#;
+
+        let error = validate_la5_approval_artifact_text(artifact, "LA5-approval-1")
+            .expect_err("pending artifact must fail")
+            .to_string();
+
+        assert!(error.contains("approval_status_missing"));
+        assert!(error.contains("human_approval_or_live_readback_pending"));
+        assert!(error.contains("approval_field_pending:approval_id"));
+    }
+
+    #[test]
+    fn la5_approval_artifact_requires_all_final_gate_fields() {
+        let artifact = r#"
+Status: LA5 APPROVED FOR THIS RUN ONLY
+
+| Field | Value |
+| --- | --- |
+| approved_wallet | `0x1111111111111111111111111111111111111111` |
+| approved_funder | `0x2222222222222222222222222222222222222222` |
+| max_single_order_notional | `2.56` |
+| max_total_live_notional | `2.56` |
+| max_available_pusd_usage | `1.0` |
+| max_reserved_pusd | `1.0` |
+| max_fee_spend | `0.06` |
+| max_orders | `3` |
+| max_open_orders | `1` |
+| max_duration_sec | `300` |
+| no_trade_seconds_before_close | `600` |
+| ttl_seconds | `30` |
+| venue_gtd_expiration_delta | `90` |
+| signature_type | `1` |
+| available_pusd_units | `3000000` |
+| reserved_pusd_units | `0` |
+| open_order_count | `0` |
+| heartbeat_status | `not_started_no_open_orders` |
+| funder_allowance_units | `3000000` |
+| rollback_owner | `primary-agent` |
+| monitoring_owner | `primary-agent` |
+| approval_id | `LA5-approval-1` |
+| approval_date | `2026-05-05` |
+
+Approved: Operator authorized agent-run LA5; human action limited to PR merge
+"#;
+
+        validate_la5_approval_artifact_text(artifact, "LA5-approval-1")
+            .expect("complete final artifact validates");
+    }
+
+    #[test]
+    fn la5_approval_artifact_rejects_blocked_live_readback_fields() {
+        let artifact = r#"
+Status: LA5 APPROVED FOR THIS RUN ONLY
+
+| Field | Value |
+| --- | --- |
+| approved_wallet | `0x1111111111111111111111111111111111111111` |
+| approved_funder | `0x2222222222222222222222222222222222222222` |
+| max_single_order_notional | `2.56` |
+| max_total_live_notional | `2.56` |
+| max_available_pusd_usage | `1.0` |
+| max_reserved_pusd | `1.0` |
+| max_fee_spend | `0.06` |
+| max_orders | `3` |
+| max_open_orders | `1` |
+| max_duration_sec | `300` |
+| no_trade_seconds_before_close | `600` |
+| ttl_seconds | `30` |
+| venue_gtd_expiration_delta | `90` |
+| signature_type | `1` |
+| available_pusd_units | BLOCKED: authenticated REST units unavailable |
+| reserved_pusd_units | `0` |
+| open_order_count | `0` |
+| heartbeat_status | `not_started_no_open_orders` |
+| funder_allowance_units | BLOCKED: authenticated REST allowance unavailable |
+| rollback_owner | `primary-agent` |
+| monitoring_owner | `primary-agent` |
+| approval_id | `LA5-approval-1` |
+| approval_date | `2026-05-05` |
+"#;
+
+        let error = validate_la5_approval_artifact_text(artifact, "LA5-approval-1")
+            .expect_err("blocked readback evidence is not final");
+        let error = error.to_string();
+        assert!(error.contains("approval_field_pending:available_pusd_units"));
+        assert!(error.contains("approval_field_pending:funder_allowance_units"));
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {

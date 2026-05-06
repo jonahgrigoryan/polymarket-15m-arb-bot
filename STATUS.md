@@ -1,6 +1,6 @@
 # Project Status Handoff
 
-Last updated: 2026-05-04
+Last updated: 2026-05-06
 
 ## Purpose
 
@@ -17,16 +17,16 @@ Authoritative sources remain:
 
 ## Current Branch
 
-- Branch: `live-alpha/la4-shadow-executor`
-- Current commit: fresh `main` after PR #32 merge commit `7b7f952`.
-- Worktree status: LA4 shadow live executor implementation is ready for PR closeout on this branch. LA4 changes are scoped to `src/live_executor.rs`, shadow runtime integration, status/evidence docs, and tests. No live order placement, live cancel, cancel-all, cancel/replace automation, second LA3 canary, maker micro mode, taker strategy, heartbeat network posting, user-channel network enablement, cap reset, secret material, or LA5 work is authorized by this branch.
+- Branch: `live-alpha/la5-maker-micro`
+- Current commit: fresh `main` after PR #33 merge commit `cfec8dd`.
+- Worktree status: LA5 maker-only micro autonomy implementation and the approved 3-order live session are complete on this branch. Scope is live risk evaluation, inventory-aware side mapping, post-only GTD maker planning, dry-run CLI validation, production CLI live execution, LA5 journal/metrics scaffolding, config handoff, and verification artifacts. The approved GTD plan amendment is active: `ttl_seconds = 30` is the effective stale-quote TTL, while venue GTD expiration must be `now + 60 + ttl_seconds`. The 2026-05-06 operator approval `LA5-2026-05-06-001` authorized exactly 3 maker-only post-only GTD micro orders. Run `18ad0a3c18e5fc58-2b73-0` submitted 3 sequential BTC 15-minute `BUY Up` maker orders at price `0.17`, size `5.0`, notional `0.85` each; all were accepted as `LIVE`, final venue status `CANCELED`, no fills, no trades, final open orders `0`, final reserved pUSD units `0`, and final available pUSD units `6314318`. Computer Use post-run comparison showed Polymarket portfolio/cash/available-to-trade `$6.31`, no positions, and no open orders. `LIVE_ORDER_PLACEMENT_ENABLED` is feature-gated on `live-alpha-orders` and remains false by default. No LA6 quote manager, taker strategy, FAK/FOK strategy order, batch order, cancel-all, cap reset, or secret material is authorized by this branch.
 
 ## Milestones
 
-- Last completed milestone: LA3 controlled fill canary is complete and merged to `main` via PR #32 at `7b7f952`. LA3 executed exactly one approved BTC `BUY` `FAK` fill canary under approval `LA3-2026-05-04-004`, reconciled the matched order/trade, confirmed zero open orders and zero reserved pUSD after run, followed settlement, and consumed the LA3 local one-attempt cap. LA2 heartbeat, user events, and crash recovery is complete and merged to `main` via PR #31 at `f493c78`. LA1 gates, journal, and reconciliation foundation remains complete and merged via PR #29 at `c6f3c23`. LA0 approval and scope lock remain complete and merged via PR #28. LB7, LB6, LB4, and M9 statuses remain as previously documented.
-- Active milestone: Live Alpha LA4 shadow live executor. LA4 routes risk-reviewed paper strategy intents into persisted shadow-live decisions and comparison artifacts, but paper remains the execution path. LA4 authorizes no live orders, no live cancels, no cancel-all, no controlled fill canary, no maker autonomy, no strategy-selected live trading, and no LA5 work. Current local evidence: focused `live_executor`, `shadow_live`, `shadow_live_runtime_readiness`, `execution_intent`, and `live_risk_engine` tests pass, including PR #33 regressions for filled-long pUSD accounting, sell-side inventory-vs-pUSD checks, market-loss/notional risk reason specificity, and runtime shadow readiness sourced from live readback/startup evidence instead of hard-coded false flags; full `cargo test --offline`, `cargo fmt --check`, `cargo clippy --offline -- -D warnings`, `git diff --check`, and required safety/no-secret scans pass; `validate --local-only` passes with run ID `18ac88ce52bf6dc8-7df0-0`; the latest `paper --shadow-live-alpha` rerun passes with run ID `18ac897030a989d8-8894-0`, geoblock passed, 3 markets observed, 0 paper fills, 0 shadow decisions, 0 would-submit, 0 would-cancel, 0 rejected, and no live order. Default config remains inert, so live readiness evidence is false and shadow heartbeat/reconciliation readiness remain fail-closed in this run.
+- Last completed milestone: LA4 shadow live executor is complete and merged to `main` via PR #33 at `cfec8dd`. LA4 routed risk-reviewed paper strategy intents into persisted shadow-live decisions and comparison artifacts while keeping paper as the execution path; it authorized no live orders, no live cancels, no cancel-all, no maker autonomy, no taker strategy, and no LA5 work. LA3 controlled fill canary remains complete and merged via PR #32 at `7b7f952`. LA2 heartbeat, user events, and crash recovery is complete and merged to `main` via PR #31 at `f493c78`. LA1 gates, journal, and reconciliation foundation remains complete and merged via PR #29 at `c6f3c23`. LA0 approval and scope lock remain complete and merged via PR #28. LB7, LB6, LB4, and M9 statuses remain as previously documented.
+- Active milestone: Live Alpha LA5 maker-only micro autonomy. LA5 authorized one tightly capped 2026-05-06 session after all prior gates, the filled approval artifact, authenticated REST readback, Computer Use comparison, and explicit operator approval passed. The production CLI session executed exactly 3 maker-only post-only GTD micro orders and reconciled flat.
 - M9 - Multi-Session Validation And Live-Readiness Review is PASS for paper/replay validation evidence only. M9 still does not authorize live trading, and the settled sample was negative after final reconciliation.
-- Next exit gate: human review of PR #33, then merge LA4 when approved. After LA4 merge, the exact next action is a separate explicit LA5 kickoff if maker micro autonomy is approved; LA5 must not begin from this branch.
+- Next exit gate: finish final verification, commit and push the LA5 closeout branch, then stop for human PR merge review. Do not start LA6; LA6 remains on hold until a separate post-LA5 review and explicit phase approval.
 
 ## M3 Scope Lock
 
