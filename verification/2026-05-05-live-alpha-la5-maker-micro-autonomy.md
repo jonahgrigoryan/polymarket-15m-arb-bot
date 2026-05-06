@@ -257,27 +257,31 @@ A later P2 review blocker was fixed for edge provenance:
 - LA5 market selection no longer derives `fair_probability` from the configured `live_alpha.maker.min_edge_bps`. It now requires live reference evidence plus a live predictive tick from the existing Binance/Coinbase predictive-feed parsers, derives fair probability from the reference-vs-predictive move, records predictive snapshot/age/fair/edge evidence in the submit-attempt journal event, and rejects the candidate if the real derived edge is below `live_alpha.maker.min_edge_bps`.
 - The final maker plan builder also rejects any intent whose `edge_bps` is below `live_alpha.maker.min_edge_bps`, so future LA5 callers cannot bypass the threshold by passing a low-edge intent directly to the production maker-plan path.
 
+A follow-up P2 review blocker was fixed for predictive-feed fallback:
+
+- LA5 predictive evidence selection now treats stale first-feed evidence as a blocker inside the multi-feed fallback loop. A stale Binance target-asset tick no longer prevents the selector from trying Coinbase; only fresh predictive evidence within `feeds.stale_after_ms` can satisfy the LA5 edge-provenance gate.
+
 Regression coverage added:
 
 ```text
-cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 23 focused tests.
+cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 24 focused tests.
 cargo test --offline live_risk_engine --lib: PASS, 10 focused tests.
 cargo test --offline live_maker_micro --lib: PASS, 5 focused tests.
 ```
 
 ## Final Verification
 
-Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, post-acceptance cleanup hardening, primary cancel retry hardening, duration-cap hardening, filled-terminal reconciliation hardening, close-window TTL runway hardening, and real fair-value edge hardening:
+Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, post-acceptance cleanup hardening, primary cancel retry hardening, duration-cap hardening, filled-terminal reconciliation hardening, close-window TTL runway hardening, real fair-value edge hardening, and stale predictive-feed fallback hardening:
 
 ```text
 cargo fmt --check: PASS
-cargo test --offline: PASS, 344 library tests, 49 binary tests, 0 doc tests
+cargo test --offline: PASS, 344 library tests, 50 binary tests, 0 doc tests
 cargo clippy --offline -- -D warnings: PASS
 git diff --check: PASS
-cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad19c8f4e6c908-dadc-0
-cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad19cbca3c12a0-db71-0
+cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad1affa3310780-e95b-0
+cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad1b020e5bba58-e9e8-0
 four-handle presence check after sourcing .env: PASS
-LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only. Count-only scan totals: order/cancel/live-order `1389`, secret/handle `1006`, gate/reconciliation `1420`.
+LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only. Count-only scan totals: order/cancel/live-order `1462`, secret/handle `990`, gate/reconciliation `3330`. Ignored-local guard: `.env` and `config/local.toml` remain ignored.
 ```
 
 ## Live Run Fields

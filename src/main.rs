@@ -5665,10 +5665,15 @@ async fn live_alpha_predictive_evidence(
                     events.extend(batch.events);
                 }
                 let evidence = live_alpha_predictive_evidence_from_events(events, asset);
-                if evidence.snapshot_id.is_some() {
+                if let Some(blocker) = live_alpha_predictive_evidence_blocker(
+                    &probe.source,
+                    &evidence,
+                    config.feeds.stale_after_ms,
+                ) {
+                    blockers.push(blocker);
+                } else {
                     return Ok(evidence);
                 }
-                blockers.push(format!("{} missing predictive tick", probe.source));
             }
             Err(error) => blockers.push(format!("{} {error}", probe.source)),
         }
@@ -5680,6 +5685,26 @@ async fn live_alpha_predictive_evidence(
         blockers.join("; ")
     )
     .into())
+}
+
+fn live_alpha_predictive_evidence_blocker(
+    source: &str,
+    evidence: &LiveAlphaPredictiveEvidence,
+    max_age_ms: u64,
+) -> Option<String> {
+    if evidence.snapshot_id.is_none() {
+        return Some(format!("{source} missing predictive tick"));
+    }
+    if evidence.price.is_none() {
+        return Some(format!("{source} missing predictive price"));
+    }
+    match evidence.age_ms {
+        Some(age_ms) if age_ms <= max_age_ms => None,
+        Some(age_ms) => Some(format!(
+            "{source} stale predictive tick age_ms={age_ms} max_age_ms={max_age_ms}"
+        )),
+        None => Some(format!("{source} missing predictive age")),
+    }
 }
 
 fn live_alpha_predictive_evidence_from_events(
@@ -8900,6 +8925,39 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
         );
         assert_eq!(evidence.age_ms, Some(50));
         assert_eq!(evidence.price, Some(100_000.0));
+    }
+
+    #[test]
+    fn la5_predictive_evidence_falls_through_stale_first_feed() {
+        let stale_binance = LiveAlphaPredictiveEvidence {
+            snapshot_id: Some("binance:unknown:1".to_string()),
+            age_ms: Some(5_001),
+            price: Some(99_000.0),
+        };
+        let fresh_coinbase = LiveAlphaPredictiveEvidence {
+            snapshot_id: Some("coinbase:unknown:2".to_string()),
+            age_ms: Some(100),
+            price: Some(100_000.0),
+        };
+        let candidates = [
+            (SOURCE_BINANCE, stale_binance),
+            (SOURCE_COINBASE, fresh_coinbase),
+        ];
+        let mut blockers = Vec::new();
+        let selected_snapshot_id = candidates.iter().find_map(|(source, evidence)| {
+            if let Some(blocker) = live_alpha_predictive_evidence_blocker(source, evidence, 5_000) {
+                blockers.push(blocker);
+                None
+            } else {
+                evidence.snapshot_id.as_deref()
+            }
+        });
+
+        assert_eq!(selected_snapshot_id, Some("coinbase:unknown:2"));
+        assert_eq!(
+            blockers,
+            vec!["binance stale predictive tick age_ms=5001 max_age_ms=5000"]
+        );
     }
 
     #[test]
