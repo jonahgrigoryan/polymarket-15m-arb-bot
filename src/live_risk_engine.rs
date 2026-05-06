@@ -404,7 +404,10 @@ fn market_too_close_to_close(
     let (Some(now_ms), Some(end_ms)) = (context.now_ms, context.market_end_ms) else {
         return true;
     };
-    let cutoff_ms = (no_trade_seconds_before_close as i64).saturating_mul(1_000);
+    let cutoff_ms = no_trade_seconds_before_close
+        .saturating_add(context.effective_quote_ttl_seconds)
+        .min(i64::MAX as u64 / 1_000) as i64
+        * 1_000;
     now_ms.saturating_add(cutoff_ms) >= end_ms
 }
 
@@ -546,6 +549,20 @@ mod tests {
         let mut context = healthy_context();
         context.now_ms = Some(1_777_000_870_000);
         context.market_end_ms = Some(1_777_000_900_000);
+
+        let rejected = rejected_decision(sample_intent(), context);
+
+        assert!(rejected
+            .reason_codes
+            .contains(&"market_too_close_to_close".to_string()));
+    }
+
+    #[test]
+    fn live_risk_engine_rejects_ttl_that_would_cancel_inside_no_trade_window() {
+        let mut context = healthy_context();
+        context.now_ms = Some(1_777_000_830_000);
+        context.market_end_ms = Some(1_777_000_900_000);
+        context.effective_quote_ttl_seconds = 30;
 
         let rejected = rejected_decision(sample_intent(), context);
 

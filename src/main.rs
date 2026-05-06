@@ -4391,12 +4391,13 @@ async fn build_la5_market_intent_from_market(
     now_ms: i64,
     market: Market,
 ) -> Result<La5MakerMarketIntent, Box<dyn std::error::Error>> {
-    if market.end_ts
-        <= now_ms.saturating_add(
-            (config.live_alpha.risk.no_trade_seconds_before_close as i64).saturating_mul(1_000),
-        )
-    {
-        return Err(format!("{} past_or_inside_no_trade_window", market.slug).into());
+    if !la5_market_has_cancel_runway_before_no_trade_window(
+        now_ms,
+        market.end_ts,
+        config.live_alpha.risk.no_trade_seconds_before_close,
+        config.live_alpha.maker.ttl_seconds,
+    ) {
+        return Err(format!("{} cancel_after_inside_no_trade_window", market.slug).into());
     }
     let outcome = market
         .outcomes
@@ -4506,6 +4507,19 @@ async fn build_la5_market_intent_from_market(
         reference_snapshot_id,
         reference_age_ms,
     })
+}
+
+fn la5_market_has_cancel_runway_before_no_trade_window(
+    now_ms: i64,
+    market_end_ms: i64,
+    no_trade_seconds_before_close: u64,
+    effective_quote_ttl_seconds: u64,
+) -> bool {
+    let required_runway_ms = no_trade_seconds_before_close
+        .saturating_add(effective_quote_ttl_seconds)
+        .min(i64::MAX as u64 / 1_000) as i64
+        * 1_000;
+    now_ms.saturating_add(required_runway_ms) < market_end_ms
 }
 
 fn la5_live_risk_context(
@@ -8626,6 +8640,32 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         validate_la5_plan_fits_duration_cap(&plan, Instant::now(), 60)
             .expect("duration cap leaves room for quote TTL and cancel");
+    }
+
+    #[test]
+    fn la5_market_selection_rejects_cancel_after_inside_no_trade_window() {
+        let now_ms = 1_777_000_000_000;
+        let no_trade_seconds_before_close = 60;
+        let ttl_seconds = 30;
+
+        assert!(!la5_market_has_cancel_runway_before_no_trade_window(
+            now_ms,
+            now_ms + 70_000,
+            no_trade_seconds_before_close,
+            ttl_seconds,
+        ));
+        assert!(!la5_market_has_cancel_runway_before_no_trade_window(
+            now_ms,
+            now_ms + 90_000,
+            no_trade_seconds_before_close,
+            ttl_seconds,
+        ));
+        assert!(la5_market_has_cancel_runway_before_no_trade_window(
+            now_ms,
+            now_ms + 91_000,
+            no_trade_seconds_before_close,
+            ttl_seconds,
+        ));
     }
 
     #[test]

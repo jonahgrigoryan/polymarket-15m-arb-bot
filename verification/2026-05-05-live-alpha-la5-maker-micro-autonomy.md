@@ -248,26 +248,31 @@ A final P2 review blocker was fixed after the duration-cap patch:
 
 - Final LA5 reconciliation now treats a terminal venue `FILLED` order with confirmed trade evidence as flat without inserting a local canceled-order marker. Filled terminal orders without matching trade evidence still fail closed as `unexpected_fill`, and canceled terminal orders still require venue cancel confirmation.
 
+A later P1 review blocker was fixed for close-window risk control:
+
+- LA5 market selection and the live risk engine now require enough runway for the configured effective quote TTL plus `no_trade_seconds_before_close`. A market is rejected unless `now + ttl_seconds + no_trade_seconds_before_close` remains before market close, preventing `cancel_after_unix` from falling inside the configured no-trade window.
+
 Regression coverage added:
 
 ```text
-cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 20 focused tests.
+cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 21 focused tests.
+cargo test --offline live_risk_engine --lib: PASS, 10 focused tests.
 cargo test --offline live_maker_micro --lib: PASS, 4 focused tests.
 ```
 
 ## Final Verification
 
-Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, post-acceptance cleanup hardening, primary cancel retry hardening, duration-cap hardening, and filled-terminal reconciliation hardening:
+Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, post-acceptance cleanup hardening, primary cancel retry hardening, duration-cap hardening, filled-terminal reconciliation hardening, and close-window TTL runway hardening:
 
 ```text
 cargo fmt --check: PASS
-cargo test --offline: PASS, 342 library tests, 46 binary tests, 0 doc tests
+cargo test --offline: PASS, 343 library tests, 47 binary tests, 0 doc tests
 cargo clippy --offline -- -D warnings: PASS
 git diff --check: PASS
-cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad174b14fcd550-bc47-0
-cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad174e4b831640-bcc4-0
+cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad18d73053d2a8-cbe9-0
+cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad18d96ad32008-cc85-0
 four-handle presence check after sourcing .env: PASS
-LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only. Count-only scan totals: order/cancel/live-order `1389`, secret/handle `1006`, gate/reconciliation `1421`.
+LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only. Count-only scan totals: order/cancel/live-order `1389`, secret/handle `1006`, gate/reconciliation `1412`.
 ```
 
 ## Live Run Fields
