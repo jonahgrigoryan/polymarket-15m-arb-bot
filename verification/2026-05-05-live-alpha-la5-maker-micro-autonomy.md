@@ -239,24 +239,29 @@ An additional P1 review blocker was fixed for accepted-order cleanup:
 - Cleanup is limited to the accepted order ID. It records `cleanup_cancel_confirmed`, `cleanup_cancel_not_confirmed`, or `cleanup_cancel_failed` evidence in the LA5 journal without masking the original blocker.
 - The normal cancel decision now treats unknown or otherwise nonterminal order status as needing exact cancel; only clearly `CANCELED` or fully `FILLED` statuses skip the cancel request.
 
+Two follow-up review blockers were fixed after that cleanup patch:
+
+- The primary exact-cancel path no longer uses a direct `?` on the cancel RPC. It retries transient cancel RPC errors or missing exact-order confirmations inside the approved duration window, records retry metadata on success, and records a final `cancel_failed_after_retries` reconciliation failure before aborting if exact cancel cannot be confirmed.
+- The live maker path now rejects an order plan before submit when the effective quote TTL cannot reach its cancel point within the approved `max_duration_sec`, so a short approved run cannot keep an accepted order open beyond the approval duration cap.
+
 Regression coverage added:
 
 ```text
-cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 15 focused tests.
+cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 19 focused tests.
 cargo test --offline live_maker_micro --lib: PASS, 4 focused tests.
 ```
 
 ## Final Verification
 
-Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, and post-acceptance cleanup hardening:
+Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, approval-reuse/live-submit gate hardening, post-acceptance cleanup hardening, primary cancel retry hardening, and duration-cap hardening:
 
 ```text
 cargo fmt --check: PASS
-cargo test --offline: PASS, 342 library tests, 41 binary tests, 0 doc tests
+cargo test --offline: PASS, 342 library tests, 45 binary tests, 0 doc tests
 cargo clippy --offline -- -D warnings: PASS
 git diff --check: PASS
-cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad142d1d87fc48-9976-0
-cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad142c910e4128-9977-0
+cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad1613a577af80-a7ad-0
+cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad16142ff9e060-a7ae-0
 four-handle presence check after sourcing .env: PASS
 LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only.
 ```

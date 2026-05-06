@@ -3508,6 +3508,28 @@ fn la5_fail_on_approval_mismatches(
     }
 }
 
+fn validate_la5_plan_fits_duration_cap(
+    plan: &LiveMakerOrderPlan,
+    started: Instant,
+    max_duration_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let elapsed = started.elapsed();
+    let max_duration = Duration::from_secs(max_duration_sec);
+    let quote_lifetime = Duration::from_secs(plan.effective_quote_ttl_seconds);
+    if elapsed >= max_duration || elapsed.saturating_add(quote_lifetime) >= max_duration {
+        Err(format!(
+            "LA5 live maker blocked: order TTL cannot finish within max_duration_sec \
+             (elapsed_ms={}, ttl_seconds={}, max_duration_sec={})",
+            elapsed.as_millis(),
+            plan.effective_quote_ttl_seconds,
+            max_duration_sec
+        )
+        .into())
+    } else {
+        Ok(())
+    }
+}
+
 fn validate_la5_live_submit_runtime_gates(
     config: &AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3915,6 +3937,7 @@ async fn run_live_alpha_maker_micro_live_session(
             .clone()
             .ok_or("LA5 maker execution did not build an order plan")?;
         validate_la5_plan_against_approval(approval_artifact, &plan, cumulative_notional)?;
+        validate_la5_plan_fits_duration_cap(&plan, started, max_duration_sec)?;
         let submit_input = la5_maker_submit_input(config, &account, plan.clone());
 
         append_la5_journal_event(
@@ -4124,26 +4147,25 @@ async fn run_live_alpha_maker_micro_live_session(
         let mut exact_cancel_confirmed = false;
         if la5_order_status_needs_cancel(&latest_order) {
             cancel_request_sent = true;
-            let canceled_ids =
-                cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
-                    .await?;
+            let cancel_result = cancel_la5_exact_order_with_retries(
+                &journal,
+                run_id,
+                &submission.order_id,
+                &plan.intent_id,
+                sequence,
+                started,
+                max_duration_sec,
+                || async {
+                    cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                        .await
+                },
+            )
+            .await?;
+            let canceled_ids = cancel_result.canceled_ids;
             cancel_timestamps.push(Instant::now());
             exact_cancel_confirmed = canceled_ids
                 .iter()
                 .any(|id| id.eq_ignore_ascii_case(&submission.order_id));
-            if !exact_cancel_confirmed {
-                append_la5_journal_event(
-                    &journal,
-                    run_id,
-                    LiveJournalEventType::MakerReconciliationFailed,
-                    serde_json::json!({
-                        "status": "cancel_not_confirmed",
-                        "order_id": submission.order_id,
-                        "canceled_ids": canceled_ids,
-                    }),
-                )?;
-                return Err("LA5 exact cancel did not return the submitted order ID".into());
-            }
             append_la5_journal_event(
                 &journal,
                 run_id,
@@ -4153,6 +4175,8 @@ async fn run_live_alpha_maker_micro_live_session(
                     "intent_id": plan.intent_id,
                     "sequence": sequence,
                     "status": "cancel_requested",
+                    "cancel_attempts": cancel_result.attempts,
+                    "cancel_retry_errors": cancel_result.failed_attempts,
                 }),
             )?;
         }
@@ -4833,6 +4857,125 @@ fn la5_order_status_is_filled(order: &LiveMakerOrderReadbackReport) -> bool {
 
 fn la5_order_status_is_canceled(order: &LiveMakerOrderReadbackReport) -> bool {
     venue_order_status_from_la5_order(order) == VenueOrderStatus::Canceled
+}
+
+const LA5_CANCEL_RETRY_LIMIT: u64 = 3;
+const LA5_CANCEL_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct La5ExactCancelResult {
+    canceled_ids: Vec<String>,
+    attempts: u64,
+    failed_attempts: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cancel_la5_exact_order_with_retries<F, Fut, E>(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    order_id: &str,
+    intent_id: &str,
+    sequence: u64,
+    started: Instant,
+    max_duration_sec: u64,
+    cancel_exact: F,
+) -> Result<La5ExactCancelResult, Box<dyn std::error::Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, E>>,
+    E: std::fmt::Display,
+{
+    cancel_la5_exact_order_with_retry_policy(
+        journal,
+        run_id,
+        order_id,
+        intent_id,
+        sequence,
+        started,
+        max_duration_sec,
+        LA5_CANCEL_RETRY_LIMIT,
+        LA5_CANCEL_RETRY_DELAY,
+        cancel_exact,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cancel_la5_exact_order_with_retry_policy<F, Fut, E>(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    order_id: &str,
+    intent_id: &str,
+    sequence: u64,
+    started: Instant,
+    max_duration_sec: u64,
+    max_attempts: u64,
+    retry_delay: Duration,
+    mut cancel_exact: F,
+) -> Result<La5ExactCancelResult, Box<dyn std::error::Error>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>, E>>,
+    E: std::fmt::Display,
+{
+    let max_attempts = max_attempts.max(1);
+    let mut failed_attempts = Vec::new();
+    for attempt in 1..=max_attempts {
+        match cancel_exact().await {
+            Ok(canceled_ids)
+                if canceled_ids
+                    .iter()
+                    .any(|id| id.eq_ignore_ascii_case(order_id)) =>
+            {
+                return Ok(La5ExactCancelResult {
+                    canceled_ids,
+                    attempts: attempt,
+                    failed_attempts,
+                });
+            }
+            Ok(canceled_ids) => {
+                failed_attempts.push(format!(
+                    "attempt {attempt}: cancel_not_confirmed canceled_ids={}",
+                    canceled_ids.join(",")
+                ));
+            }
+            Err(error) => {
+                failed_attempts.push(format!("attempt {attempt}: {error}"));
+            }
+        }
+
+        if attempt == max_attempts {
+            break;
+        }
+        let max_duration = Duration::from_secs(max_duration_sec);
+        if started.elapsed() >= max_duration {
+            break;
+        }
+        let remaining = max_duration.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(retry_delay.min(remaining)).await;
+    }
+
+    append_la5_journal_event(
+        journal,
+        run_id,
+        LiveJournalEventType::MakerReconciliationFailed,
+        serde_json::json!({
+            "status": "cancel_failed_after_retries",
+            "order_id": order_id,
+            "intent_id": intent_id,
+            "sequence": sequence,
+            "cancel_errors": failed_attempts.clone(),
+        }),
+    )?;
+    Err(format!(
+        "LA5 exact cancel failed after {} attempt(s): {}",
+        failed_attempts.len(),
+        failed_attempts.join("; ")
+    )
+    .into())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8466,6 +8609,25 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
         assert!(error.contains("live_order_placement_disabled"));
     }
 
+    #[test]
+    fn la5_plan_duration_rejects_ttl_that_cannot_finish_before_cap() {
+        let plan = la5_test_maker_plan();
+
+        let error = validate_la5_plan_fits_duration_cap(&plan, Instant::now(), 30)
+            .expect_err("TTL equal to duration leaves no cancel window")
+            .to_string();
+
+        assert!(error.contains("order TTL cannot finish within max_duration_sec"));
+    }
+
+    #[test]
+    fn la5_plan_duration_accepts_ttl_with_remaining_cancel_window() {
+        let plan = la5_test_maker_plan();
+
+        validate_la5_plan_fits_duration_cap(&plan, Instant::now(), 60)
+            .expect("duration cap leaves room for quote TTL and cancel");
+    }
+
     #[tokio::test]
     async fn la5_post_acceptance_cleanup_confirms_exact_cancel_before_error() {
         let path = std::env::temp_dir().join(format!(
@@ -8555,6 +8717,106 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
         assert!(!replay.canceled_orders.contains(&order_id));
 
         fs::remove_file(path).expect("test cleanup journal removed");
+    }
+
+    #[tokio::test]
+    async fn la5_primary_cancel_retries_transient_rpc_error_before_success() {
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la5-primary-cancel-retry-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        let journal = LiveOrderJournal::new(&path);
+        let order_id =
+            "0x3333333333333333333333333333333333333333333333333333333333333333".to_string();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let attempts_for_cancel = attempts.clone();
+        let order_id_for_cancel = order_id.clone();
+
+        let result = cancel_la5_exact_order_with_retry_policy(
+            &journal,
+            "run-primary-cancel-retry",
+            &order_id,
+            "intent-primary-cancel-retry",
+            1,
+            Instant::now(),
+            60,
+            3,
+            Duration::ZERO,
+            move || {
+                let attempts = attempts_for_cancel.clone();
+                let order_id = order_id_for_cancel.clone();
+                async move {
+                    let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if attempt == 1 {
+                        Err::<Vec<String>, &'static str>("transient cancel rpc failed")
+                    } else {
+                        Ok::<Vec<String>, &'static str>(vec![order_id])
+                    }
+                }
+            },
+        )
+        .await
+        .expect("transient cancel failure retries to success");
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(result.attempts, 2);
+        assert_eq!(result.canceled_ids, vec![order_id]);
+        assert_eq!(result.failed_attempts.len(), 1);
+        assert!(result.failed_attempts[0].contains("transient cancel rpc failed"));
+        assert!(
+            !path.exists(),
+            "successful retry should not journal a reconciliation failure itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn la5_primary_cancel_records_failure_after_retry_exhaustion() {
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la5-primary-cancel-fail-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        let journal = LiveOrderJournal::new(&path);
+        let order_id =
+            "0x4444444444444444444444444444444444444444444444444444444444444444".to_string();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let attempts_for_cancel = attempts.clone();
+
+        let error = cancel_la5_exact_order_with_retry_policy(
+            &journal,
+            "run-primary-cancel-fail",
+            &order_id,
+            "intent-primary-cancel-fail",
+            1,
+            Instant::now(),
+            60,
+            2,
+            Duration::ZERO,
+            move || {
+                let attempts = attempts_for_cancel.clone();
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<Vec<String>, &'static str>("cancel rpc still failing")
+                }
+            },
+        )
+        .await
+        .expect_err("retry exhaustion fails closed")
+        .to_string();
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(error.contains("LA5 exact cancel failed after 2 attempt"));
+        assert!(error.contains("cancel rpc still failing"));
+        let contents = fs::read_to_string(&path).expect("primary cancel journal reads");
+        assert!(contents.contains("maker_reconciliation_failed"));
+        assert!(contents.contains("cancel_failed_after_retries"));
+        let replay = journal
+            .replay_state("run-primary-cancel-fail")
+            .expect("primary cancel journal replays");
+        assert_eq!(replay.reconciliation_mismatch_count, 1);
+
+        fs::remove_file(path).expect("test primary cancel journal removed");
     }
 
     #[test]
