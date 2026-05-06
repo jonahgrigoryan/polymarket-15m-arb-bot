@@ -55,7 +55,7 @@ use polymarket_15m_arb_bot::{
         cancel_exact_maker_order_with_official_sdk, post_maker_heartbeat_with_official_sdk,
         read_maker_order_with_official_sdk, submit_maker_order_with_official_sdk,
         LiveMakerOrderPlan, LiveMakerOrderReadbackReport, LiveMakerSubmissionReport,
-        LiveMakerSubmitInput,
+        LiveMakerSubmitInput, GTD_SECURITY_BUFFER_SECONDS,
     },
     live_order_journal::{
         reduce_live_journal_events, LiveJournalEvent, LiveJournalEventType, LiveOrderJournal,
@@ -2908,7 +2908,14 @@ async fn run_live_alpha_maker_micro_command(
             .as_deref()
             .ok_or("live-alpha-maker-micro --human-approved requires --approval-artifact")?;
         let approval_text = fs::read_to_string(approval_artifact)?;
-        validate_la5_approval_artifact_text(&approval_text, approval_id)?;
+        let approval = validate_la5_approval_artifact_text(&approval_text, approval_id)?;
+        validate_la5_approval_against_cli_and_config(
+            &approval,
+            config,
+            approval_id,
+            max_orders,
+            max_duration_sec,
+        )?;
 
         println!("live_alpha_maker_micro_approval_id={approval_id}");
         println!(
@@ -2919,6 +2926,7 @@ async fn run_live_alpha_maker_micro_command(
             config,
             run_id,
             approval_id,
+            &approval,
             max_orders,
             max_duration_sec,
         )
@@ -2997,10 +3005,37 @@ async fn run_live_alpha_maker_micro_command(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct La5ApprovalArtifactFields {
+    approved_wallet: String,
+    approved_funder: String,
+    max_single_order_notional: f64,
+    max_total_live_notional: f64,
+    max_available_pusd_usage: f64,
+    max_reserved_pusd: f64,
+    max_fee_spend: f64,
+    max_orders: u64,
+    max_open_orders: u64,
+    max_duration_sec: u64,
+    no_trade_seconds_before_close: u64,
+    ttl_seconds: u64,
+    venue_gtd_expiration_delta: u64,
+    signature_type: SignatureType,
+    available_pusd_units: u64,
+    reserved_pusd_units: u64,
+    open_order_count: usize,
+    heartbeat_status: String,
+    funder_allowance_units: u64,
+    rollback_owner: String,
+    monitoring_owner: String,
+    approval_id: String,
+    approval_date: String,
+}
+
 fn validate_la5_approval_artifact_text(
     text: &str,
     approval_id: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<La5ApprovalArtifactFields, Box<dyn std::error::Error>> {
     let mut errors = Vec::<String>::new();
     if !text.contains(approval_id) {
         errors.push("approval_id_missing".to_string());
@@ -3022,8 +3057,13 @@ fn validate_la5_approval_artifact_text(
             None => errors.push(format!("approval_field_missing:{field}")),
         }
     }
-    if errors.is_empty() {
-        Ok(())
+    let parsed = if errors.is_empty() {
+        parse_la5_approval_artifact_fields(text, &mut errors)
+    } else {
+        None
+    };
+    if let Some(approval) = parsed {
+        Ok(approval)
     } else {
         errors.sort_unstable();
         errors.dedup();
@@ -3068,6 +3108,124 @@ fn la5_approval_table_value(text: &str, field: &str) -> Option<String> {
     })
 }
 
+fn parse_la5_approval_artifact_fields(
+    text: &str,
+    errors: &mut Vec<String>,
+) -> Option<La5ApprovalArtifactFields> {
+    Some(La5ApprovalArtifactFields {
+        approved_wallet: la5_required_approval_string(text, "approved_wallet", errors)?,
+        approved_funder: la5_required_approval_string(text, "approved_funder", errors)?,
+        max_single_order_notional: la5_required_approval_f64(
+            text,
+            "max_single_order_notional",
+            errors,
+        )?,
+        max_total_live_notional: la5_required_approval_f64(
+            text,
+            "max_total_live_notional",
+            errors,
+        )?,
+        max_available_pusd_usage: la5_required_approval_f64(
+            text,
+            "max_available_pusd_usage",
+            errors,
+        )?,
+        max_reserved_pusd: la5_required_approval_f64(text, "max_reserved_pusd", errors)?,
+        max_fee_spend: la5_required_approval_f64(text, "max_fee_spend", errors)?,
+        max_orders: la5_required_approval_u64(text, "max_orders", errors)?,
+        max_open_orders: la5_required_approval_u64(text, "max_open_orders", errors)?,
+        max_duration_sec: la5_required_approval_u64(text, "max_duration_sec", errors)?,
+        no_trade_seconds_before_close: la5_required_approval_u64(
+            text,
+            "no_trade_seconds_before_close",
+            errors,
+        )?,
+        ttl_seconds: la5_required_approval_u64(text, "ttl_seconds", errors)?,
+        venue_gtd_expiration_delta: la5_required_approval_u64(
+            text,
+            "venue_gtd_expiration_delta",
+            errors,
+        )?,
+        signature_type: la5_required_approval_signature_type(text, "signature_type", errors)?,
+        available_pusd_units: la5_required_approval_u64(text, "available_pusd_units", errors)?,
+        reserved_pusd_units: la5_required_approval_u64(text, "reserved_pusd_units", errors)?,
+        open_order_count: usize::try_from(la5_required_approval_u64(
+            text,
+            "open_order_count",
+            errors,
+        )?)
+        .ok()?,
+        heartbeat_status: la5_required_approval_string(text, "heartbeat_status", errors)?,
+        funder_allowance_units: la5_required_approval_u64(text, "funder_allowance_units", errors)?,
+        rollback_owner: la5_required_approval_string(text, "rollback_owner", errors)?,
+        monitoring_owner: la5_required_approval_string(text, "monitoring_owner", errors)?,
+        approval_id: la5_required_approval_string(text, "approval_id", errors)?,
+        approval_date: la5_required_approval_string(text, "approval_date", errors)?,
+    })
+}
+
+fn la5_required_approval_string(
+    text: &str,
+    field: &str,
+    errors: &mut Vec<String>,
+) -> Option<String> {
+    la5_approval_table_value(text, field).or_else(|| {
+        errors.push(format!("approval_field_missing:{field}"));
+        None
+    })
+}
+
+fn la5_required_approval_u64(text: &str, field: &str, errors: &mut Vec<String>) -> Option<u64> {
+    let value = la5_required_approval_string(text, field, errors)?;
+    let Some(token) = la5_first_number_token(&value) else {
+        errors.push(format!("approval_field_parse_error:{field}"));
+        return None;
+    };
+    token.parse::<u64>().map_err(|_| ()).map_or_else(
+        |_| {
+            errors.push(format!("approval_field_parse_error:{field}"));
+            None
+        },
+        Some,
+    )
+}
+
+fn la5_required_approval_f64(text: &str, field: &str, errors: &mut Vec<String>) -> Option<f64> {
+    let value = la5_required_approval_string(text, field, errors)?;
+    let Some(token) = la5_first_number_token(&value) else {
+        errors.push(format!("approval_field_parse_error:{field}"));
+        return None;
+    };
+    token.parse::<f64>().map_err(|_| ()).map_or_else(
+        |_| {
+            errors.push(format!("approval_field_parse_error:{field}"));
+            None
+        },
+        Some,
+    )
+}
+
+fn la5_required_approval_signature_type(
+    text: &str,
+    field: &str,
+    errors: &mut Vec<String>,
+) -> Option<SignatureType> {
+    let value = la5_required_approval_string(text, field, errors)?;
+    SignatureType::from_config(&value).or_else(|| {
+        errors.push(format!("approval_field_parse_error:{field}"));
+        None
+    })
+}
+
+fn la5_first_number_token(value: &str) -> Option<&str> {
+    let start = value.find(|ch: char| ch.is_ascii_digit())?;
+    let tail = &value[start..];
+    let end = tail
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(tail.len());
+    Some(&tail[..end])
+}
+
 fn la5_approval_value_is_final(value: &str) -> bool {
     let trimmed = value.trim();
     let upper = trimmed.to_ascii_uppercase();
@@ -3082,6 +3240,230 @@ fn la5_approval_value_is_final(value: &str) -> bool {
         && !upper.contains("MISSING")
         && !trimmed.starts_with('[')
         && !trimmed.ends_with(']')
+}
+
+fn validate_la5_approval_against_cli_and_config(
+    approval: &La5ApprovalArtifactFields,
+    config: &AppConfig,
+    approval_id: &str,
+    max_orders: u64,
+    max_duration_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::<String>::new();
+    if approval.approval_id != approval_id {
+        mismatches.push("approval_id_mismatch".to_string());
+    }
+    if approval.max_orders != max_orders {
+        mismatches.push("approval_max_orders_mismatch".to_string());
+    }
+    if approval.max_duration_sec != max_duration_sec {
+        mismatches.push("approval_max_duration_sec_mismatch".to_string());
+    }
+    if !la5_addresses_equal(
+        &approval.approved_wallet,
+        &config.live_beta.readback_account.wallet_address,
+    ) {
+        mismatches.push("approval_wallet_mismatch".to_string());
+    }
+    if !la5_addresses_equal(
+        &approval.approved_funder,
+        &config.live_beta.readback_account.funder_address,
+    ) {
+        mismatches.push("approval_funder_mismatch".to_string());
+    }
+    let config_signature_type =
+        SignatureType::from_config(&config.live_beta.readback_account.signature_type);
+    if config_signature_type != Some(approval.signature_type) {
+        mismatches.push("approval_signature_type_mismatch".to_string());
+    }
+    la5_compare_f64(
+        &mut mismatches,
+        "approval_max_single_order_notional_mismatch",
+        approval.max_single_order_notional,
+        config.live_alpha.risk.max_single_order_notional,
+    );
+    la5_compare_f64(
+        &mut mismatches,
+        "approval_max_total_live_notional_mismatch",
+        approval.max_total_live_notional,
+        config.live_alpha.risk.max_total_live_notional,
+    );
+    la5_compare_f64(
+        &mut mismatches,
+        "approval_max_available_pusd_usage_mismatch",
+        approval.max_available_pusd_usage,
+        config.live_alpha.risk.max_available_pusd_usage,
+    );
+    la5_compare_f64(
+        &mut mismatches,
+        "approval_max_reserved_pusd_mismatch",
+        approval.max_reserved_pusd,
+        config.live_alpha.risk.max_reserved_pusd,
+    );
+    la5_compare_f64(
+        &mut mismatches,
+        "approval_max_fee_spend_mismatch",
+        approval.max_fee_spend,
+        config.live_alpha.risk.max_fee_spend,
+    );
+    if approval.max_open_orders != config.live_alpha.risk.max_open_orders {
+        mismatches.push("approval_max_open_orders_mismatch".to_string());
+    }
+    if approval.no_trade_seconds_before_close
+        != config.live_alpha.risk.no_trade_seconds_before_close
+    {
+        mismatches.push("approval_no_trade_seconds_before_close_mismatch".to_string());
+    }
+    if approval.ttl_seconds != config.live_alpha.maker.ttl_seconds {
+        mismatches.push("approval_ttl_seconds_mismatch".to_string());
+    }
+    let configured_gtd_delta = config
+        .live_alpha
+        .maker
+        .ttl_seconds
+        .saturating_add(GTD_SECURITY_BUFFER_SECONDS);
+    if approval.venue_gtd_expiration_delta != configured_gtd_delta {
+        mismatches.push("approval_venue_gtd_expiration_delta_mismatch".to_string());
+    }
+    if !config.live_alpha.maker.post_only {
+        mismatches.push("config_post_only_not_enabled".to_string());
+    }
+    if !config
+        .live_alpha
+        .maker
+        .order_type
+        .eq_ignore_ascii_case("GTD")
+    {
+        mismatches.push("config_order_type_not_gtd".to_string());
+    }
+
+    la5_fail_on_approval_mismatches(
+        "LA5 approval artifact does not match CLI/config",
+        mismatches,
+    )
+}
+
+fn validate_la5_approval_against_account_readback(
+    approval: &La5ApprovalArtifactFields,
+    account: &AccountPreflight,
+    readback: &ReadbackPreflightValidation,
+    funder_allowance_units: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::<String>::new();
+    if !la5_addresses_equal(&approval.approved_wallet, &account.wallet_address) {
+        mismatches.push("approval_readback_wallet_mismatch".to_string());
+    }
+    if !la5_addresses_equal(&approval.approved_funder, &account.funder_address) {
+        mismatches.push("approval_readback_funder_mismatch".to_string());
+    }
+    if approval.signature_type != account.signature_type {
+        mismatches.push("approval_readback_signature_type_mismatch".to_string());
+    }
+    if approval.available_pusd_units != readback.report.available_pusd_units {
+        mismatches.push("approval_available_pusd_units_mismatch".to_string());
+    }
+    if approval.reserved_pusd_units != readback.report.reserved_pusd_units {
+        mismatches.push("approval_reserved_pusd_units_mismatch".to_string());
+    }
+    if approval.open_order_count != readback.report.open_order_count {
+        mismatches.push("approval_open_order_count_mismatch".to_string());
+    }
+    if approval.heartbeat_status != readback.report.heartbeat {
+        mismatches.push("approval_heartbeat_status_mismatch".to_string());
+    }
+    if approval.funder_allowance_units != funder_allowance_units {
+        mismatches.push("approval_funder_allowance_units_mismatch".to_string());
+    }
+
+    la5_fail_on_approval_mismatches(
+        "LA5 approval artifact does not match authenticated readback",
+        mismatches,
+    )
+}
+
+fn validate_la5_plan_against_approval(
+    approval: &La5ApprovalArtifactFields,
+    plan: &LiveMakerOrderPlan,
+    cumulative_notional: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::<String>::new();
+    if !plan.post_only {
+        mismatches.push("approval_plan_post_only_mismatch".to_string());
+    }
+    if !plan.order_type.eq_ignore_ascii_case("GTD") {
+        mismatches.push("approval_plan_order_type_mismatch".to_string());
+    }
+    if plan.effective_quote_ttl_seconds != approval.ttl_seconds {
+        mismatches.push("approval_plan_ttl_seconds_mismatch".to_string());
+    }
+    let plan_start_unix = plan
+        .cancel_after_unix
+        .saturating_sub(plan.effective_quote_ttl_seconds);
+    let plan_gtd_delta = plan.gtd_expiration_unix.saturating_sub(plan_start_unix);
+    if plan_gtd_delta != approval.venue_gtd_expiration_delta {
+        mismatches.push("approval_plan_gtd_delta_mismatch".to_string());
+    }
+    if plan.notional > approval.max_single_order_notional + LA5_FLOAT_EPSILON {
+        mismatches.push("approval_plan_single_notional_exceeds_cap".to_string());
+    }
+    if cumulative_notional + plan.notional > approval.max_total_live_notional + LA5_FLOAT_EPSILON {
+        mismatches.push("approval_plan_total_notional_exceeds_cap".to_string());
+    }
+
+    la5_fail_on_approval_mismatches(
+        "LA5 approval artifact does not authorize submitted plan",
+        mismatches,
+    )
+}
+
+fn validate_la5_session_against_approval(
+    approval: &La5ApprovalArtifactFields,
+    outcomes: &[La5MakerOrderOutcome],
+    cumulative_notional: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::<String>::new();
+    if outcomes.len() != approval.max_orders as usize {
+        mismatches.push("approval_session_order_count_mismatch".to_string());
+    }
+    if cumulative_notional > approval.max_total_live_notional + LA5_FLOAT_EPSILON {
+        mismatches.push("approval_session_total_notional_exceeds_cap".to_string());
+    }
+    if outcomes
+        .iter()
+        .any(|outcome| outcome.notional > approval.max_single_order_notional + LA5_FLOAT_EPSILON)
+    {
+        mismatches.push("approval_session_single_notional_exceeds_cap".to_string());
+    }
+
+    la5_fail_on_approval_mismatches(
+        "LA5 approval artifact does not match completed session",
+        mismatches,
+    )
+}
+
+const LA5_FLOAT_EPSILON: f64 = 0.000_000_001;
+
+fn la5_compare_f64(mismatches: &mut Vec<String>, label: &str, approved: f64, actual: f64) {
+    if (approved - actual).abs() > LA5_FLOAT_EPSILON {
+        mismatches.push(label.to_string());
+    }
+}
+
+fn la5_addresses_equal(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn la5_fail_on_approval_mismatches(
+    prefix: &str,
+    mut mismatches: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        mismatches.sort_unstable();
+        mismatches.dedup();
+        Err(format!("{prefix}: {}", mismatches.join(",")).into())
+    }
 }
 
 fn sample_la5_maker_intent(
@@ -3187,6 +3569,7 @@ async fn run_live_alpha_maker_micro_live_session(
     config: &AppConfig,
     run_id: &str,
     approval_id: &str,
+    approval_artifact: &La5ApprovalArtifactFields,
     max_orders: u64,
     max_duration_sec: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -3263,6 +3646,12 @@ async fn run_live_alpha_maker_micro_live_session(
         .as_ref()
         .map(|collateral| collateral.allowance_units)
         .ok_or("LA5 live readback missing collateral allowance evidence")?;
+    validate_la5_approval_against_account_readback(
+        approval_artifact,
+        &account,
+        &initial_readback,
+        initial_allowance_units,
+    )?;
 
     println!("live_alpha_maker_micro_live_readback_status=passed");
     println!(
@@ -3387,6 +3776,7 @@ async fn run_live_alpha_maker_micro_live_session(
             .order_plan
             .clone()
             .ok_or("LA5 maker execution did not build an order plan")?;
+        validate_la5_plan_against_approval(approval_artifact, &plan, cumulative_notional)?;
         let submit_input = la5_maker_submit_input(config, &account, plan.clone());
 
         append_la5_journal_event(
@@ -3653,6 +4043,7 @@ async fn run_live_alpha_maker_micro_live_session(
         )
         .into());
     }
+    validate_la5_session_against_approval(approval_artifact, &outcomes, cumulative_notional)?;
     append_la5_journal_event(
         &journal,
         run_id,
@@ -7631,40 +8022,14 @@ Status: PENDING LIVE READBACK AND HUMAN APPROVAL
 
     #[test]
     fn la5_approval_artifact_requires_all_final_gate_fields() {
-        let artifact = r#"
-Status: LA5 APPROVED FOR THIS RUN ONLY
+        let artifact = la5_valid_approval_artifact_text();
 
-| Field | Value |
-| --- | --- |
-| approved_wallet | `0x1111111111111111111111111111111111111111` |
-| approved_funder | `0x2222222222222222222222222222222222222222` |
-| max_single_order_notional | `2.56` |
-| max_total_live_notional | `2.56` |
-| max_available_pusd_usage | `1.0` |
-| max_reserved_pusd | `1.0` |
-| max_fee_spend | `0.06` |
-| max_orders | `3` |
-| max_open_orders | `1` |
-| max_duration_sec | `300` |
-| no_trade_seconds_before_close | `600` |
-| ttl_seconds | `30` |
-| venue_gtd_expiration_delta | `90` |
-| signature_type | `1` |
-| available_pusd_units | `3000000` |
-| reserved_pusd_units | `0` |
-| open_order_count | `0` |
-| heartbeat_status | `not_started_no_open_orders` |
-| funder_allowance_units | `3000000` |
-| rollback_owner | `primary-agent` |
-| monitoring_owner | `primary-agent` |
-| approval_id | `LA5-approval-1` |
-| approval_date | `2026-05-05` |
-
-Approved: Operator authorized agent-run LA5; human action limited to PR merge
-"#;
-
-        validate_la5_approval_artifact_text(artifact, "LA5-approval-1")
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
             .expect("complete final artifact validates");
+
+        assert_eq!(approval.max_orders, 3);
+        assert_eq!(approval.ttl_seconds, 30);
+        assert_eq!(approval.venue_gtd_expiration_delta, 90);
     }
 
     #[test]
@@ -7704,6 +8069,310 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
         let error = error.to_string();
         assert!(error.contains("approval_field_pending:available_pusd_units"));
         assert!(error.contains("approval_field_pending:funder_allowance_units"));
+    }
+
+    #[test]
+    fn la5_approval_binding_rejects_mismatched_max_orders() {
+        let artifact = la5_approval_artifact_with_field("max_orders", "`1`");
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect("artifact parses before binding");
+        let config = la5_test_config();
+
+        let error = validate_la5_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA5-approval-1",
+            3,
+            300,
+        )
+        .expect_err("artifact max_orders must bind to CLI max_orders")
+        .to_string();
+
+        assert!(error.contains("approval_max_orders_mismatch"));
+    }
+
+    #[test]
+    fn la5_approval_binding_rejects_mismatched_wallet_and_funder() {
+        let artifact = la5_approval_artifact_with_field(
+            "approved_wallet",
+            "`0x3333333333333333333333333333333333333333`",
+        );
+        let artifact = la5_replace_approval_field(
+            &artifact,
+            "approved_funder",
+            "`0x4444444444444444444444444444444444444444`",
+        );
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect("artifact parses before binding");
+        let config = la5_test_config();
+
+        let error = validate_la5_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA5-approval-1",
+            3,
+            300,
+        )
+        .expect_err("artifact wallet/funder must bind to config account")
+        .to_string();
+
+        assert!(error.contains("approval_wallet_mismatch"));
+        assert!(error.contains("approval_funder_mismatch"));
+    }
+
+    #[test]
+    fn la5_approval_binding_rejects_unapproved_notional_cap() {
+        let artifact = la5_approval_artifact_with_field("max_single_order_notional", "`0.50`");
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect("artifact parses before binding");
+        let plan = la5_test_maker_plan();
+
+        let error = validate_la5_plan_against_approval(&approval, &plan, 0.0)
+            .expect_err("plan notional must stay inside artifact cap")
+            .to_string();
+
+        assert!(error.contains("approval_plan_single_notional_exceeds_cap"));
+    }
+
+    #[test]
+    fn la5_approval_binding_rejects_mismatched_ttl_and_gtd_delta() {
+        let artifact = la5_approval_artifact_with_field("ttl_seconds", "`31`");
+        let artifact = la5_replace_approval_field(&artifact, "venue_gtd_expiration_delta", "`89`");
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect("artifact parses before binding");
+        let config = la5_test_config();
+        let plan = la5_test_maker_plan();
+
+        let config_error = validate_la5_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA5-approval-1",
+            3,
+            300,
+        )
+        .expect_err("artifact TTL/GTD delta must bind to config")
+        .to_string();
+        let plan_error = validate_la5_plan_against_approval(&approval, &plan, 0.0)
+            .expect_err("artifact TTL/GTD delta must bind to submitted plan")
+            .to_string();
+
+        assert!(config_error.contains("approval_ttl_seconds_mismatch"));
+        assert!(config_error.contains("approval_venue_gtd_expiration_delta_mismatch"));
+        assert!(plan_error.contains("approval_plan_ttl_seconds_mismatch"));
+        assert!(plan_error.contains("approval_plan_gtd_delta_mismatch"));
+    }
+
+    #[test]
+    fn la5_approval_binding_rejects_mismatched_readback_values() {
+        let artifact = la5_approval_artifact_with_field("available_pusd_units", "`123`");
+        let artifact = la5_replace_approval_field(&artifact, "open_order_count", "`1`");
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect("artifact parses before binding");
+        let account = la5_test_account();
+        let readback = la5_test_readback();
+
+        let error = validate_la5_approval_against_account_readback(
+            &approval,
+            &account,
+            &readback,
+            18446744073709551615,
+        )
+        .expect_err("artifact readback fields must match authenticated readback")
+        .to_string();
+
+        assert!(error.contains("approval_available_pusd_units_mismatch"));
+        assert!(error.contains("approval_open_order_count_mismatch"));
+    }
+
+    #[test]
+    fn la5_approval_binding_accepts_matching_cli_config_readback_plan_and_session() {
+        let artifact = la5_valid_approval_artifact_text();
+        let approval = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect("artifact parses");
+        let config = la5_test_config();
+        let account = la5_test_account();
+        let readback = la5_test_readback();
+        let plan = la5_test_maker_plan();
+        let outcomes = vec![
+            la5_test_outcome(1, 0.85),
+            la5_test_outcome(2, 0.85),
+            la5_test_outcome(3, 0.85),
+        ];
+
+        validate_la5_approval_against_cli_and_config(&approval, &config, "LA5-approval-1", 3, 300)
+            .expect("matching CLI/config passes");
+        validate_la5_approval_against_account_readback(
+            &approval,
+            &account,
+            &readback,
+            18446744073709551615,
+        )
+        .expect("matching readback passes");
+        validate_la5_plan_against_approval(&approval, &plan, 0.0).expect("matching plan passes");
+        validate_la5_session_against_approval(&approval, &outcomes, 2.55)
+            .expect("matching session passes");
+    }
+
+    fn la5_valid_approval_artifact_text() -> String {
+        r#"
+Status: LA5 APPROVED FOR THIS RUN ONLY
+
+| Field | Value |
+| --- | --- |
+| approved_wallet | `0x1111111111111111111111111111111111111111` |
+| approved_funder | `0x2222222222222222222222222222222222222222` |
+| max_single_order_notional | `2.56` |
+| max_total_live_notional | `2.56` |
+| max_available_pusd_usage | `1.0` |
+| max_reserved_pusd | `1.0` |
+| max_fee_spend | `0.06` |
+| max_orders | `3` |
+| max_open_orders | `1` |
+| max_duration_sec | `300` |
+| no_trade_seconds_before_close | `600` |
+| ttl_seconds | `30` effective quote TTL |
+| venue_gtd_expiration_delta | `90` seconds |
+| signature_type | `1` |
+| available_pusd_units | `6314318` |
+| reserved_pusd_units | `0` |
+| open_order_count | `0` |
+| heartbeat_status | `not_started_no_open_orders` |
+| funder_allowance_units | `18446744073709551615` |
+| rollback_owner | `primary-agent` |
+| monitoring_owner | `primary-agent` |
+| approval_id | `LA5-approval-1` |
+| approval_date | `2026-05-05` |
+
+Approved: Operator authorized agent-run LA5; human action limited to PR merge
+"#
+        .to_string()
+    }
+
+    fn la5_approval_artifact_with_field(field: &str, value: &str) -> String {
+        la5_replace_approval_field(&la5_valid_approval_artifact_text(), field, value)
+    }
+
+    fn la5_replace_approval_field(artifact: &str, field: &str, value: &str) -> String {
+        artifact
+            .lines()
+            .map(|line| {
+                let cells = line.split('|').map(str::trim).collect::<Vec<_>>();
+                if cells.len() >= 3 && cells[1] == field {
+                    format!("| {field} | {value} |")
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn la5_test_config() -> AppConfig {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_beta.readback_account.wallet_address =
+            "0x1111111111111111111111111111111111111111".to_string();
+        config.live_beta.readback_account.funder_address =
+            "0x2222222222222222222222222222222222222222".to_string();
+        config.live_beta.readback_account.signature_type = "1".to_string();
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::MakerMicro;
+        config.live_alpha.maker.enabled = true;
+        config.live_alpha.maker.post_only = true;
+        config.live_alpha.maker.order_type = "GTD".to_string();
+        config.live_alpha.maker.ttl_seconds = 30;
+        config.live_alpha.risk.max_single_order_notional = 2.56;
+        config.live_alpha.risk.max_total_live_notional = 2.56;
+        config.live_alpha.risk.max_available_pusd_usage = 1.0;
+        config.live_alpha.risk.max_reserved_pusd = 1.0;
+        config.live_alpha.risk.max_fee_spend = 0.06;
+        config.live_alpha.risk.max_open_orders = 1;
+        config.live_alpha.risk.no_trade_seconds_before_close = 600;
+        config
+    }
+
+    fn la5_test_account() -> AccountPreflight {
+        AccountPreflight {
+            clob_host: live_beta_readback::CLOB_HOST.to_string(),
+            chain_id: 137,
+            wallet_address: "0x1111111111111111111111111111111111111111".to_string(),
+            funder_address: "0x2222222222222222222222222222222222222222".to_string(),
+            signature_type: SignatureType::PolyProxy,
+        }
+    }
+
+    fn la5_test_readback() -> ReadbackPreflightValidation {
+        ReadbackPreflightValidation {
+            report: ReadbackPreflightReport {
+                status: "passed",
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 23,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1_000_000,
+                available_pusd_units: 6_314_318,
+                venue_state: "trading_enabled",
+                heartbeat: "not_started_no_open_orders",
+                live_network_enabled: true,
+            },
+            collateral: Some(live_beta_readback::BalanceAllowanceReadback {
+                asset_type: live_beta_readback::AssetType::Collateral,
+                token_id: None,
+                balance_units: 6_314_318,
+                allowance_units: 18446744073709551615,
+            }),
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        }
+    }
+
+    fn la5_test_maker_plan() -> LiveMakerOrderPlan {
+        LiveMakerOrderPlan {
+            intent_id: "la5-test-intent".to_string(),
+            token_id: "token-up".to_string(),
+            outcome: "Up".to_string(),
+            side: Side::Buy,
+            price: 0.17,
+            size: 5.0,
+            notional: 0.85,
+            post_only: true,
+            order_type: "GTD".to_string(),
+            effective_quote_ttl_seconds: 30,
+            gtd_expiration_unix: 1_000_090,
+            cancel_after_unix: 1_000_030,
+            reason_codes: Vec::new(),
+        }
+    }
+
+    fn la5_test_outcome(sequence: u64, notional: f64) -> La5MakerOrderOutcome {
+        La5MakerOrderOutcome {
+            sequence,
+            intent_id: format!("la5-test-intent-{sequence}"),
+            market_slug: "btc-updown-15m-test".to_string(),
+            token_id: "token-up".to_string(),
+            outcome: "Up".to_string(),
+            side: Side::Buy,
+            price: 0.17,
+            size: 5.0,
+            notional,
+            gtd_expiration_unix: 1_000_090 + sequence,
+            cancel_after_unix: 1_000_030 + sequence,
+            order_id: format!("order-{sequence}"),
+            accepted_status: "LIVE".to_string(),
+            final_status: "CANCELED".to_string(),
+            canceled: true,
+            cancel_request_sent: false,
+            exact_cancel_confirmed: false,
+            venue_final_canceled: true,
+            filled: false,
+            trade_ids: Vec::new(),
+            pre_submit_available_pusd_units: 6_314_318,
+            post_order_available_pusd_units: 6_314_318,
+            final_available_pusd_units: 6_314_318,
+            final_reserved_pusd_units: 0,
+            reconciliation_status: "passed".to_string(),
+            reconciliation_mismatches: String::new(),
+        }
     }
 
     fn test_paper_market(asset: Asset, start_ts: i64, end_ts: i64) -> Market {

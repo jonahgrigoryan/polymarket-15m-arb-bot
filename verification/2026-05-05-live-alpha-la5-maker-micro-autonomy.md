@@ -217,19 +217,35 @@ Computer Use post-run browser comparison:
 - The live-run outcome JSON emitted by the pre-closeout build used `canceled=false` to mean no explicit cancel request was sent. The code now distinguishes `cancel_request_sent`, `exact_cancel_confirmed`, and `venue_final_canceled` so future evidence does not blur explicit cancel attempts with final venue-canceled status.
 - Observation for the broad validation command: the legacy startup-recovery portion of `validate --live-readback-preflight` can still flag historical account trades as reconciliation work outside the LA5 run. The LA5 live session uses a run-scoped baseline trade set and passed reconciliation for the three-order session.
 
+## PR #34 P1 Review Fix
+
+Review blocker fixed after the initial closeout commit: the human-approved LA5 path no longer accepts an approval artifact that merely has final-looking fields. It now parses `verification/2026-05-05-live-alpha-la5-approval.md` into typed fields and fails closed if those fields do not match:
+
+- CLI args: `approval_id`, `max_orders`, and `max_duration_sec`.
+- Config: wallet/funder, signature type, risk caps, maker TTL, GTD delta, order type, and post-only scope.
+- Authenticated readback: available pUSD units, reserved pUSD units, open-order count, heartbeat status, and funder allowance units.
+- Submitted plan/session: order count, single-order notional cap, total notional cap, effective TTL, GTD delta, order type, and post-only flag.
+
+Regression coverage added:
+
+```text
+cargo test --offline la5_approval --bin polymarket-15m-arb-bot: PASS, 9 focused tests.
+cargo test --offline live_maker_micro --lib: PASS, 4 focused tests.
+```
+
 ## Final Verification
 
-Final closeout gates were run after the live run and document/code closeout:
+Final closeout gates were rerun after the live run, document/code closeout, and PR #34 P1 approval-binding fix:
 
 ```text
 cargo fmt --check: PASS
-cargo test --offline: PASS, 342 library tests, 29 binary tests, 0 doc tests
+cargo test --offline: PASS, 342 library tests, 35 binary tests, 0 doc tests
 cargo clippy --offline -- -D warnings: PASS
 git diff --check: PASS
-cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad0ad68643b7f0-3db1-0
-cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad0ad81b881210-3e81-0
+cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad104305197e40-6f0f-0
+cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad1045e72d2fa0-6fa7-0
 four-handle presence check after sourcing .env: PASS
-LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, and Live Alpha/Live Beta documentation hits only
+LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, and Live Alpha/Live Beta documentation hits only; order scan 1034 hits, secret scan 1259 hits, gate scan 1386 hits
 ```
 
 ## Live Run Fields
