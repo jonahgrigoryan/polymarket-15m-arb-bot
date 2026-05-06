@@ -226,26 +226,33 @@ Review blocker fixed after the initial closeout commit: the human-approved LA5 p
 - Authenticated readback: available pUSD units, reserved pUSD units, open-order count, heartbeat status, and funder allowance units.
 - Submitted plan/session: order count, single-order notional cap, total notional cap, effective TTL, GTD delta, order type, and post-only flag.
 
+Remaining Cursor review blockers were fixed after that binding patch:
+
+- Completed or consumed approval artifacts now fail closed before any future LA5 human-approved submit path. The current approval artifact intentionally says `Execution Gate Status: LA5 RUN COMPLETED`, so it is no longer reusable for a second live run.
+- The human-approved LA5 command now atomically reserves a per-approval cap file before entering the live maker session. The reservation uses `create_new` under gitignored `reports/live-alpha-la5-approval-caps/` and binds `approval_id`, approval artifact SHA-256, artifact path, `max_orders`, `max_duration_sec`, and reservation time.
+- A second command using the same approval ID fails closed on the existing cap before any submit.
+- The human-approved LA5 live-submit path now explicitly requires the compile-time `live-alpha-orders` feature, `LIVE_ORDER_PLACEMENT_ENABLED=true`, and `kill_switch_active=false` before accepting the approval for live execution.
+
 Regression coverage added:
 
 ```text
-cargo test --offline la5_approval --bin polymarket-15m-arb-bot: PASS, 9 focused tests.
+cargo test --offline la5_ --bin polymarket-15m-arb-bot: PASS, 13 focused tests.
 cargo test --offline live_maker_micro --lib: PASS, 4 focused tests.
 ```
 
 ## Final Verification
 
-Final closeout gates were rerun after the live run, document/code closeout, and PR #34 P1 approval-binding fix:
+Final closeout gates were rerun after the live run, document/code closeout, PR #34 approval-binding fix, and the remaining approval-reuse/live-submit gate hardening:
 
 ```text
 cargo fmt --check: PASS
-cargo test --offline: PASS, 342 library tests, 35 binary tests, 0 doc tests
+cargo test --offline: PASS, 342 library tests, 39 binary tests, 0 doc tests
 cargo clippy --offline -- -D warnings: PASS
 git diff --check: PASS
-cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad104305197e40-6f0f-0
-cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad1045e72d2fa0-6fa7-0
+cargo run --offline -- --config config/local.toml validate --local-only: PASS, run_id=18ad110004674960-7f54-0
+cargo run --features live-alpha-orders -- --config config/local.toml validate --local-only --validate-secret-handles: PASS, run_id=18ad110003072108-7f53-0
 four-handle presence check after sourcing .env: PASS
-LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, and Live Alpha/Live Beta documentation hits only; order scan 1034 hits, secret scan 1259 hits, gate scan 1386 hits
+LA5 safety/no-secret scans: PASS with expected public order IDs, public wallet/funder IDs, secret handle names, feature-gated order/cancel code, approval-cap code, and Live Alpha/Live Beta documentation hits only.
 ```
 
 ## Live Run Fields

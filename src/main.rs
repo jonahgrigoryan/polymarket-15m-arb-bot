@@ -2896,9 +2896,7 @@ async fn run_live_alpha_maker_micro_command(
     }
 
     if human_approved {
-        if !live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED {
-            return Err("LA5 live maker submit requires --features live-alpha-orders".into());
-        }
+        validate_la5_live_submit_runtime_gates(config)?;
         let approval_id = approval_id
             .as_deref()
             .map(str::trim)
@@ -2916,11 +2914,28 @@ async fn run_live_alpha_maker_micro_command(
             max_orders,
             max_duration_sec,
         )?;
+        let approval_artifact_sha256 = live_fill_canary::approval_hash(&approval_text);
+        let approval_cap_path = la5_approval_cap_path(config, approval_id)?;
+        reserve_la5_approval_cap(
+            &approval_cap_path,
+            &La5ApprovalCapReservation {
+                approval_id: approval_id.to_string(),
+                approval_artifact_sha256,
+                approval_artifact_path: approval_artifact.display().to_string(),
+                max_orders,
+                max_duration_sec,
+                reserved_at_unix: unix_time_secs(),
+            },
+        )?;
 
         println!("live_alpha_maker_micro_approval_id={approval_id}");
         println!(
             "live_alpha_maker_micro_approval_artifact={}",
             approval_artifact.display()
+        );
+        println!(
+            "live_alpha_maker_micro_approval_cap_path={}",
+            approval_cap_path.display()
         );
         return run_live_alpha_maker_micro_live_session(
             config,
@@ -3005,6 +3020,16 @@ async fn run_live_alpha_maker_micro_command(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct La5ApprovalCapReservation {
+    approval_id: String,
+    approval_artifact_sha256: String,
+    approval_artifact_path: String,
+    max_orders: u64,
+    max_duration_sec: u64,
+    reserved_at_unix: u64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct La5ApprovalArtifactFields {
     approved_wallet: String,
@@ -3050,6 +3075,9 @@ fn validate_la5_approval_artifact_text(
     {
         errors.push("human_approval_or_live_readback_pending".to_string());
     }
+    if la5_approval_artifact_indicates_consumed(text) {
+        errors.push("approval_artifact_consumed".to_string());
+    }
     for field in LA5_APPROVAL_REQUIRED_FIELDS {
         match la5_approval_table_value(text, field) {
             Some(value) if la5_approval_value_is_final(&value) => {}
@@ -3069,6 +3097,20 @@ fn validate_la5_approval_artifact_text(
         errors.dedup();
         Err(format!("LA5 approval artifact is not final: {}", errors.join(",")).into())
     }
+}
+
+fn la5_approval_artifact_indicates_consumed(text: &str) -> bool {
+    const CONSUMED_MARKERS: &[&str] = &[
+        "EXECUTION GATE STATUS: LA5 RUN COMPLETED",
+        "EXECUTION GATE STATUS: LA5 RUN CONSUMED",
+        "EXECUTION GATE STATUS: LA5 APPROVAL CONSUMED",
+        "EXECUTION RESULT: COMPLETED",
+        "APPROVAL CONSUMED",
+        "LA5 RUN COMPLETED",
+        "AUTHORIZED SESSION COMPLETED",
+    ];
+    let upper = text.to_ascii_uppercase();
+    CONSUMED_MARKERS.iter().any(|marker| upper.contains(marker))
 }
 
 const LA5_APPROVAL_REQUIRED_FIELDS: &[&str] = &[
@@ -3464,6 +3506,102 @@ fn la5_fail_on_approval_mismatches(
         mismatches.dedup();
         Err(format!("{prefix}: {}", mismatches.join(",")).into())
     }
+}
+
+fn validate_la5_live_submit_runtime_gates(
+    config: &AppConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_la5_live_submit_runtime_gate_values(
+        live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED,
+        safety::LIVE_ORDER_PLACEMENT_ENABLED,
+        config.live_beta.kill_switch_active,
+    )
+}
+
+fn validate_la5_live_submit_runtime_gate_values(
+    compile_time_orders_enabled: bool,
+    live_order_placement_enabled: bool,
+    kill_switch_active: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut block_reasons = Vec::<&'static str>::new();
+    if !compile_time_orders_enabled {
+        block_reasons.push("compile_time_live_disabled");
+    }
+    if !live_order_placement_enabled {
+        block_reasons.push("live_order_placement_disabled");
+    }
+    if kill_switch_active {
+        block_reasons.push("kill_switch_active");
+    }
+    if block_reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "LA5 live maker submit gate blocked: {}",
+            block_reasons.join(",")
+        )
+        .into())
+    }
+}
+
+fn la5_approval_cap_path(
+    config: &AppConfig,
+    approval_id: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let cap_root = config
+        .live_alpha
+        .journal_path()
+        .and_then(|journal_path| {
+            Path::new(journal_path)
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+        })
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("reports"));
+    Ok(cap_root
+        .join("live-alpha-la5-approval-caps")
+        .join(format!("{}.json", la5_cap_filename_fragment(approval_id)?)))
+}
+
+fn la5_cap_filename_fragment(approval_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let sanitized = approval_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.trim_matches('_').is_empty() {
+        Err("LA5 approval ID cannot produce a cap filename".into())
+    } else {
+        Ok(sanitized)
+    }
+}
+
+fn reserve_la5_approval_cap(
+    path: &Path,
+    reservation: &La5ApprovalCapReservation,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_canary_order_cap_parent(path)?;
+    let contents = serde_json::to_string_pretty(reservation)?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err("LA5 approval cap is already reserved or consumed".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(contents.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn sample_la5_maker_intent(
@@ -8069,6 +8207,87 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
         let error = error.to_string();
         assert!(error.contains("approval_field_pending:available_pusd_units"));
         assert!(error.contains("approval_field_pending:funder_allowance_units"));
+    }
+
+    #[test]
+    fn la5_approval_artifact_rejects_completed_or_consumed_status() {
+        let artifact = format!(
+            "{}\nExecution Gate Status: LA5 RUN COMPLETED\n",
+            la5_valid_approval_artifact_text()
+        );
+
+        let error = validate_la5_approval_artifact_text(&artifact, "LA5-approval-1")
+            .expect_err("completed approval artifact must fail closed")
+            .to_string();
+
+        assert!(error.contains("approval_artifact_consumed"));
+    }
+
+    #[test]
+    fn la5_approval_cap_reservation_fails_closed_on_duplicate() {
+        let parent = std::env::temp_dir().join(format!(
+            "p15m-la5-cap-{}-{}",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        let path = parent.join("LA5-approval-1.json");
+        let first_reservation = La5ApprovalCapReservation {
+            approval_id: "LA5-approval-1".to_string(),
+            approval_artifact_sha256: "sha256:first".to_string(),
+            approval_artifact_path: "verification/la5-approval.md".to_string(),
+            max_orders: 3,
+            max_duration_sec: 300,
+            reserved_at_unix: 1_234_567,
+        };
+        let second_reservation = La5ApprovalCapReservation {
+            approval_id: "LA5-approval-1".to_string(),
+            approval_artifact_sha256: "sha256:second".to_string(),
+            approval_artifact_path: "verification/other-la5-approval.md".to_string(),
+            max_orders: 1,
+            max_duration_sec: 30,
+            reserved_at_unix: 1_234_568,
+        };
+
+        reserve_la5_approval_cap(&path, &first_reservation).expect("first reservation succeeds");
+        let first_state = fs::read_to_string(&path).expect("reserved cap reads");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&first_state).expect("reserved cap parses");
+        let second_error = reserve_la5_approval_cap(&path, &second_reservation)
+            .expect_err("second reservation fails closed")
+            .to_string();
+        let final_state = fs::read_to_string(&path).expect("final cap reads");
+
+        assert!(second_error.contains("already reserved or consumed"));
+        assert_eq!(parsed["approval_id"], "LA5-approval-1");
+        assert_eq!(parsed["approval_artifact_sha256"], "sha256:first");
+        assert_eq!(
+            parsed["approval_artifact_path"],
+            "verification/la5-approval.md"
+        );
+        assert_eq!(parsed["max_orders"], 3);
+        assert_eq!(parsed["max_duration_sec"], 300);
+        assert_eq!(final_state, first_state);
+
+        fs::remove_file(path).expect("test cap state removed");
+        fs::remove_dir_all(parent).expect("test cap parent removed");
+    }
+
+    #[test]
+    fn la5_human_approved_gate_rejects_kill_switch_active() {
+        let error = validate_la5_live_submit_runtime_gate_values(true, true, true)
+            .expect_err("active kill switch must fail closed")
+            .to_string();
+
+        assert!(error.contains("kill_switch_active"));
+    }
+
+    #[test]
+    fn la5_human_approved_gate_rejects_live_placement_disabled() {
+        let error = validate_la5_live_submit_runtime_gate_values(true, false, false)
+            .expect_err("disabled live placement must fail closed")
+            .to_string();
+
+        assert!(error.contains("live_order_placement_disabled"));
     }
 
     #[test]
