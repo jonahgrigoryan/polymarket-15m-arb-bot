@@ -322,10 +322,13 @@ impl Default for LiveAlphaMakerConfig {
 impl LiveAlphaMakerConfig {
     fn validate(&self, errors: &mut Vec<String>) {
         if self.order_type != "GTD" {
-            errors.push("live_alpha.maker.order_type must remain GTD during LA2".to_string());
+            errors.push("live_alpha.maker.order_type must remain GTD during LA5".to_string());
         }
         if !self.post_only {
-            errors.push("live_alpha.maker.post_only must remain true during LA2".to_string());
+            errors.push("live_alpha.maker.post_only must remain true during LA5".to_string());
+        }
+        if self.enabled && self.ttl_seconds == 0 {
+            errors.push("live_alpha.maker.ttl_seconds must be positive during LA5".to_string());
         }
     }
 }

@@ -6,6 +6,7 @@ pub mod execution_intent;
 pub mod feed_ingestion;
 pub mod live_alpha_config;
 pub mod live_alpha_gate;
+pub mod live_alpha_metrics;
 pub mod live_alpha_preflight;
 pub mod live_balance_tracker;
 pub mod live_beta_canary;
@@ -16,9 +17,11 @@ pub mod live_beta_signing;
 pub mod live_executor;
 pub mod live_fill_canary;
 pub mod live_heartbeat;
+pub mod live_maker_micro;
 pub mod live_order_journal;
 pub mod live_position_book;
 pub mod live_reconciliation;
+pub mod live_risk_engine;
 pub mod live_startup_recovery;
 pub mod live_user_events;
 pub mod market_discovery;
@@ -46,6 +49,7 @@ pub fn module_names() -> Vec<&'static str> {
         feed_ingestion::MODULE,
         live_alpha_config::MODULE,
         live_alpha_gate::MODULE,
+        live_alpha_metrics::MODULE,
         live_alpha_preflight::MODULE,
         live_fill_canary::MODULE,
         live_balance_tracker::MODULE,
@@ -56,9 +60,11 @@ pub fn module_names() -> Vec<&'static str> {
         live_beta_signing::MODULE,
         live_executor::MODULE,
         live_heartbeat::MODULE,
+        live_maker_micro::MODULE,
         live_order_journal::MODULE,
         live_position_book::MODULE,
         live_reconciliation::MODULE,
+        live_risk_engine::MODULE,
         live_startup_recovery::MODULE,
         live_user_events::MODULE,
         market_discovery::MODULE,

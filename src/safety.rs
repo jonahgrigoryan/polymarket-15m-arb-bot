@@ -1,5 +1,9 @@
 pub const MODULE: &str = "safety";
 
+#[cfg(feature = "live-alpha-orders")]
+pub const LIVE_ORDER_PLACEMENT_ENABLED: bool = true;
+
+#[cfg(not(feature = "live-alpha-orders"))]
 pub const LIVE_ORDER_PLACEMENT_ENABLED: bool = false;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,8 +145,15 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(feature = "live-alpha-orders"))]
     fn live_order_placement_is_disabled_by_default() {
         assert!(!LIVE_ORDER_PLACEMENT_ENABLED);
+    }
+
+    #[test]
+    #[cfg(feature = "live-alpha-orders")]
+    fn live_order_placement_is_enabled_only_by_explicit_feature() {
+        assert!(LIVE_ORDER_PLACEMENT_ENABLED);
     }
 
     #[test]
@@ -162,6 +173,7 @@ mod tests {
         assert!(decision
             .block_reasons
             .contains(&LiveModeGateBlockReason::MissingCliIntent));
+        #[cfg(not(feature = "live-alpha-orders"))]
         assert!(decision
             .block_reasons
             .contains(&LiveModeGateBlockReason::PlacementDisabled));
@@ -187,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "live-alpha-orders"))]
     fn lb1_gate_remains_closed_even_when_visible_inputs_pass() {
         let decision = evaluate_live_mode_gate(LiveModeGateInput {
             config_intent_enabled: true,
@@ -201,5 +214,20 @@ mod tests {
             decision.block_reasons,
             vec![LiveModeGateBlockReason::PlacementDisabled]
         );
+    }
+
+    #[test]
+    #[cfg(feature = "live-alpha-orders")]
+    fn live_mode_gate_allows_explicit_feature_build_when_visible_inputs_pass() {
+        let decision = evaluate_live_mode_gate(LiveModeGateInput {
+            config_intent_enabled: true,
+            cli_intent_enabled: true,
+            kill_switch_active: false,
+            geoblock_status: GeoblockGateStatus::Passed,
+            later_phase_approvals_complete: true,
+        });
+
+        assert!(decision.allowed);
+        assert!(decision.block_reasons.is_empty());
     }
 }
