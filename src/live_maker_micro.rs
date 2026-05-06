@@ -100,6 +100,12 @@ pub fn build_live_maker_order_plan(
             "risk approval TTL must match maker effective quote TTL".to_string(),
         ]));
     }
+    if intent.edge_bps < maker.min_edge_bps as f64 {
+        return Err(LiveMakerError::Validation(vec![format!(
+            "intent edge_bps {:.2} below live_alpha.maker.min_edge_bps {}",
+            intent.edge_bps, maker.min_edge_bps
+        )]));
+    }
     let gtd_expiration_unix = venue_gtd_expiration_unix(now_unix, maker.ttl_seconds);
     Ok(LiveMakerOrderPlan {
         intent_id: intent.intent_id.clone(),
@@ -618,6 +624,20 @@ mod tests {
         .expect_err("zero ttl fails");
 
         assert!(error.to_string().contains("live_alpha.maker.ttl_seconds"));
+    }
+
+    #[test]
+    fn maker_only_plan_rejects_edge_below_configured_minimum() {
+        let mut maker = maker_config();
+        maker.min_edge_bps = 100;
+        let mut intent = sample_intent();
+        intent.edge_bps = 99.0;
+
+        let error = build_live_maker_order_plan(&intent, &sample_approval(), &maker, 1_777_000_000)
+            .expect_err("edge below configured threshold fails closed");
+
+        assert!(error.to_string().contains("intent edge_bps"));
+        assert!(error.to_string().contains("live_alpha.maker.min_edge_bps"));
     }
 
     #[test]

@@ -95,6 +95,7 @@ use polymarket_15m_arb_bot::{
     safety,
     secret_handling::{self, EnvSecretPresenceProvider},
     shutdown::{GracefulShutdownState, RuntimeMode},
+    signal_engine::SignalEngineConfig,
     storage::{
         ConfigSnapshot, FileSessionStorage, InMemoryStorage, PaperBalanceSnapshot,
         PostgresMarketStore, RawMessage, RiskEvent, StorageBackend, StorageError,
@@ -3693,6 +3694,10 @@ struct La5MakerMarketIntent {
     book_age_ms: u64,
     reference_snapshot_id: String,
     reference_age_ms: u64,
+    predictive_snapshot_id: String,
+    predictive_age_ms: u64,
+    fair_probability: f64,
+    edge_bps: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3967,6 +3972,10 @@ async fn run_live_alpha_maker_micro_live_session(
                 "book_age_ms": market_intent.book_age_ms,
                 "reference_snapshot_id": market_intent.reference_snapshot_id,
                 "reference_age_ms": market_intent.reference_age_ms,
+                "predictive_snapshot_id": market_intent.predictive_snapshot_id,
+                "predictive_age_ms": market_intent.predictive_age_ms,
+                "fair_probability": market_intent.fair_probability,
+                "edge_bps": market_intent.edge_bps,
                 "effective_quote_ttl_seconds": plan.effective_quote_ttl_seconds,
                 "gtd_expiration_unix": plan.gtd_expiration_unix,
                 "cancel_after_unix": plan.cancel_after_unix,
@@ -4441,6 +4450,24 @@ async fn build_la5_market_intent_from_market(
     let reference_price = reference
         .price
         .ok_or_else(|| format!("{} missing reference price", market.slug))?;
+    let predictive = live_alpha_predictive_evidence(config, market.asset).await?;
+    let predictive_snapshot_id = predictive
+        .snapshot_id
+        .clone()
+        .ok_or_else(|| format!("{} missing predictive snapshot", market.slug))?;
+    let predictive_age_ms = predictive
+        .age_ms
+        .ok_or_else(|| format!("{} missing predictive age", market.slug))?;
+    if predictive_age_ms > config.feeds.stale_after_ms {
+        return Err(format!(
+            "{} predictive_stale age_ms={predictive_age_ms}",
+            market.slug
+        )
+        .into());
+    }
+    let predictive_price = predictive
+        .price
+        .ok_or_else(|| format!("{} missing predictive price", market.slug))?;
     let max_order_notional = la5_max_order_notional(config, max_orders, cumulative_notional);
     let available_pusd = fixed6_units_to_decimal(available_pusd_units);
     let max_order_notional = max_order_notional.min(available_pusd);
@@ -4457,16 +4484,31 @@ async fn build_la5_market_intent_from_market(
     if notional > max_order_notional + 1e-9 {
         return Err(format!("{} notional_exceeds_la5_cap", market.slug).into());
     }
-    let fair_probability = (price + (config.live_alpha.maker.min_edge_bps as f64 / 10_000.0))
-        .max(price)
-        .min(0.99);
+    let signal_config = SignalEngineConfig::from(&config.strategy);
+    let fair_probability = la5_fair_probability_from_reference_and_predictive(
+        reference_price,
+        predictive_price,
+        &outcome.outcome,
+        signal_config.fair_probability_slope,
+    )
+    .map_err(|error| format!("{} {error}", market.slug))?;
+    let edge_bps = la5_edge_bps_from_fair_probability(fair_probability, price);
+    if edge_bps < config.live_alpha.maker.min_edge_bps as f64 {
+        return Err(format!(
+            "{} edge_below_minimum edge_bps={edge_bps:.2} required_edge_bps={}",
+            market.slug, config.live_alpha.maker.min_edge_bps
+        )
+        .into());
+    }
     let intent = polymarket_15m_arb_bot::execution_intent::ExecutionIntent {
         intent_id: format!(
             "la5-{sequence}-{}-{}",
             market.asset.symbol().to_ascii_lowercase(),
             now_ms
         ),
-        strategy_snapshot_id: format!("la5-live-{sequence}-{reference_snapshot_id}"),
+        strategy_snapshot_id: format!(
+            "la5-live-{sequence}-{reference_snapshot_id}-{predictive_snapshot_id}"
+        ),
         market_slug: market.slug.clone(),
         condition_id: market.condition_id.clone(),
         token_id: outcome.token_id.clone(),
@@ -4482,7 +4524,7 @@ async fn build_la5_market_intent_from_market(
         post_only: true,
         expiry: None,
         fair_probability,
-        edge_bps: ((fair_probability - price) * 10_000.0).max(0.0),
+        edge_bps,
         reference_price,
         reference_source_timestamp: Some(now_ms.saturating_sub(reference_age_ms as i64)),
         book_snapshot_id: book_snapshot_id.clone(),
@@ -4506,6 +4548,10 @@ async fn build_la5_market_intent_from_market(
         book_age_ms,
         reference_snapshot_id,
         reference_age_ms,
+        predictive_snapshot_id,
+        predictive_age_ms,
+        fair_probability,
+        edge_bps,
     })
 }
 
@@ -4520,6 +4566,37 @@ fn la5_market_has_cancel_runway_before_no_trade_window(
         .min(i64::MAX as u64 / 1_000) as i64
         * 1_000;
     now_ms.saturating_add(required_runway_ms) < market_end_ms
+}
+
+fn la5_fair_probability_from_reference_and_predictive(
+    reference_price: f64,
+    predictive_price: f64,
+    outcome: &str,
+    fair_probability_slope: f64,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    if !reference_price.is_finite() || reference_price <= 0.0 {
+        return Err("invalid_reference_price_for_fair_probability".into());
+    }
+    if !predictive_price.is_finite() || predictive_price <= 0.0 {
+        return Err("invalid_predictive_price_for_fair_probability".into());
+    }
+    if !fair_probability_slope.is_finite() || fair_probability_slope <= 0.0 {
+        return Err("invalid_fair_probability_slope".into());
+    }
+
+    let move_fraction = (predictive_price - reference_price) / reference_price;
+    let probability_up = (0.5 + (move_fraction * fair_probability_slope)).clamp(0.0, 1.0);
+    if outcome.eq_ignore_ascii_case("Up") {
+        Ok(probability_up)
+    } else if outcome.eq_ignore_ascii_case("Down") {
+        Ok(1.0 - probability_up)
+    } else {
+        Err(format!("unsupported_outcome_for_fair_probability {outcome}").into())
+    }
+}
+
+fn la5_edge_bps_from_fair_probability(fair_probability: f64, price: f64) -> f64 {
+    (fair_probability - price) * 10_000.0
 }
 
 fn la5_live_risk_context(
@@ -5544,6 +5621,96 @@ struct LiveAlphaReferenceEvidence {
     snapshot_id: Option<String>,
     age_ms: Option<u64>,
     price: Option<f64>,
+}
+
+struct LiveAlphaPredictiveEvidence {
+    snapshot_id: Option<String>,
+    age_ms: Option<u64>,
+    price: Option<f64>,
+}
+
+async fn live_alpha_predictive_evidence(
+    config: &AppConfig,
+    asset: Asset,
+) -> Result<LiveAlphaPredictiveEvidence, Box<dyn std::error::Error>> {
+    let message_limit = usize::from(config.feeds.feed_smoke_message_limit).max(3);
+    let probes = [
+        FeedConnectionConfig {
+            source: SOURCE_BINANCE.to_string(),
+            ws_url: binance_combined_trade_url(&config.feeds.binance_ws_url),
+            subscribe_payload: None,
+            message_limit,
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+        FeedConnectionConfig {
+            source: SOURCE_COINBASE.to_string(),
+            ws_url: config.feeds.coinbase_ws_url.clone(),
+            subscribe_payload: Some(coinbase_ticker_subscription()),
+            message_limit,
+            connect_timeout_ms: config.feeds.connect_timeout_ms,
+            read_timeout_ms: config.feeds.read_timeout_ms,
+        },
+    ];
+    let client = ReadOnlyWebSocketClient;
+    let mut blockers = Vec::new();
+
+    for probe in probes {
+        match client.connect_and_capture(&probe).await {
+            Ok(result) => {
+                let mut events = Vec::new();
+                for message in result.received_text_messages {
+                    let recv_wall_ts = unix_time_ms();
+                    let batch = normalize_feed_message(&probe.source, &message, recv_wall_ts)?;
+                    events.extend(batch.events);
+                }
+                let evidence = live_alpha_predictive_evidence_from_events(events, asset);
+                if evidence.snapshot_id.is_some() {
+                    return Ok(evidence);
+                }
+                blockers.push(format!("{} missing predictive tick", probe.source));
+            }
+            Err(error) => blockers.push(format!("{} {error}", probe.source)),
+        }
+    }
+
+    Err(format!(
+        "missing live predictive price for {}: {}",
+        asset.symbol(),
+        blockers.join("; ")
+    )
+    .into())
+}
+
+fn live_alpha_predictive_evidence_from_events(
+    events: Vec<NormalizedEvent>,
+    asset: Asset,
+) -> LiveAlphaPredictiveEvidence {
+    let Some(price) = events
+        .into_iter()
+        .filter_map(|event| match event {
+            NormalizedEvent::PredictiveTick { price } if price.asset == asset => Some(price),
+            _ => None,
+        })
+        .max_by_key(|price| price.source_ts.unwrap_or(price.recv_wall_ts))
+    else {
+        return LiveAlphaPredictiveEvidence {
+            snapshot_id: None,
+            age_ms: None,
+            price: None,
+        };
+    };
+    let source_ts = price.source_ts.unwrap_or(price.recv_wall_ts);
+    LiveAlphaPredictiveEvidence {
+        snapshot_id: Some(format!(
+            "{}:{}:{}",
+            price.source,
+            price.provider.unwrap_or_else(|| "unknown".to_string()),
+            source_ts
+        )),
+        age_ms: age_ms(price.recv_wall_ts, source_ts),
+        price: Some(price.price),
+    }
 }
 
 async fn live_alpha_reference_evidence(
@@ -8666,6 +8833,73 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             no_trade_seconds_before_close,
             ttl_seconds,
         ));
+    }
+
+    #[test]
+    fn la5_fair_probability_uses_reference_and_predictive_not_min_edge() {
+        let fair_probability =
+            la5_fair_probability_from_reference_and_predictive(100.0, 97.0, "Up", 10.0)
+                .expect("fair probability derives from market evidence");
+        let edge_bps = la5_edge_bps_from_fair_probability(fair_probability, 0.20);
+
+        assert!((fair_probability - 0.20).abs() < 1e-9);
+        assert!(edge_bps.abs() < 1e-9);
+        assert!(
+            edge_bps < 50.0,
+            "edge must not be synthesized from a configured threshold"
+        );
+    }
+
+    #[test]
+    fn la5_predictive_evidence_uses_latest_target_asset_tick() {
+        let evidence = live_alpha_predictive_evidence_from_events(
+            vec![
+                NormalizedEvent::PredictiveTick {
+                    price: ReferencePrice {
+                        asset: Asset::Eth,
+                        source: SOURCE_BINANCE.to_string(),
+                        price: 3_000.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
+                        source_ts: Some(1_777_000_001_000),
+                        recv_wall_ts: 1_777_000_001_100,
+                    },
+                },
+                NormalizedEvent::PredictiveTick {
+                    price: ReferencePrice {
+                        asset: Asset::Btc,
+                        source: SOURCE_BINANCE.to_string(),
+                        price: 99_000.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
+                        source_ts: Some(1_777_000_001_000),
+                        recv_wall_ts: 1_777_000_001_100,
+                    },
+                },
+                NormalizedEvent::PredictiveTick {
+                    price: ReferencePrice {
+                        asset: Asset::Btc,
+                        source: SOURCE_COINBASE.to_string(),
+                        price: 100_000.0,
+                        confidence: None,
+                        provider: None,
+                        matches_market_resolution_source: None,
+                        source_ts: Some(1_777_000_002_000),
+                        recv_wall_ts: 1_777_000_002_050,
+                    },
+                },
+            ],
+            Asset::Btc,
+        );
+
+        assert_eq!(
+            evidence.snapshot_id.as_deref(),
+            Some("coinbase:unknown:1777000002000")
+        );
+        assert_eq!(evidence.age_ms, Some(50));
+        assert_eq!(evidence.price, Some(100_000.0));
     }
 
     #[test]
