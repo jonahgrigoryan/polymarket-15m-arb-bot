@@ -20,6 +20,7 @@ pub mod live_heartbeat;
 pub mod live_maker_micro;
 pub mod live_order_journal;
 pub mod live_position_book;
+pub mod live_quote_manager;
 pub mod live_reconciliation;
 pub mod live_risk_engine;
 pub mod live_startup_recovery;
@@ -63,6 +64,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_maker_micro::MODULE,
         live_order_journal::MODULE,
         live_position_book::MODULE,
+        live_quote_manager::MODULE,
         live_reconciliation::MODULE,
         live_risk_engine::MODULE,
         live_startup_recovery::MODULE,

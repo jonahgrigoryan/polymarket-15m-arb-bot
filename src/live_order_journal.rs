@@ -76,6 +76,22 @@ pub enum LiveJournalEventType {
     MakerReconciliationFailed,
     MakerMicroStopped,
     MakerMicroHalted,
+    QuoteManagerStarted,
+    QuoteManagerStopped,
+    QuotePlanned,
+    QuotePlaced,
+    QuoteLeftAlone,
+    QuoteCancelRequested,
+    QuoteCancelConfirmed,
+    QuoteReplaceRequested,
+    QuoteReplacementSubmitted,
+    QuoteReplacementAccepted,
+    QuoteReplacementRejected,
+    QuoteExpired,
+    QuoteHalted,
+    QuoteSkipped,
+    QuoteReconciliationResult,
+    QuoteAntiChurnTriggered,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -234,7 +250,9 @@ pub fn reduce_live_journal_events(
                     state.partially_filled_orders.insert(order_id.clone());
                 }
                 LiveJournalEventType::LiveOrderCanceled
-                | LiveJournalEventType::MakerOrderCanceled => {
+                | LiveJournalEventType::MakerOrderCanceled
+                | LiveJournalEventType::QuoteCancelConfirmed
+                | LiveJournalEventType::QuoteExpired => {
                     state.canceled_orders.insert(order_id.clone());
                 }
                 _ => {}
@@ -279,8 +297,14 @@ pub fn reduce_live_journal_events(
             event.event_type,
             LiveJournalEventType::LiveReconciliationMismatch
                 | LiveJournalEventType::MakerReconciliationFailed
+                | LiveJournalEventType::QuoteReconciliationResult
         ) {
-            state.reconciliation_mismatch_count += 1;
+            let status = payload_string(&event.payload, "status").unwrap_or_default();
+            if event.event_type != LiveJournalEventType::QuoteReconciliationResult
+                || status != "passed"
+            {
+                state.reconciliation_mismatch_count += 1;
+            }
         }
         if matches!(
             event.event_type,
@@ -289,6 +313,7 @@ pub fn reduce_live_journal_events(
                 | LiveJournalEventType::LiveRiskHalt
                 | LiveJournalEventType::MakerRiskHalt
                 | LiveJournalEventType::MakerMicroHalted
+                | LiveJournalEventType::QuoteHalted
         ) {
             state.risk_halted = true;
         }
@@ -308,6 +333,14 @@ impl LiveJournalEventType {
                 | Self::MakerOrderCanceled
                 | Self::MakerOrderFilled
                 | Self::MakerOrderPartiallyFilled
+                | Self::QuotePlaced
+                | Self::QuoteCancelRequested
+                | Self::QuoteCancelConfirmed
+                | Self::QuoteReplacementSubmitted
+                | Self::QuoteReplacementAccepted
+                | Self::QuoteReplacementRejected
+                | Self::QuoteExpired
+                | Self::QuoteHalted
                 | Self::LiveFillAttempted
                 | Self::LiveFillSucceeded
                 | Self::LiveFillFailed
@@ -335,6 +368,7 @@ impl LiveJournalEventType {
                 | Self::LiveFillSucceeded
                 | Self::LiveFillReconciled
                 | Self::MakerOrderFilled
+                | Self::QuoteReplacementAccepted
         )
     }
 }
@@ -351,12 +385,24 @@ fn validate_typed_payload(event: &LiveJournalEvent) -> LiveJournalResult<()> {
         LiveJournalEventType::MakerOrderAccepted
         | LiveJournalEventType::MakerOrderCanceled
         | LiveJournalEventType::MakerOrderFilled
-        | LiveJournalEventType::MakerOrderPartiallyFilled => {
+        | LiveJournalEventType::MakerOrderPartiallyFilled
+        | LiveJournalEventType::QuotePlaced
+        | LiveJournalEventType::QuoteCancelRequested
+        | LiveJournalEventType::QuoteCancelConfirmed
+        | LiveJournalEventType::QuoteReplacementSubmitted
+        | LiveJournalEventType::QuoteReplacementAccepted
+        | LiveJournalEventType::QuoteReplacementRejected
+        | LiveJournalEventType::QuoteExpired
+        | LiveJournalEventType::QuoteHalted => {
             require_payload_string(event, "order_id")?;
         }
         LiveJournalEventType::MakerReconciliationPassed
-        | LiveJournalEventType::MakerReconciliationFailed => {
+        | LiveJournalEventType::MakerReconciliationFailed
+        | LiveJournalEventType::QuoteReconciliationResult => {
             require_payload_string(event, "status")?;
+        }
+        LiveJournalEventType::QuotePlanned | LiveJournalEventType::QuoteLeftAlone => {
+            require_payload_string(event, "quote_id")?;
         }
         _ => {}
     }

@@ -59,6 +59,8 @@ pub struct LiveAlphaConfig {
     #[serde(default)]
     pub maker: LiveAlphaMakerConfig,
     #[serde(default)]
+    pub quote_manager: LiveAlphaQuoteManagerConfig,
+    #[serde(default)]
     pub taker: LiveAlphaTakerConfig,
 }
 
@@ -75,6 +77,7 @@ impl Default for LiveAlphaConfig {
             risk: LiveAlphaRiskConfig::default(),
             fill_canary: LiveAlphaFillCanaryConfig::default(),
             maker: LiveAlphaMakerConfig::default(),
+            quote_manager: LiveAlphaQuoteManagerConfig::default(),
             taker: LiveAlphaTakerConfig::default(),
         }
     }
@@ -87,13 +90,23 @@ impl LiveAlphaConfig {
         self.risk.validate(&mut errors);
         self.fill_canary.validate(&mut errors);
         self.maker.validate(&mut errors);
+        self.quote_manager.validate(&mut errors);
         self.taker.validate(&mut errors);
 
         if self.mode == LiveAlphaMode::Disabled
-            && (self.fill_canary.enabled || self.maker.enabled || self.taker.enabled)
+            && (self.fill_canary.enabled
+                || self.maker.enabled
+                || self.quote_manager.enabled
+                || self.taker.enabled)
         {
             errors
                 .push("live_alpha.mode=disabled requires submodes to remain disabled".to_string());
+        }
+        if self.quote_manager.enabled && !self.maker.enabled {
+            errors.push(
+                "live_alpha.quote_manager.enabled requires live_alpha.maker.enabled=true"
+                    .to_string(),
+            );
         }
         if self.taker.enabled {
             errors.push("live_alpha.taker.enabled must remain false during LA3".to_string());
@@ -140,6 +153,7 @@ impl LiveAlphaConfig {
             fill_canary_enabled: self.fill_canary.enabled,
             shadow_executor_enabled: self.mode == LiveAlphaMode::Shadow,
             maker_micro_enabled: self.maker.enabled,
+            quote_manager_enabled: self.quote_manager.enabled,
             taker_enabled: self.taker.enabled,
             scale_enabled: self.mode == LiveAlphaMode::Scale,
         }
@@ -153,6 +167,7 @@ pub struct LiveAlphaInertSummary {
     pub fill_canary_enabled: bool,
     pub shadow_executor_enabled: bool,
     pub maker_micro_enabled: bool,
+    pub quote_manager_enabled: bool,
     pub taker_enabled: bool,
     pub scale_enabled: bool,
 }
@@ -333,6 +348,34 @@ impl LiveAlphaMakerConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+pub struct LiveAlphaQuoteManagerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub max_replacements: u64,
+    #[serde(default)]
+    pub min_edge_improvement_bps: u64,
+    #[serde(default)]
+    pub cooldown_after_failed_submit_ms: u64,
+    #[serde(default)]
+    pub cooldown_after_failed_cancel_ms: u64,
+    #[serde(default)]
+    pub cooldown_after_reconciliation_mismatch_ms: u64,
+    #[serde(default)]
+    pub leave_open_in_no_trade_window: bool,
+}
+
+impl LiveAlphaQuoteManagerConfig {
+    fn validate(&self, errors: &mut Vec<String>) {
+        if self.enabled && self.max_replacements == 0 {
+            errors.push(
+                "live_alpha.quote_manager.max_replacements must be positive during LA6".to_string(),
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct LiveAlphaTakerConfig {
     #[serde(default)]
@@ -393,6 +436,7 @@ mod tests {
         assert!(!summary.fill_canary_enabled);
         assert!(!summary.shadow_executor_enabled);
         assert!(!summary.maker_micro_enabled);
+        assert!(!summary.quote_manager_enabled);
         assert!(!summary.taker_enabled);
         assert!(!summary.scale_enabled);
         assert_eq!(config.journal_path(), None);
@@ -439,5 +483,6 @@ mod tests {
         assert!(!LiveAlphaMode::Shadow.can_place_live_orders());
         assert!(LiveAlphaMode::FillCanary.can_place_live_orders());
         assert!(LiveAlphaMode::MakerMicro.can_place_live_orders());
+        assert!(LiveAlphaMode::QuoteManager.can_place_live_orders());
     }
 }

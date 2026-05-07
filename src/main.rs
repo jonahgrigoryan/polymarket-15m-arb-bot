@@ -61,6 +61,12 @@ use polymarket_15m_arb_bot::{
         reduce_live_journal_events, LiveJournalEvent, LiveJournalEventType, LiveOrderJournal,
     },
     live_position_book::LivePositionBook,
+    live_quote_manager::{
+        evaluate_quote_manager_tick, validate_la6_approval_artifact_text, LiveQuoteState,
+        QuoteManagerDecision, QuoteManagerPolicy, QuoteManagerTickInput, QuoteMarketSnapshot,
+        QuoteMarketStatus, QuoteProposal, QuoteRateLimitSnapshot, QuoteReconciliationStatus,
+        QuoteRiskSnapshot, QuoteStatus,
+    },
     live_reconciliation::{
         reconcile_live_state, LiveReconciliationInput, LocalLiveState, VenueLiveState,
         VenueOrderState, VenueOrderStatus, VenueTradeState, VenueTradeStatus,
@@ -384,6 +390,36 @@ enum Commands {
         )]
         max_duration_sec: u64,
     },
+    /// Dry-run or execute the gated LA6 quote manager and cancel/replace path.
+    LiveAlphaQuoteManager {
+        #[arg(
+            long,
+            help = "Build the LA6 quote/cancel/replace plan without live actions"
+        )]
+        dry_run: bool,
+        #[arg(
+            long,
+            help = "Final gated mode; may manage quotes only after LA6 approval and all gates pass"
+        )]
+        human_approved: bool,
+        #[arg(long, help = "Approval ID from the LA6 approval artifact")]
+        approval_id: Option<String>,
+        #[arg(
+            long,
+            help = "Local LA6 approval artifact with exact account/risk/session/cancel policy bounds"
+        )]
+        approval_artifact: Option<PathBuf>,
+        #[arg(long, default_value_t = 1, help = "LA6 live order cap")]
+        max_orders: u64,
+        #[arg(long, default_value_t = 1, help = "LA6 replacement cap")]
+        max_replacements: u64,
+        #[arg(
+            long,
+            default_value_t = 300,
+            help = "LA6 session duration cap in seconds"
+        )]
+        max_duration_sec: u64,
+    },
 }
 
 impl Commands {
@@ -397,6 +433,7 @@ impl Commands {
             Commands::LiveAlphaPreflight { .. } => "live-alpha-preflight",
             Commands::LiveAlphaFillCanary { .. } => "live-alpha-fill-canary",
             Commands::LiveAlphaMakerMicro { .. } => "live-alpha-maker-micro",
+            Commands::LiveAlphaQuoteManager { .. } => "live-alpha-quote-manager",
         }
     }
 
@@ -410,6 +447,7 @@ impl Commands {
             Commands::LiveAlphaPreflight { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaFillCanary { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaMakerMicro { .. } => RuntimeMode::Validate,
+            Commands::LiveAlphaQuoteManager { .. } => RuntimeMode::Validate,
         }
     }
 }
@@ -822,6 +860,30 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                         approval_id,
                         approval_artifact,
                         max_orders,
+                        max_duration_sec,
+                    },
+                )
+                .await?;
+            }
+            Commands::LiveAlphaQuoteManager {
+                dry_run,
+                human_approved,
+                approval_id,
+                approval_artifact,
+                max_orders,
+                max_replacements,
+                max_duration_sec,
+            } => {
+                run_live_alpha_quote_manager_command(
+                    &config,
+                    &run_id,
+                    LiveAlphaQuoteManagerCommandArgs {
+                        dry_run,
+                        human_approved,
+                        approval_id,
+                        approval_artifact,
+                        max_orders,
+                        max_replacements,
                         max_duration_sec,
                     },
                 )
@@ -2860,6 +2922,495 @@ struct LiveAlphaMakerMicroCommandArgs {
     approval_artifact: Option<PathBuf>,
     max_orders: u64,
     max_duration_sec: u64,
+}
+
+struct LiveAlphaQuoteManagerCommandArgs {
+    dry_run: bool,
+    human_approved: bool,
+    approval_id: Option<String>,
+    approval_artifact: Option<PathBuf>,
+    max_orders: u64,
+    max_replacements: u64,
+    max_duration_sec: u64,
+}
+
+async fn run_live_alpha_quote_manager_command(
+    config: &AppConfig,
+    run_id: &str,
+    args: LiveAlphaQuoteManagerCommandArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let LiveAlphaQuoteManagerCommandArgs {
+        dry_run,
+        human_approved,
+        approval_id,
+        approval_artifact,
+        max_orders,
+        max_replacements,
+        max_duration_sec,
+    } = args;
+    if dry_run == human_approved {
+        return Err(
+            "live-alpha-quote-manager requires exactly one of --dry-run or --human-approved".into(),
+        );
+    }
+    if max_orders == 0 || max_orders > 3 {
+        return Err("LA6 max-orders must be between 1 and 3".into());
+    }
+    if max_replacements == 0 || max_replacements > 3 {
+        return Err("LA6 max-replacements must be between 1 and 3".into());
+    }
+    if max_duration_sec == 0 || max_duration_sec > 300 {
+        return Err("LA6 max-duration-sec must be between 1 and 300".into());
+    }
+
+    let policy =
+        la6_quote_policy_from_config(config, max_orders, max_replacements, max_duration_sec);
+    if dry_run {
+        let plans = la6_quote_manager_dry_run_plans(&policy)?;
+        println!("live_alpha_quote_manager_status=ok");
+        println!("run_id={run_id}");
+        println!("live_alpha_quote_manager_not_submitted=true");
+        println!("live_alpha_quote_manager_not_canceled=true");
+        println!("live_alpha_quote_manager_max_orders={max_orders}");
+        println!("live_alpha_quote_manager_max_replacements={max_replacements}");
+        println!("live_alpha_quote_manager_max_duration_sec={max_duration_sec}");
+        println!(
+            "live_alpha_quote_manager_config_mode={}",
+            config.live_alpha.mode.as_str()
+        );
+        println!(
+            "live_alpha_quote_manager_policy={}",
+            serde_json::to_string(&policy)?
+        );
+        println!(
+            "live_alpha_quote_manager_plan={}",
+            serde_json::to_string(&plans)?
+        );
+        return Ok(());
+    }
+
+    validate_la6_live_runtime_gates(config)?;
+    if !config.live_alpha.enabled
+        || config.live_alpha.mode != LiveAlphaMode::QuoteManager
+        || !config.live_alpha.quote_manager.enabled
+        || !config.live_alpha.maker.enabled
+    {
+        return Err(
+            "LA6 quote manager requires live_alpha.enabled=true, mode=quote_manager, quote_manager.enabled=true, and maker.enabled=true"
+                .into(),
+        );
+    }
+
+    let approval_id = approval_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or("live-alpha-quote-manager --human-approved requires --approval-id")?;
+    let approval_artifact = approval_artifact
+        .as_deref()
+        .ok_or("live-alpha-quote-manager --human-approved requires --approval-artifact")?;
+    let approval_text = fs::read_to_string(approval_artifact)?;
+    let approval = validate_la6_approval_artifact_text(&approval_text, approval_id)?;
+    validate_la6_approval_against_cli_and_config(
+        &approval,
+        config,
+        approval_id,
+        max_orders,
+        max_replacements,
+        max_duration_sec,
+    )?;
+
+    let geoblock = run_geoblock_validation(config).await?;
+    if geoblock.blocked {
+        return Err(format!(
+            "LA6 quote manager blocked: {}",
+            geoblock_result_label(&geoblock)
+        )
+        .into());
+    }
+    let account = lb4_account_preflight(config)?;
+    if !account
+        .wallet_address
+        .eq_ignore_ascii_case(&approval.approved_wallet)
+        || !account
+            .funder_address
+            .eq_ignore_ascii_case(&approval.approved_funder)
+    {
+        return Err("LA6 quote manager blocked: approval account does not match config".into());
+    }
+    let l2_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    let canary_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.canary_secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    if !l2_secret_report.all_present() || !canary_secret_report.all_present() {
+        return Err("LA6 quote manager blocked: required secret handles are not present".into());
+    }
+    let readback = live_alpha_authenticated_readback(config).await?;
+    if !readback.report.live_network_enabled || !readback.report.passed() {
+        return Err(format!(
+            "LA6 quote manager blocked: authenticated readback not final ({})",
+            readback.report.block_reasons.join(",")
+        )
+        .into());
+    }
+    if !la6_live_dispatch_enabled() {
+        return Err(
+            "LA6 live quote manager dispatch is blocked in this PR until a final approval artifact and explicit live-run authorization are supplied"
+                .into(),
+        );
+    }
+
+    let approval_artifact_sha256 = live_fill_canary::approval_hash(&approval_text);
+    let approval_cap_path = la6_approval_cap_path(config, approval_id)?;
+    reserve_la6_approval_cap(
+        &approval_cap_path,
+        &La6ApprovalCapReservation {
+            approval_id: approval_id.to_string(),
+            approval_artifact_sha256,
+            approval_artifact_path: approval_artifact.display().to_string(),
+            max_orders,
+            max_replacements,
+            max_duration_sec,
+            reserved_at_unix: unix_time_secs(),
+        },
+    )?;
+
+    println!("live_alpha_quote_manager_status=blocked");
+    println!("run_id={run_id}");
+    println!("live_alpha_quote_manager_approval_id={approval_id}");
+    println!(
+        "live_alpha_quote_manager_approval_cap_path={}",
+        approval_cap_path.display()
+    );
+    Err("LA6 live quote manager stopped before submit/cancel dispatch; no live LA6 run is authorized in this artifact"
+        .into())
+}
+
+fn la6_live_dispatch_enabled() -> bool {
+    false
+}
+
+fn la6_quote_policy_from_config(
+    config: &AppConfig,
+    max_orders: u64,
+    max_replacements: u64,
+    max_duration_sec: u64,
+) -> QuoteManagerPolicy {
+    let defaults = QuoteManagerPolicy::default();
+    let quote_manager = &config.live_alpha.quote_manager;
+    QuoteManagerPolicy {
+        ttl_seconds: nonzero_or(config.live_alpha.maker.ttl_seconds, defaults.ttl_seconds),
+        no_trade_seconds_before_close: nonzero_or(
+            config.live_alpha.risk.no_trade_seconds_before_close,
+            defaults.no_trade_seconds_before_close,
+        ),
+        replace_tolerance_bps: nonzero_or(
+            config.live_alpha.maker.replace_tolerance_bps,
+            defaults.replace_tolerance_bps,
+        ),
+        min_quote_lifetime_ms: nonzero_or(
+            config.live_alpha.maker.min_quote_lifetime_ms,
+            defaults.min_quote_lifetime_ms,
+        ),
+        min_edge_improvement_bps: nonzero_or(
+            quote_manager.min_edge_improvement_bps,
+            defaults.min_edge_improvement_bps,
+        ),
+        max_cancel_rate_per_min: nonzero_or(
+            config.live_alpha.risk.max_cancel_rate_per_min,
+            defaults.max_cancel_rate_per_min,
+        ),
+        max_replacement_rate_per_min: 1,
+        max_submit_rate_per_min: nonzero_or(
+            config.live_alpha.risk.max_submit_rate_per_min,
+            defaults.max_submit_rate_per_min,
+        ),
+        cooldown_after_failed_submit_ms: nonzero_or(
+            quote_manager.cooldown_after_failed_submit_ms,
+            defaults.cooldown_after_failed_submit_ms,
+        ),
+        cooldown_after_failed_cancel_ms: nonzero_or(
+            quote_manager.cooldown_after_failed_cancel_ms,
+            defaults.cooldown_after_failed_cancel_ms,
+        ),
+        cooldown_after_reconciliation_mismatch_ms: nonzero_or(
+            quote_manager.cooldown_after_reconciliation_mismatch_ms,
+            defaults.cooldown_after_reconciliation_mismatch_ms,
+        ),
+        max_session_duration_sec: max_duration_sec,
+        max_live_orders_for_approval: max_orders,
+        max_replacements_for_approval: max_replacements,
+        leave_open_in_no_trade_window: quote_manager.leave_open_in_no_trade_window,
+    }
+}
+
+fn la6_quote_manager_dry_run_plans(
+    policy: &QuoteManagerPolicy,
+) -> Result<Vec<QuoteManagerDecision>, Box<dyn std::error::Error>> {
+    let mut decisions = Vec::new();
+    let base = la6_sample_quote_tick(policy, false);
+    decisions.extend(evaluate_quote_manager_tick(&base)?);
+
+    let mut leave = la6_sample_quote_tick(policy, true);
+    leave.fair_probability = 0.232;
+    decisions.extend(evaluate_quote_manager_tick(&leave)?);
+
+    let mut cancel = la6_sample_quote_tick(policy, true);
+    cancel.market.book_age_ms = Some(9_999);
+    decisions.extend(evaluate_quote_manager_tick(&cancel)?);
+
+    let mut replace = la6_sample_quote_tick(policy, true);
+    replace.fair_probability = 0.25;
+    replace
+        .proposed_quote
+        .as_mut()
+        .ok_or("LA6 dry-run proposal missing")?
+        .edge_bps = 600.0;
+    decisions.extend(evaluate_quote_manager_tick(&replace)?);
+
+    let mut expire = la6_sample_quote_tick(policy, true);
+    expire.now_ms = expire
+        .own_open_quotes
+        .first()
+        .ok_or("LA6 dry-run quote missing")?
+        .submitted_at_ms
+        .saturating_add(policy.ttl_seconds.saturating_mul(1_000));
+    decisions.extend(evaluate_quote_manager_tick(&expire)?);
+
+    let mut skip = la6_sample_quote_tick(policy, false);
+    skip.market.time_remaining_seconds =
+        Some(policy.no_trade_seconds_before_close.saturating_sub(1));
+    decisions.extend(evaluate_quote_manager_tick(&skip)?);
+
+    let mut halt = la6_sample_quote_tick(policy, true);
+    halt.reconciliation_status = QuoteReconciliationStatus::Mismatch;
+    decisions.extend(evaluate_quote_manager_tick(&halt)?);
+
+    Ok(decisions)
+}
+
+fn la6_sample_quote_tick(policy: &QuoteManagerPolicy, with_quote: bool) -> QuoteManagerTickInput {
+    let now_ms = 1_777_000_010_000;
+    let quote = LiveQuoteState {
+        quote_id: "la6-dry-run-quote-1".to_string(),
+        intent_id: "la6-dry-run-intent-0".to_string(),
+        order_id: Some(
+            "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        ),
+        market: "btc-updown-15m-la6-dry-run".to_string(),
+        token_id: "token-up".to_string(),
+        side: Side::Buy,
+        price: 0.19,
+        size: 5.0,
+        fair_probability_at_submit: 0.23,
+        edge_bps_at_submit: 400.0,
+        submitted_at_ms: 1_777_000_000_000,
+        last_validated_at_ms: 1_777_000_000_000,
+        cancel_requested_at_ms: None,
+        replaced_by_quote_id: None,
+        status: QuoteStatus::Open,
+    };
+    QuoteManagerTickInput {
+        now_ms,
+        session_started_at_ms: 1_777_000_000_000,
+        fair_probability: 0.23,
+        edge_threshold_bps: 50.0,
+        market: QuoteMarketSnapshot {
+            market: "btc-updown-15m-la6-dry-run".to_string(),
+            token_id: "token-up".to_string(),
+            best_bid: Some(0.19),
+            best_ask: Some(0.21),
+            spread: Some(0.02),
+            last_trade_price: Some(0.20),
+            tick_size: Some(0.01),
+            status: QuoteMarketStatus::Open,
+            time_remaining_seconds: Some(900),
+            book_age_ms: Some(100),
+            reference_age_ms: Some(100),
+        },
+        own_open_quotes: if with_quote { vec![quote] } else { Vec::new() },
+        own_inventory: 0.0,
+        risk: QuoteRiskSnapshot {
+            max_open_orders: policy.max_live_orders_for_approval,
+            max_live_orders_for_approval: policy.max_live_orders_for_approval,
+            open_orders_for_approval: u64::from(with_quote),
+            replacements_used_for_approval: 0,
+            risk_limits_changed: false,
+            inventory_changed: false,
+            heartbeat_fresh: true,
+        },
+        rate_limits: QuoteRateLimitSnapshot::empty(),
+        reconciliation_status: QuoteReconciliationStatus::Clean,
+        policy: policy.clone(),
+        proposed_quote: Some(QuoteProposal {
+            intent_id: "la6-dry-run-intent-1".to_string(),
+            market: "btc-updown-15m-la6-dry-run".to_string(),
+            token_id: "token-up".to_string(),
+            side: Side::Buy,
+            price: 0.19,
+            size: 5.0,
+            fair_probability: 0.23,
+            edge_bps: 400.0,
+        }),
+    }
+}
+
+fn validate_la6_live_runtime_gates(config: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
+    validate_la6_live_runtime_gate_values(
+        live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED,
+        safety::LIVE_ORDER_PLACEMENT_ENABLED,
+        config.live_beta.kill_switch_active,
+    )
+}
+
+fn validate_la6_live_runtime_gate_values(
+    compile_time_orders_enabled: bool,
+    live_order_placement_enabled: bool,
+    kill_switch_active: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut block_reasons = Vec::<&'static str>::new();
+    if !compile_time_orders_enabled {
+        block_reasons.push("compile_time_live_disabled");
+    }
+    if !live_order_placement_enabled {
+        block_reasons.push("live_order_placement_disabled");
+    }
+    if kill_switch_active {
+        block_reasons.push("kill_switch_active");
+    }
+    if block_reasons.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "LA6 quote manager live gate blocked: {}",
+            block_reasons.join(",")
+        )
+        .into())
+    }
+}
+
+fn validate_la6_approval_against_cli_and_config(
+    approval: &polymarket_15m_arb_bot::live_quote_manager::QuoteApprovalFields,
+    config: &AppConfig,
+    approval_id: &str,
+    max_orders: u64,
+    max_replacements: u64,
+    max_duration_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::<String>::new();
+    if approval.approval_id != approval_id {
+        mismatches.push("approval_id_mismatch".to_string());
+    }
+    if approval.max_orders != max_orders {
+        mismatches.push("approval_max_orders_mismatch".to_string());
+    }
+    if approval.max_replacements != max_replacements {
+        mismatches.push("approval_max_replacements_mismatch".to_string());
+    }
+    if approval.max_duration_sec != max_duration_sec {
+        mismatches.push("approval_max_duration_sec_mismatch".to_string());
+    }
+    if approval.ttl_seconds != config.live_alpha.maker.ttl_seconds {
+        mismatches.push("approval_ttl_seconds_mismatch".to_string());
+    }
+    if !approval
+        .cancel_policy
+        .to_ascii_lowercase()
+        .contains("exact")
+    {
+        mismatches.push("approval_cancel_policy_not_exact_order_id".to_string());
+    }
+    if !approval
+        .approved_markets_assets
+        .to_ascii_uppercase()
+        .contains("BTC")
+        || !approval
+            .approved_markets_assets
+            .to_ascii_uppercase()
+            .contains("ETH")
+        || !approval
+            .approved_markets_assets
+            .to_ascii_uppercase()
+            .contains("SOL")
+    {
+        mismatches.push("approval_assets_not_limited_to_btc_eth_sol".to_string());
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        mismatches.sort_unstable();
+        mismatches.dedup();
+        Err(format!(
+            "LA6 approval artifact does not match CLI/config: {}",
+            mismatches.join(",")
+        )
+        .into())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct La6ApprovalCapReservation {
+    approval_id: String,
+    approval_artifact_sha256: String,
+    approval_artifact_path: String,
+    max_orders: u64,
+    max_replacements: u64,
+    max_duration_sec: u64,
+    reserved_at_unix: u64,
+}
+
+fn la6_approval_cap_path(
+    config: &AppConfig,
+    approval_id: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let cap_root = config
+        .live_alpha
+        .journal_path()
+        .and_then(|journal_path| {
+            Path::new(journal_path)
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+        })
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("reports"));
+    Ok(cap_root
+        .join("live-alpha-la6-approval-caps")
+        .join(format!("{}.json", la5_cap_filename_fragment(approval_id)?)))
+}
+
+fn reserve_la6_approval_cap(
+    path: &Path,
+    reservation: &La6ApprovalCapReservation,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_canary_order_cap_parent(path)?;
+    let contents = serde_json::to_string_pretty(reservation)?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            return Err("LA6 approval cap is already reserved or consumed".into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    file.write_all(contents.as_bytes())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn nonzero_or(value: u64, fallback: u64) -> u64 {
+    if value == 0 {
+        fallback
+    } else {
+        value
+    }
 }
 
 async fn run_live_alpha_maker_micro_command(
