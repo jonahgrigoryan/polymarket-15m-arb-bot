@@ -2953,15 +2953,12 @@ async fn run_live_alpha_quote_manager_command(
             "live-alpha-quote-manager requires exactly one of --dry-run or --human-approved".into(),
         );
     }
-    if max_orders == 0 || max_orders > 3 {
-        return Err("LA6 max-orders must be between 1 and 3".into());
-    }
-    if max_replacements == 0 || max_replacements > 3 {
-        return Err("LA6 max-replacements must be between 1 and 3".into());
-    }
-    if max_duration_sec == 0 || max_duration_sec > 300 {
-        return Err("LA6 max-duration-sec must be between 1 and 300".into());
-    }
+    validate_la6_quote_manager_requested_caps(
+        max_orders,
+        max_replacements,
+        max_duration_sec,
+        human_approved,
+    )?;
 
     let policy =
         la6_quote_policy_from_config(config, max_orders, max_replacements, max_duration_sec);
@@ -3093,6 +3090,36 @@ async fn run_live_alpha_quote_manager_command(
         max_duration_sec,
     )
     .await
+}
+
+fn validate_la6_quote_manager_requested_caps(
+    max_orders: u64,
+    max_replacements: u64,
+    max_duration_sec: u64,
+    human_approved: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if max_orders == 0 || max_orders > 3 {
+        return Err("LA6 max-orders must be between 1 and 3".into());
+    }
+    if max_replacements == 0 || max_replacements > 3 {
+        return Err("LA6 max-replacements must be between 1 and 3".into());
+    }
+    if max_duration_sec == 0 || max_duration_sec > 300 {
+        return Err("LA6 max-duration-sec must be between 1 and 300".into());
+    }
+    if human_approved && max_orders != 1 {
+        return Err(
+            "LA6 human-approved max-orders must be exactly 1 until multi-order support is implemented"
+                .into(),
+        );
+    }
+    if human_approved && max_replacements != 1 {
+        return Err(
+            "LA6 human-approved max-replacements must be exactly 1 until multi-replacement support is implemented"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn la6_quote_policy_from_config(
@@ -10754,6 +10781,25 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         validate_la6_approval_against_account_readback(&approval, &readback, 18446744073709551615)
             .expect("matching LA6 readback fields pass");
+    }
+
+    #[test]
+    fn la6_human_approved_caps_reject_unsupported_values_before_cap_reservation() {
+        let order_error = validate_la6_quote_manager_requested_caps(2, 1, 300, true)
+            .expect_err("human-approved LA6 currently supports one order")
+            .to_string();
+        let replacement_error = validate_la6_quote_manager_requested_caps(1, 2, 300, true)
+            .expect_err("human-approved LA6 currently supports one replacement slot")
+            .to_string();
+
+        assert!(order_error.contains("max-orders must be exactly 1"));
+        assert!(replacement_error.contains("max-replacements must be exactly 1"));
+    }
+
+    #[test]
+    fn la6_dry_run_caps_still_allow_multi_order_planning_range() {
+        validate_la6_quote_manager_requested_caps(3, 3, 300, false)
+            .expect("dry-run can still exercise the broader planning range");
     }
 
     fn la6_test_approval_fields() -> QuoteApprovalFields {
