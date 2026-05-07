@@ -3493,7 +3493,6 @@ async fn run_la6_live_quote_manager_session(
 
     let submit_input = la5_maker_submit_input(config, &account, plan.clone());
     let submitted_at_ms = unix_time_ms() as u64;
-    let submitted_at = Instant::now();
     let submission = match submit_maker_order_with_official_sdk(submit_input.clone()).await {
         Ok(submission) => submission,
         Err(error) => {
@@ -3748,7 +3747,7 @@ async fn run_la6_live_quote_manager_session(
             &order_id,
             &plan.intent_id,
             1,
-            submitted_at,
+            started,
             max_duration_sec,
             || async { cancel_exact_maker_order_with_official_sdk(&submit_input, &order_id).await },
         )
@@ -10595,6 +10594,49 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             !path.exists(),
             "successful retry should not journal a reconciliation failure itself"
         );
+    }
+
+    #[tokio::test]
+    async fn la5_primary_cancel_retry_budget_respects_session_start() {
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la5-primary-cancel-session-budget-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        let journal = LiveOrderJournal::new(&path);
+        let order_id =
+            "0x5555555555555555555555555555555555555555555555555555555555555555".to_string();
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let attempts_for_cancel = attempts.clone();
+
+        let error = cancel_la5_exact_order_with_retry_policy(
+            &journal,
+            "run-primary-cancel-session-budget",
+            &order_id,
+            "intent-primary-cancel-session-budget",
+            1,
+            Instant::now() - Duration::from_secs(2),
+            1,
+            3,
+            Duration::ZERO,
+            move || {
+                let attempts = attempts_for_cancel.clone();
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err::<Vec<String>, &'static str>("cancel rpc still failing")
+                }
+            },
+        )
+        .await
+        .expect_err("elapsed session duration must stop retries")
+        .to_string();
+
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(error.contains("LA5 exact cancel failed after 1 attempt"));
+        let contents = fs::read_to_string(&path).expect("session-budget cancel journal reads");
+        assert!(contents.contains("cancel_failed_after_retries"));
+
+        fs::remove_file(path).expect("test session-budget cancel journal removed");
     }
 
     #[tokio::test]
