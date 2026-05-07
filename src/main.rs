@@ -3511,16 +3511,12 @@ async fn run_la6_live_quote_manager_session(
         }
     };
     if !submission.success || submission.order_id.trim().is_empty() {
-        append_la6_journal_event(
-            &journal,
-            run_id,
-            LiveJournalEventType::QuoteReplacementRejected,
-            serde_json::json!({
-                "order_id": submission.order_id,
-                "intent_id": plan.intent_id,
-                "status": submission.venue_status,
-            }),
-        )?;
+        let (event_type, payload) = la6_quote_submit_rejected_journal_event(
+            &plan.intent_id,
+            &submission.venue_status,
+            &submission.order_id,
+        );
+        append_la6_journal_event(&journal, run_id, event_type, payload)?;
         return Err(format!(
             "LA6 quote submit rejected by venue: status={}",
             submission.venue_status
@@ -4065,6 +4061,31 @@ fn append_la6_journal_event(
     Ok(())
 }
 
+fn la6_quote_submit_rejected_journal_event(
+    intent_id: &str,
+    venue_status: &str,
+    order_id: &str,
+) -> (LiveJournalEventType, serde_json::Value) {
+    if order_id.trim().is_empty() {
+        (
+            LiveJournalEventType::MakerOrderRejected,
+            serde_json::json!({
+                "intent_id": intent_id,
+                "status": venue_status,
+            }),
+        )
+    } else {
+        (
+            LiveJournalEventType::QuoteReplacementRejected,
+            serde_json::json!({
+                "order_id": order_id,
+                "intent_id": intent_id,
+                "status": venue_status,
+            }),
+        )
+    }
+}
+
 fn validate_la6_live_runtime_gates(config: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     validate_la6_live_runtime_gate_values(
         live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED,
@@ -4134,19 +4155,7 @@ fn validate_la6_approval_against_cli_and_config(
     {
         mismatches.push("approval_no_trade_window_policy_mismatch".to_string());
     }
-    if !approval
-        .approved_markets_assets
-        .to_ascii_uppercase()
-        .contains("BTC")
-        || !approval
-            .approved_markets_assets
-            .to_ascii_uppercase()
-            .contains("ETH")
-        || !approval
-            .approved_markets_assets
-            .to_ascii_uppercase()
-            .contains("SOL")
-    {
+    if !la6_approved_markets_assets_are_exact(&approval.approved_markets_assets) {
         mismatches.push("approval_assets_not_limited_to_btc_eth_sol".to_string());
     }
     if mismatches.is_empty() {
@@ -4165,6 +4174,24 @@ fn validate_la6_approval_against_cli_and_config(
 fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
     !la6_policy_contains_negated_approval_language(policy)
         && policy.to_ascii_lowercase().contains("exact")
+}
+
+fn la6_approved_markets_assets_are_exact(approved_markets_assets: &str) -> bool {
+    let mut approved_assets = BTreeSet::new();
+    let upper = approved_markets_assets.to_ascii_uppercase();
+    for token in upper
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+    {
+        match token {
+            "BTC" | "ETH" | "SOL" => {
+                approved_assets.insert(token);
+            }
+            "AND" | "ONLY" | "ASSET" | "ASSETS" | "MARKET" | "MARKETS" => {}
+            _ => return false,
+        }
+    }
+    approved_assets == BTreeSet::from(["BTC", "ETH", "SOL"])
 }
 
 fn la6_no_trade_window_policy_allows_leave_open(policy: &str) -> bool {
@@ -10891,6 +10918,56 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
                 "cancel_policy={cancel_policy}"
             );
         }
+    }
+
+    #[test]
+    fn la6_approval_binding_rejects_overbroad_asset_scope() {
+        let mut approval = la6_test_approval_fields();
+        let config = la5_test_config();
+        validate_la6_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA6-approval-1",
+            1,
+            1,
+            300,
+        )
+        .expect("BTC/ETH/SOL-only approval passes");
+
+        approval.approved_markets_assets = "BTC/ETH/SOL/DOGE".to_string();
+        let error = validate_la6_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA6-approval-1",
+            1,
+            1,
+            300,
+        )
+        .expect_err("extra assets must fail closed")
+        .to_string();
+
+        assert!(error.contains("approval_assets_not_limited_to_btc_eth_sol"));
+    }
+
+    #[test]
+    fn la6_empty_rejected_submission_uses_replay_valid_journal_event() {
+        let (event_type, payload) =
+            la6_quote_submit_rejected_journal_event("intent-empty-reject", "rejected", "");
+
+        assert_eq!(event_type, LiveJournalEventType::MakerOrderRejected);
+        assert!(payload.get("order_id").is_none());
+
+        let event = LiveJournalEvent::new(
+            "run-empty-reject",
+            "event-empty-reject",
+            event_type,
+            0,
+            payload,
+        );
+        let state = reduce_live_journal_events(&[event]).expect("empty rejection event replays");
+
+        assert!(state.intents.contains("intent-empty-reject"));
+        assert!(state.orders.is_empty());
     }
 
     #[test]
