@@ -4144,6 +4144,11 @@ fn validate_la6_approval_against_cli_and_config(
     if approval.ttl_seconds != config.live_alpha.maker.ttl_seconds {
         mismatches.push("approval_ttl_seconds_mismatch".to_string());
     }
+    validate_la6_approval_risk_limits_against_config(
+        &approval.risk_limits,
+        config,
+        &mut mismatches,
+    );
     if !la6_cancel_policy_allows_exact_order_id(&approval.cancel_policy) {
         mismatches.push("approval_cancel_policy_not_exact_order_id".to_string());
     }
@@ -4168,6 +4173,98 @@ fn validate_la6_approval_against_cli_and_config(
             mismatches.join(",")
         )
         .into())
+    }
+}
+
+fn validate_la6_approval_risk_limits_against_config(
+    risk_limits: &str,
+    config: &AppConfig,
+    mismatches: &mut Vec<String>,
+) {
+    let risk_limits = la6_risk_limit_map(risk_limits);
+    la6_compare_risk_limit_f64(
+        mismatches,
+        &risk_limits,
+        "max_single_order_notional",
+        config.live_alpha.risk.max_single_order_notional,
+    );
+    la6_compare_risk_limit_f64(
+        mismatches,
+        &risk_limits,
+        "max_total_live_notional",
+        config.live_alpha.risk.max_total_live_notional,
+    );
+    la6_compare_risk_limit_u64(
+        mismatches,
+        &risk_limits,
+        "max_open_orders",
+        config.live_alpha.risk.max_open_orders,
+    );
+    la6_compare_risk_limit_u64(
+        mismatches,
+        &risk_limits,
+        "max_submit_rate_per_min",
+        config.live_alpha.risk.max_submit_rate_per_min,
+    );
+    la6_compare_risk_limit_u64(
+        mismatches,
+        &risk_limits,
+        "max_cancel_rate_per_min",
+        config.live_alpha.risk.max_cancel_rate_per_min,
+    );
+}
+
+fn la6_risk_limit_map(risk_limits: &str) -> BTreeMap<String, String> {
+    risk_limits
+        .split(|character: char| character.is_whitespace() || character == ',' || character == ';')
+        .filter_map(|token| {
+            let (key, value) = token.split_once('=')?;
+            Some((
+                key.trim().to_ascii_lowercase(),
+                value.trim_matches('`').trim().to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn la6_compare_risk_limit_f64(
+    mismatches: &mut Vec<String>,
+    risk_limits: &BTreeMap<String, String>,
+    key: &'static str,
+    config_value: f64,
+) {
+    let Some(approved_value) = risk_limits.get(key) else {
+        mismatches.push(format!("approval_risk_limits_missing_{key}"));
+        return;
+    };
+    let Ok(approved_value) = approved_value.parse::<f64>() else {
+        mismatches.push(format!("approval_risk_limits_parse_error_{key}"));
+        return;
+    };
+    la5_compare_f64(
+        mismatches,
+        &format!("approval_{key}_mismatch"),
+        approved_value,
+        config_value,
+    );
+}
+
+fn la6_compare_risk_limit_u64(
+    mismatches: &mut Vec<String>,
+    risk_limits: &BTreeMap<String, String>,
+    key: &'static str,
+    config_value: u64,
+) {
+    let Some(approved_value) = risk_limits.get(key) else {
+        mismatches.push(format!("approval_risk_limits_missing_{key}"));
+        return;
+    };
+    let Ok(approved_value) = approved_value.parse::<u64>() else {
+        mismatches.push(format!("approval_risk_limits_parse_error_{key}"));
+        return;
+    };
+    if approved_value != config_value {
+        mismatches.push(format!("approval_{key}_mismatch"));
     }
 }
 
@@ -10950,6 +11047,28 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     }
 
     #[test]
+    fn la6_approval_binding_rejects_mismatched_risk_limits() {
+        let approval = la6_test_approval_fields();
+        let mut config = la5_test_config();
+        config.live_alpha.risk.max_single_order_notional = 5.12;
+        config.live_alpha.risk.max_total_live_notional = 5.12;
+
+        let error = validate_la6_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA6-approval-1",
+            1,
+            1,
+            300,
+        )
+        .expect_err("LA6 approval risk limits must bind to config")
+        .to_string();
+
+        assert!(error.contains("approval_max_single_order_notional_mismatch"));
+        assert!(error.contains("approval_max_total_live_notional_mismatch"));
+    }
+
+    #[test]
     fn la6_empty_rejected_submission_uses_replay_valid_journal_event() {
         let (event_type, payload) =
             la6_quote_submit_rejected_journal_event("intent-empty-reject", "rejected", "");
@@ -11055,7 +11174,7 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             cancel_policy: "exact order ID only".to_string(),
             no_trade_window_policy:
                 "default exact-order-ID cancel or halt; leaving open not approved".to_string(),
-            risk_limits: "max_orders=1 max_replacements=1 max_duration_sec=300".to_string(),
+            risk_limits: "max_single_order_notional=2.56 max_total_live_notional=2.56 max_open_orders=1 max_submit_rate_per_min=1 max_cancel_rate_per_min=1".to_string(),
             rollback_owner: "Jonah / operator".to_string(),
             monitoring_owner: "Jonah / operator".to_string(),
             authenticated_readback_evidence: "readback-run-1".to_string(),
@@ -11143,6 +11262,8 @@ Approved: Operator authorized agent-run LA5; human action limited to PR merge
         config.live_alpha.risk.max_reserved_pusd = 1.0;
         config.live_alpha.risk.max_fee_spend = 0.06;
         config.live_alpha.risk.max_open_orders = 1;
+        config.live_alpha.risk.max_submit_rate_per_min = 1;
+        config.live_alpha.risk.max_cancel_rate_per_min = 1;
         config.live_alpha.risk.no_trade_seconds_before_close = 600;
         config
     }
