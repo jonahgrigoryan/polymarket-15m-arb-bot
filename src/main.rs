@@ -4123,11 +4123,7 @@ fn validate_la6_approval_against_cli_and_config(
     if approval.ttl_seconds != config.live_alpha.maker.ttl_seconds {
         mismatches.push("approval_ttl_seconds_mismatch".to_string());
     }
-    if !approval
-        .cancel_policy
-        .to_ascii_lowercase()
-        .contains("exact")
-    {
+    if !la6_cancel_policy_allows_exact_order_id(&approval.cancel_policy) {
         mismatches.push("approval_cancel_policy_not_exact_order_id".to_string());
     }
     if config
@@ -4166,14 +4162,14 @@ fn validate_la6_approval_against_cli_and_config(
     }
 }
 
+fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
+    !la6_policy_contains_negated_approval_language(policy)
+        && policy.to_ascii_lowercase().contains("exact")
+}
+
 fn la6_no_trade_window_policy_allows_leave_open(policy: &str) -> bool {
     let policy = policy.to_ascii_lowercase();
-    if policy.contains("not approved")
-        || policy.contains("not allowed")
-        || policy.contains("disallowed")
-        || policy.contains("blocked")
-        || policy.contains("requires explicit")
-    {
+    if la6_policy_contains_negated_approval_language(&policy) {
         return false;
     }
     let compact = policy
@@ -4189,6 +4185,20 @@ fn la6_no_trade_window_policy_allows_leave_open(policy: &str) -> bool {
         || policy.contains("leaving open allowed")
         || compact.contains("leaveopen=true")
         || compact.contains("leaveopeninnotradewindow=true")
+}
+
+fn la6_policy_contains_negated_approval_language(policy: &str) -> bool {
+    let policy = policy.to_ascii_lowercase();
+    let compact = policy
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '-' && *character != '_')
+        .collect::<String>();
+    policy.contains("not approved")
+        || policy.contains("not allowed")
+        || policy.contains("disallowed")
+        || policy.contains("blocked")
+        || policy.contains("requires explicit")
+        || compact.contains("notexact")
 }
 
 fn validate_la6_approval_against_account_readback(
@@ -10856,6 +10866,31 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         validate_la6_approval_against_account_readback(&approval, &readback, 18446744073709551615)
             .expect("matching LA6 readback fields pass");
+    }
+
+    #[test]
+    fn la6_approval_binding_rejects_negated_exact_cancel_policy() {
+        let config = la5_test_config();
+        for cancel_policy in ["exact order ID not approved", "not exact order ID"] {
+            let mut approval = la6_test_approval_fields();
+            approval.cancel_policy = cancel_policy.to_string();
+
+            let error = validate_la6_approval_against_cli_and_config(
+                &approval,
+                &config,
+                "LA6-approval-1",
+                1,
+                1,
+                300,
+            )
+            .expect_err("negated exact cancel approval must fail closed")
+            .to_string();
+
+            assert!(
+                error.contains("approval_cancel_policy_not_exact_order_id"),
+                "cancel_policy={cancel_policy}"
+            );
+        }
     }
 
     #[test]
