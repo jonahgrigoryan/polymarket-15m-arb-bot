@@ -4131,6 +4131,14 @@ fn validate_la6_approval_against_cli_and_config(
     {
         mismatches.push("approval_cancel_policy_not_exact_order_id".to_string());
     }
+    if config
+        .live_alpha
+        .quote_manager
+        .leave_open_in_no_trade_window
+        != la6_no_trade_window_policy_allows_leave_open(&approval.no_trade_window_policy)
+    {
+        mismatches.push("approval_no_trade_window_policy_mismatch".to_string());
+    }
     if !approval
         .approved_markets_assets
         .to_ascii_uppercase()
@@ -4157,6 +4165,31 @@ fn validate_la6_approval_against_cli_and_config(
         )
         .into())
     }
+}
+
+fn la6_no_trade_window_policy_allows_leave_open(policy: &str) -> bool {
+    let policy = policy.to_ascii_lowercase();
+    if policy.contains("not approved")
+        || policy.contains("not allowed")
+        || policy.contains("disallowed")
+        || policy.contains("blocked")
+        || policy.contains("requires explicit")
+    {
+        return false;
+    }
+    let compact = policy
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '-' && *character != '_')
+        .collect::<String>();
+    policy.contains("leave open approved")
+        || policy.contains("approved leave open")
+        || policy.contains("leave open allowed")
+        || policy.contains("allow leave open")
+        || policy.contains("allows leave open")
+        || policy.contains("leaving open approved")
+        || policy.contains("leaving open allowed")
+        || compact.contains("leaveopen=true")
+        || compact.contains("leaveopeninnotradewindow=true")
 }
 
 fn validate_la6_approval_against_account_readback(
@@ -10784,6 +10817,58 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     }
 
     #[test]
+    fn la6_approval_binding_rejects_unapproved_no_trade_leave_open() {
+        let mut approval = la6_test_approval_fields();
+        approval.no_trade_window_policy =
+            "default exact-order-ID cancel; leaving open not approved".to_string();
+        let mut config = la5_test_config();
+        config.live_alpha.mode = LiveAlphaMode::QuoteManager;
+        config.live_alpha.quote_manager.enabled = true;
+        config.live_alpha.quote_manager.max_replacements = 1;
+        config
+            .live_alpha
+            .quote_manager
+            .leave_open_in_no_trade_window = true;
+
+        let error = validate_la6_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA6-approval-1",
+            1,
+            1,
+            300,
+        )
+        .expect_err("approval must explicitly bind no-trade leave-open behavior")
+        .to_string();
+
+        assert!(error.contains("approval_no_trade_window_policy_mismatch"));
+    }
+
+    #[test]
+    fn la6_approval_binding_accepts_approved_no_trade_leave_open() {
+        let mut approval = la6_test_approval_fields();
+        approval.no_trade_window_policy = "leave open approved in no-trade window".to_string();
+        let mut config = la5_test_config();
+        config.live_alpha.mode = LiveAlphaMode::QuoteManager;
+        config.live_alpha.quote_manager.enabled = true;
+        config.live_alpha.quote_manager.max_replacements = 1;
+        config
+            .live_alpha
+            .quote_manager
+            .leave_open_in_no_trade_window = true;
+
+        validate_la6_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA6-approval-1",
+            1,
+            1,
+            300,
+        )
+        .expect("explicit approval can bind leave-open no-trade behavior");
+    }
+
+    #[test]
     fn la6_human_approved_caps_reject_unsupported_values_before_cap_reservation() {
         let order_error = validate_la6_quote_manager_requested_caps(2, 1, 300, true)
             .expect_err("human-approved LA6 currently supports one order")
@@ -10814,7 +10899,8 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             ttl_seconds: 30,
             gtd_policy: "post-only GTD now+60+ttl".to_string(),
             cancel_policy: "exact order ID only".to_string(),
-            no_trade_window_policy: "default exact-order-ID cancel".to_string(),
+            no_trade_window_policy:
+                "default exact-order-ID cancel or halt; leaving open not approved".to_string(),
             risk_limits: "max_orders=1 max_replacements=1 max_duration_sec=300".to_string(),
             rollback_owner: "Jonah / operator".to_string(),
             monitoring_owner: "Jonah / operator".to_string(),

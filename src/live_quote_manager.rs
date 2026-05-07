@@ -570,6 +570,14 @@ fn evaluate_existing_quote(
     let Some(proposal) = &input.proposed_quote else {
         return exact_order_decision(input, quote, vec![QuoteDecisionReason::NoProposal], false);
     };
+    if proposal.edge_bps < input.edge_threshold_bps {
+        return exact_order_decision(
+            input,
+            quote,
+            vec![QuoteDecisionReason::EdgeBelowThreshold],
+            false,
+        );
+    }
     if proposal.edge_bps - quote.edge_bps_at_submit < input.policy.min_edge_improvement_bps as f64
         && !replace_reasons.contains(&QuoteDecisionReason::EdgeBelowThreshold)
         && !replace_reasons.contains(&QuoteDecisionReason::BookMovedPostOnlyUnsafe)
@@ -1084,6 +1092,21 @@ mod tests {
             decisions.as_slice(),
             [QuoteManagerDecision::ReplaceQuote { reasons, .. }]
                 if reasons.contains(&QuoteDecisionReason::FairValueMoved)
+        ));
+    }
+
+    #[test]
+    fn live_quote_manager_replacement_proposal_below_edge_threshold_cancels() {
+        let mut input = sample_input_with_quote();
+        input.fair_probability = 0.192;
+        input.proposed_quote.as_mut().expect("proposal").edge_bps = 20.0;
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [QuoteManagerDecision::CancelQuote { order_id, reasons, .. }]
+                if order_id == &exact_order_id()
+                    && reasons == &[QuoteDecisionReason::EdgeBelowThreshold]
         ));
     }
 
