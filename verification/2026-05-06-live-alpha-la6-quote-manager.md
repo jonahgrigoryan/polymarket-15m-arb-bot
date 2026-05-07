@@ -2,7 +2,7 @@
 
 ## Status
 
-LA6 IMPLEMENTED FOR DRY-RUN AND FAIL-CLOSED LIVE GATING, WITH 2026-05-07 POLICY REMEDIATION. No live submit or live cancel was run because `verification/2026-05-06-live-alpha-la6-approval.md` is incomplete and intentionally blocked, and this shell is missing the required authenticated L2 secret handles.
+LA6 IMPLEMENTED, LIVE-RUN VERIFIED, AND HELD FOR HUMAN REVIEW. On 2026-05-07 the final approved run `LA6-2026-05-07-005` placed exactly one maker-only post-only GTD quote, canceled it by exact order ID after the quote manager marked the quote stale, reconciled the cancel confirmation, and ended flat with `open_order_count=0`, `reserved_pusd_units=0`, and no fills.
 
 LA6 remains the only active scope in this branch. LA7 is out of scope.
 
@@ -64,7 +64,8 @@ Note: the untracked kickoff prompt observed on `main` was not present in the fin
 - Wired `live-alpha-quote-manager` CLI with `--dry-run` and `--human-approved` modes.
 - Dry-run emits a non-network quote lifecycle plan with place, leave, cancel, replace, expire, skip, no-trade exact-cancel, and halt decisions.
 - Existing quotes entering the no-trade window default to exact-order-ID cancel or halt; leaving open is allowed only when the explicit policy flag and final approval artifact allow it.
-- Human-approved path validates compile-time/runtime gates, config mode, approval artifact, geoblock, secret-handle presence, account config, authenticated readback, and approval/readback value binding. It defines the atomic LA6 approval-cap reservation step for future submit/cancel dispatch, but live dispatch is blocked in this PR because the LA6 approval artifact is incomplete and this shell lacks the required L2 handles.
+- Human-approved path validates compile-time/runtime gates, config mode, approval artifact, geoblock, secret-handle presence, account config, authenticated readback, approval/readback value binding, and atomic approval-cap reservation before dispatching one live quote lifecycle.
+- The final live path records quote started/planned/placed/cancel-requested/cancel-confirmed/reconciliation/stopped events, requires final authenticated readback to be flat, and reports the structured live outcome.
 - Added LA6 journal events and metrics names for quote started/stopped, planned, placed, left, cancel requested/confirmed, replace requested/submitted/accepted/rejected, expired, halted, reconciliation result, and anti-churn triggers.
 
 ## Config Snapshot
@@ -107,25 +108,28 @@ Dry-run plan decisions:
 
 ## Approval And Live Evidence
 
-- Approval ID: `LA6-2026-05-06-001` is reserved as a placeholder only.
+- Approval ID: `LA6-2026-05-07-005`.
 - Approval artifact: `verification/2026-05-06-live-alpha-la6-approval.md`.
-- Approval status: `BLOCKED`.
-- 2026-05-07 live-readback attempt: `cargo run --features live-alpha-orders -- --config config/local.toml validate --live-readback-preflight` exited 1 with run ID `18ad370aacd98880-873d-0`; geoblock passed, but `P15M_LIVE_BETA_CLOB_L2_ACCESS`, `P15M_LIVE_BETA_CLOB_L2_CREDENTIAL`, and `P15M_LIVE_BETA_CLOB_L2_PASSPHRASE` were missing from this shell.
-- Markets touched: `NOT RUN`.
-- Quotes placed: `NOT RUN`.
-- Quotes left alone: `NOT RUN`.
-- Quotes canceled: `NOT RUN`.
-- Quotes replaced: `NOT RUN`.
-- Fills: `NOT RUN`.
-- Open orders after run: `NOT RUN`.
-- Reserved pUSD after run: `NOT RUN`.
-- Cancel rate: `NOT RUN`.
-- Replacement rate: `NOT RUN`.
-- Anti-churn triggers: dry-run tested; live `NOT RUN`.
-- Risk halts: dry-run tested; live `NOT RUN`.
-- Mismatches: dry-run tested; live `NOT RUN`.
-- P&L: `NOT RUN`.
-- Paper/shadow/live divergence: `NOT RUN`.
+- Approval status: `APPROVED FOR THIS RUN ONLY; CONSUMED`.
+- Approval artifact used at runtime: `/tmp/p15m-la6-approval-005.md`, SHA-256 `sha256:b6e4171ddc5c56a962aa8a3c37689e7622c663ba528a08d5d37f0dec22f1f52f`.
+- Approval cap path: `/tmp/live-alpha-la6-approval-caps/LA6-2026-05-07-005.json`, SHA-256 `sha256:ca6c355f74c9b2da77087be91d41fcb368005497865bc16e9f9413bb0a14972b`.
+- Command: `cargo run --features live-alpha-orders -- --config /tmp/p15m-la6-quote-manager.toml live-alpha-quote-manager --human-approved --approval-id LA6-2026-05-07-005 --approval-artifact /tmp/p15m-la6-approval-005.md --max-orders 1 --max-replacements 1 --max-duration-sec 300`.
+- Run ID: `18ad38f9204f44e0-b76d-0`.
+- Markets touched: `btc-updown-15m-1778139900`.
+- Quote placed: `1`, order ID `0xea764a6d1846cef1602c37945c3734a35f99bb671ad38e9bc89236118a3e0ca9`, price `0.2`, size `5.0`, notional `1.0`.
+- Quotes left alone: `0`.
+- Quotes canceled: `1`; decision `cancel_quote`, reason `book_stale`, exact-order-ID cancel request sent and confirmed on attempt `1`.
+- Quotes replaced: `0`; replacement cap was present but not exercised because the quote-manager stale-cancel gate fired first.
+- Fills: `0`; trade IDs empty.
+- Open orders after run: `0`.
+- Reserved pUSD after run: `0`.
+- Cancel rate: `1` cancel in the approved session; within configured `max_cancel_rate_per_min=1`.
+- Replacement rate: `0`; within configured `max_replacements=1`.
+- Anti-churn triggers: dry-run/unit tests cover cooldown/rate/min-lifetime gates; live run canceled due stale book before replacement.
+- Risk halts: final live run none. Same-session non-final run `LA6-2026-05-07-003` correctly risk-rejected as `market_too_close_to_close`.
+- Mismatches: none in final quote reconciliation. The post-run `validate --live-readback-preflight` still reports startup recovery `unexpected_fill` from pre-existing account trade history outside this run; this remains a future durable-journal seeding/recovery concern, not an LA6 quote mismatch.
+- P&L: `0.000000` realized for LA6 final run; no fills.
+- Paper/shadow/live divergence: no live fill occurred; final readback flat matched local quote lifecycle.
 
 No secret values were printed, logged, written, or committed.
 
@@ -156,6 +160,12 @@ PASS: main 2 passed; 0 failed
 
 cargo run --features live-alpha-orders -- --config config/local.toml validate --live-readback-preflight
 EXPECTED BLOCK: missing L2 handles; no live submit/cancel attempted
+
+cargo run --features live-alpha-orders -- --config /tmp/p15m-la6-quote-manager.toml validate --live-readback-preflight
+PASS: authenticated readback passed, run_id=18ad39088a8fbf60-b82d-0, open_order_count=0, reserved_pusd_units=0, available_pusd_units=6314318
+
+cargo run --features live-alpha-orders -- --config /tmp/p15m-la6-quote-manager.toml live-alpha-quote-manager --human-approved --approval-id LA6-2026-05-07-005 --approval-artifact /tmp/p15m-la6-approval-005.md --max-orders 1 --max-replacements 1 --max-duration-sec 300
+PASS: one quote placed, exact-order-ID cancel requested and confirmed, final reconciliation passed, final open_order_count=0, reserved_pusd_units=0
 ```
 
 Required final verification:
@@ -193,13 +203,13 @@ Safety/no-secret scans:
 
 ```text
 rg -n -i "(submit.*order|post.*order|place.*order|create.*order|createAndPostOrder|createAndPostMarketOrder|postOrder|postOrders|cancel.*order|cancelOrder|cancelOrders|cancelAll|/order|/orders|/cancel|live[_ -]?order|live[_ -]?trading|FOK|FAK|GTD|GTC|post[_ -]?only)" src Cargo.toml config runbooks *.md
-PASS with expected historical and guardrail hits only. Count-only rerun after cleanup: 1102 for the plan order/cancel scan.
+PASS with expected historical and guardrail hits only. Count-only rerun after cleanup: 1123 for the plan order/cancel scan.
 
 rg -n -i "(wallet|private[_ -]?key|secret|api[_ -]?key|passphrase|signing|signature|mnemonic|seed|ethers|web3|alloy|secp256k1|k256|ecdsa|POLY_API_KEY|POLY_SECRET|POLY_PASSPHRASE|0x[0-9a-fA-F]{64})" src Cargo.toml config runbooks verification *.md
-PASS with expected public addresses/order IDs/feed IDs, secret-handle names, tests, and guardrail text only. Count-only rerun: 1296.
+PASS with expected public addresses/order IDs/feed IDs, secret-handle names, tests, and guardrail text only. Count-only rerun: 1301.
 
 rg -n -i "(LIVE_ORDER_PLACEMENT_ENABLED|LIVE_ALPHA|live-alpha-orders|kill_switch|geoblock|heartbeat|reconciliation|risk_halt)" src Cargo.toml config
-PASS with expected live-gate/config/journal hits only. Count-only rerun: 1531.
+PASS with expected live-gate/config/journal hits only. Count-only rerun: 1576.
 
 test ! -e .env || git check-ignore .env
 PASS: .env is ignored.
@@ -218,9 +228,9 @@ Expected scan-hit classes: older LA3 FAK/taker approval code, historical docs an
 - No batch order path was added.
 - No cancel-all runtime path was added.
 - No production sizing, multi-wallet deployment, or asset expansion was added.
-- Live order placement remains controlled by `--features live-alpha-orders` and `LIVE_ORDER_PLACEMENT_ENABLED`.
-- The human-approved LA6 path is blocked by the incomplete LA6 approval artifact and missing L2 handles in this shell.
+- Live order placement remains controlled by `--features live-alpha-orders`, `LIVE_ORDER_PLACEMENT_ENABLED`, runtime gates, approval artifact binding, and one-run approval-cap reservation.
+- The human-approved LA6 path consumed approval `LA6-2026-05-07-005`; any further live run requires a new approval artifact and cap reservation.
 
 ## LA7 Decision
 
-LA7 go/no-go: `NO-GO`. LA6 needs review, final approval/readback evidence, and a separate human decision before any LA7 work.
+LA7 go/no-go: `NO-GO`. LA6 has final run evidence, but LA7 remains forbidden until a separate human review and approval.

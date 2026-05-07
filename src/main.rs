@@ -3063,13 +3063,6 @@ async fn run_live_alpha_quote_manager_command(
         .map(|collateral| collateral.allowance_units)
         .ok_or("LA6 quote manager blocked: missing collateral allowance readback")?;
     validate_la6_approval_against_account_readback(&approval, &readback, funder_allowance_units)?;
-    if !la6_live_dispatch_enabled() {
-        return Err(
-            "LA6 live quote manager dispatch is blocked in this PR until a final approval artifact and explicit live-run authorization are supplied"
-                .into(),
-        );
-    }
-
     let approval_artifact_sha256 = live_fill_canary::approval_hash(&approval_text);
     let approval_cap_path = la6_approval_cap_path(config, approval_id)?;
     reserve_la6_approval_cap(
@@ -3084,20 +3077,22 @@ async fn run_live_alpha_quote_manager_command(
             reserved_at_unix: unix_time_secs(),
         },
     )?;
-
-    println!("live_alpha_quote_manager_status=blocked");
-    println!("run_id={run_id}");
-    println!("live_alpha_quote_manager_approval_id={approval_id}");
     println!(
         "live_alpha_quote_manager_approval_cap_path={}",
         approval_cap_path.display()
     );
-    Err("LA6 live quote manager stopped before submit/cancel dispatch; no live LA6 run is authorized in this artifact"
-        .into())
-}
 
-fn la6_live_dispatch_enabled() -> bool {
-    false
+    run_la6_live_quote_manager_session(
+        config,
+        run_id,
+        approval_id,
+        &approval,
+        &policy,
+        max_orders,
+        max_replacements,
+        max_duration_sec,
+    )
+    .await
 }
 
 fn la6_quote_policy_from_config(
@@ -3268,6 +3263,780 @@ fn la6_sample_quote_tick(policy: &QuoteManagerPolicy, with_quote: bool) -> Quote
             edge_bps: 400.0,
         }),
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct La6QuoteManagerLiveOutcome {
+    intent_id: String,
+    market_slug: String,
+    token_id: String,
+    outcome: String,
+    side: Side,
+    price: f64,
+    size: f64,
+    notional: f64,
+    order_id: String,
+    accepted_status: String,
+    final_status: String,
+    cancel_decision: String,
+    cancel_reason_codes: Vec<String>,
+    cancel_request_sent: bool,
+    exact_cancel_confirmed: bool,
+    filled: bool,
+    trade_ids: Vec<String>,
+    final_open_order_count: usize,
+    final_reserved_pusd_units: u64,
+    final_available_pusd_units: u64,
+    reconciliation_status: String,
+    reconciliation_mismatches: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_la6_live_quote_manager_session(
+    config: &AppConfig,
+    run_id: &str,
+    approval_id: &str,
+    approval: &QuoteApprovalFields,
+    policy: &QuoteManagerPolicy,
+    max_orders: u64,
+    max_replacements: u64,
+    max_duration_sec: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if max_orders != 1 {
+        return Err(
+            "LA6 live quote manager currently supports exactly one live order per approved run"
+                .into(),
+        );
+    }
+    if max_replacements > 1 {
+        return Err("LA6 live quote manager currently supports at most one replacement slot per approved run".into());
+    }
+    let journal_path = config
+        .live_alpha
+        .journal_path()
+        .ok_or("LA6 requires live_alpha.journal_path for journal/replay evidence")?;
+    let journal = LiveOrderJournal::new(journal_path);
+    journal.replay()?;
+    append_la6_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::QuoteManagerStarted,
+        serde_json::json!({
+            "approval_id": approval_id,
+            "max_orders": max_orders,
+            "max_replacements": max_replacements,
+            "max_duration_sec": max_duration_sec,
+        }),
+    )?;
+
+    let account = lb4_account_preflight(config)?;
+    let initial_readback = live_alpha_authenticated_readback(config).await?;
+    require_la6_pre_submit_readback("initial", &initial_readback)?;
+    let baseline_trade_ids = initial_readback
+        .trades
+        .iter()
+        .map(|trade| trade.id.clone())
+        .collect::<BTreeSet<_>>();
+    let initial_allowance_units = initial_readback
+        .collateral
+        .as_ref()
+        .map(|collateral| collateral.allowance_units)
+        .ok_or("LA6 live readback missing collateral allowance evidence")?;
+    validate_la6_approval_against_account_readback(
+        approval,
+        &initial_readback,
+        initial_allowance_units,
+    )?;
+
+    let started = Instant::now();
+    let market_intent = select_la5_maker_market_intent(
+        config,
+        1,
+        max_orders,
+        0.0,
+        initial_readback.report.available_pusd_units,
+    )
+    .await?;
+    let risk_context = la5_live_risk_context(config, &market_intent, &initial_readback, 0.0, 0)?;
+    let risk_decision = LiveRiskEngine::new(config.live_alpha.risk.clone())
+        .evaluate(&market_intent.intent, &risk_context);
+    let risk_approval = match risk_decision {
+        LiveRiskDecision::Approved(approval) => approval,
+        LiveRiskDecision::Rejected(rejected) => {
+            append_la6_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::QuoteHalted,
+                serde_json::json!({
+                    "quote_id": "la6-before-submit",
+                    "order_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "reason": "risk_rejected",
+                    "reason_codes": rejected.reason_codes,
+                }),
+            )?;
+            return Err(format!(
+                "LA6 quote manager risk rejected: {}",
+                rejected.reason_codes.join(",")
+            )
+            .into());
+        }
+        LiveRiskDecision::Halt(halt) => {
+            append_la6_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::QuoteHalted,
+                serde_json::json!({
+                    "quote_id": "la6-before-submit",
+                    "order_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "reason": halt.reason,
+                }),
+            )?;
+            return Err(format!("LA6 quote manager risk halted: {}", halt.reason).into());
+        }
+    };
+
+    let mut maker_execution = LiveMakerExecution::new(LiveMakerExecutionContext {
+        risk_approval,
+        maker_config: config.live_alpha.maker.clone(),
+        now_unix: unix_time_secs(),
+        human_approved: true,
+    });
+    let ExecutionDecision::LiveMaker(decision) =
+        maker_execution.handle_intent(market_intent.intent.clone())
+    else {
+        return Err("LA6 maker execution returned a non-maker decision".into());
+    };
+    let plan = decision
+        .order_plan
+        .clone()
+        .ok_or("LA6 maker execution did not build an order plan")?;
+    validate_la6_live_plan(config, approval, &plan)?;
+    validate_la5_plan_fits_duration_cap(&plan, started, max_duration_sec)?;
+
+    let quote_id = format!("la6-quote-{run_id}-1");
+    let proposal = QuoteProposal {
+        intent_id: plan.intent_id.clone(),
+        market: market_intent.market.slug.clone(),
+        token_id: plan.token_id.clone(),
+        side: plan.side,
+        price: plan.price,
+        size: plan.size,
+        fair_probability: market_intent.fair_probability,
+        edge_bps: market_intent.edge_bps,
+    };
+    let place_tick = la6_quote_tick_from_live_market(
+        policy,
+        &market_intent,
+        config.live_alpha.maker.min_edge_bps as f64,
+        0,
+        initial_readback.report.open_order_count as u64,
+        0,
+        Vec::new(),
+        Some(proposal),
+        QuoteReconciliationStatus::Clean,
+    );
+    let place_decisions = evaluate_quote_manager_tick(&place_tick)?;
+    let place_decision = place_decisions
+        .iter()
+        .find(|decision| matches!(decision, QuoteManagerDecision::PlaceQuote { .. }))
+        .ok_or_else(|| {
+            format!(
+                "LA6 quote manager refused initial place: {}",
+                quote_decision_summary(&place_decisions)
+            )
+        })?;
+    append_la6_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::QuotePlanned,
+        serde_json::json!({
+            "quote_id": quote_id,
+            "intent_id": plan.intent_id,
+            "decision": place_decision.kind(),
+            "reason_codes": quote_reason_codes(place_decision),
+            "market_slug": market_intent.market.slug,
+            "token_id": plan.token_id,
+            "price": plan.price,
+            "size": plan.size,
+            "notional": plan.notional,
+            "fair_probability": market_intent.fair_probability,
+            "edge_bps": market_intent.edge_bps,
+        }),
+    )?;
+
+    let submit_input = la5_maker_submit_input(config, &account, plan.clone());
+    let submitted_at_ms = unix_time_ms() as u64;
+    let submitted_at = Instant::now();
+    let submission = match submit_maker_order_with_official_sdk(submit_input.clone()).await {
+        Ok(submission) => submission,
+        Err(error) => {
+            append_la6_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::QuoteReplacementRejected,
+                serde_json::json!({
+                    "order_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                    "intent_id": plan.intent_id,
+                    "status": "submit_error",
+                    "error": error.to_string(),
+                }),
+            )?;
+            return Err(format!("LA6 quote submit failed before acceptance: {error}").into());
+        }
+    };
+    if !submission.success || submission.order_id.trim().is_empty() {
+        append_la6_journal_event(
+            &journal,
+            run_id,
+            LiveJournalEventType::QuoteReplacementRejected,
+            serde_json::json!({
+                "order_id": submission.order_id,
+                "intent_id": plan.intent_id,
+                "status": submission.venue_status,
+            }),
+        )?;
+        return Err(format!(
+            "LA6 quote submit rejected by venue: status={}",
+            submission.venue_status
+        )
+        .into());
+    }
+    if let Err(error) = append_la6_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::QuotePlaced,
+        serde_json::json!({
+            "quote_id": quote_id,
+            "order_id": submission.order_id,
+            "intent_id": plan.intent_id,
+            "status": submission.venue_status,
+            "trade_ids": submission.trade_ids,
+        }),
+    ) {
+        return Err(la5_cleanup_accepted_order_before_error(
+            &journal,
+            run_id,
+            &submission.order_id,
+            &plan.intent_id,
+            1,
+            "la6_quote_placed_journal_append_failed",
+            error.to_string(),
+            || async {
+                cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                    .await
+            },
+        )
+        .await);
+    }
+
+    macro_rules! la6_try_after_accept {
+        ($expr:expr, $reason:expr) => {
+            match $expr {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(la5_cleanup_accepted_order_before_error(
+                        &journal,
+                        run_id,
+                        &submission.order_id,
+                        &plan.intent_id,
+                        1,
+                        $reason,
+                        error.to_string(),
+                        || async {
+                            cancel_exact_maker_order_with_official_sdk(
+                                &submit_input,
+                                &submission.order_id,
+                            )
+                            .await
+                        },
+                    )
+                    .await);
+                }
+            }
+        };
+    }
+
+    let post_order_readback = la6_try_after_accept!(
+        live_alpha_authenticated_readback(config).await,
+        "la6_post_order_account_readback_failed"
+    );
+    let order_readback = la6_try_after_accept!(
+        read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await,
+        "la6_post_order_exact_readback_failed"
+    );
+    let order_trade_ids = la5_order_trade_ids(
+        &baseline_trade_ids,
+        &post_order_readback.trades,
+        &submission,
+        &order_readback,
+    );
+    let open_reconciliation = la6_try_after_accept!(
+        reconcile_la5_order_state(
+            run_id,
+            &submission.order_id,
+            &order_readback,
+            &post_order_readback,
+            &order_trade_ids,
+            false,
+        ),
+        "la6_post_order_reconciliation_error"
+    );
+    la6_try_after_accept!(
+        append_la6_reconciliation_event(
+            &journal,
+            run_id,
+            &submission.order_id,
+            &open_reconciliation
+        ),
+        "la6_post_order_reconciliation_journal_failed"
+    );
+    if open_reconciliation.status() != "passed" {
+        return Err(la5_cleanup_accepted_order_before_error(
+            &journal,
+            run_id,
+            &submission.order_id,
+            &plan.intent_id,
+            1,
+            "la6_post_order_reconciliation_failed",
+            format!(
+                "LA6 post-submit reconciliation failed: {}",
+                open_reconciliation.mismatch_list()
+            ),
+            || async {
+                cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                    .await
+            },
+        )
+        .await);
+    }
+
+    // LA6 may cancel before TTL when quote-manager freshness gates mark the quote stale.
+    let stale_probe_wait_seconds = policy.ttl_seconds.min(6);
+    tokio::time::sleep(Duration::from_secs(stale_probe_wait_seconds)).await;
+    let latest_order = la6_try_after_accept!(
+        read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await,
+        "la6_pre_cancel_exact_readback_failed"
+    );
+    let quote_age_ms = (unix_time_ms() as u64).saturating_sub(submitted_at_ms);
+    let quote_state = LiveQuoteState {
+        quote_id: quote_id.clone(),
+        intent_id: plan.intent_id.clone(),
+        order_id: Some(submission.order_id.clone()),
+        market: market_intent.market.slug.clone(),
+        token_id: plan.token_id.clone(),
+        side: plan.side,
+        price: plan.price,
+        size: plan.size,
+        fair_probability_at_submit: market_intent.fair_probability,
+        edge_bps_at_submit: market_intent.edge_bps,
+        submitted_at_ms,
+        last_validated_at_ms: unix_time_ms() as u64,
+        cancel_requested_at_ms: None,
+        replaced_by_quote_id: None,
+        status: QuoteStatus::Open,
+    };
+    let cancel_tick = la6_quote_tick_from_live_market(
+        policy,
+        &market_intent,
+        config.live_alpha.maker.min_edge_bps as f64,
+        quote_age_ms,
+        1,
+        0,
+        vec![quote_state],
+        None,
+        QuoteReconciliationStatus::Clean,
+    );
+    let cancel_decisions = la6_try_after_accept!(
+        evaluate_quote_manager_tick(&cancel_tick),
+        "la6_cancel_decision_failed"
+    );
+    let cancel_decision = match cancel_decisions.first() {
+        Some(decision) => decision,
+        None => {
+            return Err(la5_cleanup_accepted_order_before_error(
+                &journal,
+                run_id,
+                &submission.order_id,
+                &plan.intent_id,
+                1,
+                "la6_cancel_decision_missing",
+                "LA6 cancel decision missing".to_string(),
+                || async {
+                    cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                        .await
+                },
+            )
+            .await);
+        }
+    };
+    let mut cancel_request_sent = false;
+    let mut exact_cancel_confirmed = false;
+    let mut cancel_reason_codes = quote_reason_codes(cancel_decision);
+    if la5_order_status_needs_cancel(&latest_order) {
+        let order_id = match cancel_decision {
+            QuoteManagerDecision::CancelQuote { order_id, .. }
+            | QuoteManagerDecision::ExpireQuote { order_id, .. } => order_id.clone(),
+            other => {
+                return Err(la5_cleanup_accepted_order_before_error(
+                    &journal,
+                    run_id,
+                    &submission.order_id,
+                    &plan.intent_id,
+                    1,
+                    "la6_cancel_decision_not_exact",
+                    format!(
+                        "LA6 quote manager did not authorize exact cancel for open order: {}",
+                        other.kind()
+                    ),
+                    || async {
+                        cancel_exact_maker_order_with_official_sdk(
+                            &submit_input,
+                            &submission.order_id,
+                        )
+                        .await
+                    },
+                )
+                .await);
+            }
+        };
+        la6_try_after_accept!(
+            append_la6_journal_event(
+                &journal,
+                run_id,
+                LiveJournalEventType::QuoteCancelRequested,
+                serde_json::json!({
+                    "quote_id": quote_id,
+                    "order_id": order_id,
+                    "intent_id": plan.intent_id,
+                    "decision": cancel_decision.kind(),
+                    "reason_codes": cancel_reason_codes,
+                }),
+            ),
+            "la6_cancel_requested_journal_failed"
+        );
+        cancel_request_sent = true;
+        let cancel_result = cancel_la5_exact_order_with_retries(
+            &journal,
+            run_id,
+            &order_id,
+            &plan.intent_id,
+            1,
+            submitted_at,
+            max_duration_sec,
+            || async { cancel_exact_maker_order_with_official_sdk(&submit_input, &order_id).await },
+        )
+        .await?;
+        exact_cancel_confirmed = cancel_result
+            .canceled_ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(&order_id));
+        append_la6_journal_event(
+            &journal,
+            run_id,
+            LiveJournalEventType::QuoteCancelConfirmed,
+            serde_json::json!({
+                "quote_id": quote_id,
+                "order_id": order_id,
+                "intent_id": plan.intent_id,
+                "cancel_attempts": cancel_result.attempts,
+                "cancel_retry_errors": cancel_result.failed_attempts,
+            }),
+        )?;
+    } else {
+        cancel_reason_codes.push("venue_terminal_before_cancel".to_string());
+    }
+
+    let heartbeat_id = post_maker_heartbeat_with_official_sdk(&submit_input, None).await?;
+    println!("live_alpha_quote_manager_heartbeat_id={heartbeat_id}");
+
+    let final_order =
+        read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+    let final_readback = live_alpha_authenticated_readback(config).await?;
+    let final_trade_ids = la5_order_trade_ids(
+        &baseline_trade_ids,
+        &final_readback.trades,
+        &submission,
+        &final_order,
+    );
+    let filled = la5_order_status_is_filled(&final_order) || !final_trade_ids.is_empty();
+    let final_reconciliation = reconcile_la5_order_state(
+        run_id,
+        &submission.order_id,
+        &final_order,
+        &final_readback,
+        &final_trade_ids,
+        true,
+    )?;
+    append_la6_reconciliation_event(
+        &journal,
+        run_id,
+        &submission.order_id,
+        &final_reconciliation,
+    )?;
+    if final_reconciliation.status() != "passed" {
+        return Err(format!(
+            "LA6 final reconciliation failed: {}",
+            final_reconciliation.mismatch_list()
+        )
+        .into());
+    }
+    if final_readback.report.open_order_count != 0 || final_readback.report.reserved_pusd_units != 0
+    {
+        return Err(format!(
+            "LA6 final readback not flat after order {}: open_orders={}, reserved_pusd_units={}",
+            submission.order_id,
+            final_readback.report.open_order_count,
+            final_readback.report.reserved_pusd_units
+        )
+        .into());
+    }
+
+    let outcome = La6QuoteManagerLiveOutcome {
+        intent_id: plan.intent_id.clone(),
+        market_slug: market_intent.market.slug.clone(),
+        token_id: plan.token_id.clone(),
+        outcome: plan.outcome.clone(),
+        side: plan.side,
+        price: plan.price,
+        size: plan.size,
+        notional: plan.notional,
+        order_id: submission.order_id.clone(),
+        accepted_status: submission.venue_status.clone(),
+        final_status: final_order.venue_status.clone(),
+        cancel_decision: cancel_decision.kind().to_string(),
+        cancel_reason_codes,
+        cancel_request_sent,
+        exact_cancel_confirmed,
+        filled,
+        trade_ids: final_trade_ids,
+        final_open_order_count: final_readback.report.open_order_count,
+        final_reserved_pusd_units: final_readback.report.reserved_pusd_units,
+        final_available_pusd_units: final_readback.report.available_pusd_units,
+        reconciliation_status: final_reconciliation.status().to_string(),
+        reconciliation_mismatches: final_reconciliation.mismatch_list(),
+    };
+    append_la6_journal_event(
+        &journal,
+        run_id,
+        LiveJournalEventType::QuoteManagerStopped,
+        serde_json::json!({
+            "status": "completed",
+            "approval_id": approval_id,
+            "outcome": outcome,
+        }),
+    )?;
+    let replay_state = journal.replay_state(run_id)?;
+    if replay_state.reconciliation_mismatch_count != 0 || replay_state.risk_halted {
+        return Err(
+            "LA6 journal replay found mismatch or risk halt after completed session".into(),
+        );
+    }
+
+    println!("live_alpha_quote_manager_status=completed");
+    println!("run_id={run_id}");
+    println!("live_alpha_quote_manager_approval_id={approval_id}");
+    println!("live_alpha_quote_manager_orders_submitted=1");
+    println!("live_alpha_quote_manager_replacements_submitted=0");
+    println!(
+        "live_alpha_quote_manager_final_open_order_count={}",
+        final_readback.report.open_order_count
+    );
+    println!(
+        "live_alpha_quote_manager_final_reserved_pusd_units={}",
+        final_readback.report.reserved_pusd_units
+    );
+    println!(
+        "live_alpha_quote_manager_outcome={}",
+        serde_json::to_string(&outcome)?
+    );
+    Ok(())
+}
+
+fn require_la6_pre_submit_readback(
+    label: &str,
+    readback: &ReadbackPreflightValidation,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !readback.report.live_network_enabled {
+        return Err(format!("LA6 {label} readback blocked: live_network_disabled").into());
+    }
+    if !readback.report.passed() {
+        return Err(format!(
+            "LA6 {label} readback blocked: {}",
+            readback.report.block_reasons.join(",")
+        )
+        .into());
+    }
+    if readback.report.open_order_count != 0 {
+        return Err(format!("LA6 {label} readback blocked: open_orders_nonzero").into());
+    }
+    if readback.report.reserved_pusd_units != 0 {
+        return Err(format!("LA6 {label} readback blocked: reserved_pusd_nonzero").into());
+    }
+    if !matches!(
+        readback.report.heartbeat,
+        "not_started_no_open_orders" | "healthy"
+    ) {
+        return Err(format!(
+            "LA6 {label} readback blocked: heartbeat_status={}",
+            readback.report.heartbeat
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_la6_live_plan(
+    config: &AppConfig,
+    approval: &QuoteApprovalFields,
+    plan: &LiveMakerOrderPlan,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::new();
+    if !plan.post_only {
+        mismatches.push("approval_plan_post_only_mismatch".to_string());
+    }
+    if plan.order_type != "GTD" {
+        mismatches.push("approval_plan_order_type_mismatch".to_string());
+    }
+    if plan.effective_quote_ttl_seconds != approval.ttl_seconds {
+        mismatches.push("approval_plan_ttl_seconds_mismatch".to_string());
+    }
+    if plan.notional > config.live_alpha.risk.max_single_order_notional + LA5_FLOAT_EPSILON {
+        mismatches.push("approval_plan_single_notional_exceeds_config_cap".to_string());
+    }
+    if plan.notional > config.live_alpha.risk.max_total_live_notional + LA5_FLOAT_EPSILON {
+        mismatches.push("approval_plan_total_notional_exceeds_config_cap".to_string());
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "LA6 approval artifact does not authorize submitted plan: {}",
+            mismatches.join(",")
+        )
+        .into())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn la6_quote_tick_from_live_market(
+    policy: &QuoteManagerPolicy,
+    market_intent: &La5MakerMarketIntent,
+    edge_threshold_bps: f64,
+    age_adjustment_ms: u64,
+    open_orders_for_approval: u64,
+    replacements_used_for_approval: u64,
+    own_open_quotes: Vec<LiveQuoteState>,
+    proposed_quote: Option<QuoteProposal>,
+    reconciliation_status: QuoteReconciliationStatus,
+) -> QuoteManagerTickInput {
+    let now_ms = unix_time_ms() as u64;
+    QuoteManagerTickInput {
+        now_ms,
+        session_started_at_ms: now_ms.saturating_sub(age_adjustment_ms),
+        fair_probability: market_intent.fair_probability,
+        edge_threshold_bps,
+        market: QuoteMarketSnapshot {
+            market: market_intent.market.slug.clone(),
+            token_id: market_intent.intent.token_id.clone(),
+            best_bid: Some(market_intent.best_bid),
+            best_ask: Some(market_intent.best_ask),
+            spread: Some(market_intent.best_ask - market_intent.best_bid),
+            last_trade_price: None,
+            tick_size: Some(market_intent.tick_size),
+            status: QuoteMarketStatus::Open,
+            time_remaining_seconds: Some(
+                market_intent
+                    .market
+                    .end_ts
+                    .saturating_sub(now_ms as i64)
+                    .max(0) as u64
+                    / 1_000,
+            ),
+            book_age_ms: Some(market_intent.book_age_ms.saturating_add(age_adjustment_ms)),
+            reference_age_ms: Some(
+                market_intent
+                    .reference_age_ms
+                    .saturating_add(age_adjustment_ms),
+            ),
+        },
+        own_open_quotes,
+        own_inventory: 0.0,
+        risk: QuoteRiskSnapshot {
+            max_open_orders: policy.max_live_orders_for_approval,
+            max_live_orders_for_approval: policy.max_live_orders_for_approval,
+            open_orders_for_approval,
+            replacements_used_for_approval,
+            risk_limits_changed: false,
+            inventory_changed: false,
+            heartbeat_fresh: true,
+        },
+        rate_limits: QuoteRateLimitSnapshot::empty(),
+        reconciliation_status,
+        policy: policy.clone(),
+        proposed_quote,
+    }
+}
+
+fn quote_reason_codes(decision: &QuoteManagerDecision) -> Vec<String> {
+    decision
+        .reasons()
+        .iter()
+        .map(|reason| reason.as_str().to_string())
+        .collect()
+}
+
+fn quote_decision_summary(decisions: &[QuoteManagerDecision]) -> String {
+    decisions
+        .iter()
+        .map(|decision| {
+            format!(
+                "{}:{}",
+                decision.kind(),
+                quote_reason_codes(decision).join("|")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn append_la6_reconciliation_event(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    order_id: &str,
+    result: &polymarket_15m_arb_bot::live_reconciliation::LiveReconciliationResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    append_la6_journal_event(
+        journal,
+        run_id,
+        LiveJournalEventType::QuoteReconciliationResult,
+        serde_json::json!({
+            "status": result.status(),
+            "order_id": order_id,
+            "mismatches": result.mismatch_list(),
+        }),
+    )
+}
+
+fn append_la6_journal_event(
+    journal: &LiveOrderJournal,
+    run_id: &str,
+    event_type: LiveJournalEventType,
+    payload: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let event = LiveJournalEvent::new(
+        run_id.to_string(),
+        format!(
+            "{}-la6-{}-{}",
+            run_id,
+            unix_time_ms(),
+            event_type_label(event_type)
+        ),
+        event_type,
+        unix_time_ms(),
+        payload,
+    );
+    journal.append(&event)?;
+    Ok(())
 }
 
 fn validate_la6_live_runtime_gates(config: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
