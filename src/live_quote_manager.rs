@@ -968,6 +968,7 @@ pub fn validate_la6_approval_artifact_text(
 fn approval_artifact_indicates_consumed(text: &str) -> bool {
     let upper = text.to_ascii_uppercase();
     [
+        "EXECUTION GATE STATUS: LA6 RUN COMPLETE",
         "EXECUTION GATE STATUS: LA6 RUN COMPLETED",
         "EXECUTION GATE STATUS: LA6 RUN CONSUMED",
         "APPROVAL CONSUMED",
@@ -1012,16 +1013,41 @@ fn approval_string(text: &str, field: &'static str) -> Result<String, LiveQuoteM
 
 fn approval_u64(text: &str, field: &'static str) -> Result<u64, LiveQuoteManagerError> {
     let value = approval_string(text, field)?;
-    let start = value.find(|ch: char| ch.is_ascii_digit()).ok_or_else(|| {
-        LiveQuoteManagerError::Approval(vec![format!("approval_field_parse_error:{field}")])
-    })?;
-    let tail = &value[start..];
-    let end = tail
+    let trimmed = value.trim();
+    if approval_numeric_value_is_negated(trimmed) {
+        return Err(approval_parse_error(field));
+    }
+    let end = trimmed
         .find(|ch: char| !ch.is_ascii_digit())
-        .unwrap_or(tail.len());
-    tail[..end].parse::<u64>().map_err(|_| {
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        return Err(approval_parse_error(field));
+    }
+    let suffix = trimmed[end..].strip_prefix('`').unwrap_or(&trimmed[end..]);
+    if suffix.chars().next().is_some_and(|ch| !ch.is_whitespace()) {
+        return Err(approval_parse_error(field));
+    }
+    trimmed[..end].parse::<u64>().map_err(|_| {
         LiveQuoteManagerError::Approval(vec![format!("approval_field_parse_error:{field}")])
     })
+}
+
+fn approval_parse_error(field: &'static str) -> LiveQuoteManagerError {
+    LiveQuoteManagerError::Approval(vec![format!("approval_field_parse_error:{field}")])
+}
+
+fn approval_numeric_value_is_negated(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    let compact = lower
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '-' && *character != '_')
+        .collect::<String>();
+    lower.contains("not approved")
+        || lower.contains("not allowed")
+        || lower.contains("disallowed")
+        || lower.contains("blocked")
+        || lower.contains("requires explicit")
+        || compact.starts_with("not")
 }
 
 #[derive(Debug)]
@@ -1380,6 +1406,37 @@ mod tests {
             .expect_err("consumed approval must fail");
 
         assert!(error.to_string().contains("approval_artifact_consumed"));
+    }
+
+    #[test]
+    fn live_quote_manager_run_complete_approval_artifact_fails_closed() {
+        let artifact = valid_approval_artifact().replace(
+            "Execution Gate Status: READY",
+            "Execution Gate Status: LA6 RUN COMPLETE",
+        );
+        let error = validate_la6_approval_artifact_text(&artifact, "LA6-approval-1")
+            .expect_err("run-complete approval must fail");
+
+        assert!(error.to_string().contains("approval_artifact_consumed"));
+    }
+
+    #[test]
+    fn live_quote_manager_negated_numeric_approval_fields_fail_closed() {
+        for value in ["not approved: 1", "not 1"] {
+            let artifact = valid_approval_artifact().replace(
+                "| max_orders | `1` |",
+                &format!("| max_orders | `{value}` |"),
+            );
+            let error = validate_la6_approval_artifact_text(&artifact, "LA6-approval-1")
+                .expect_err("negated numeric approval must fail");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("approval_field_parse_error:max_orders"),
+                "value={value}"
+            );
+        }
     }
 
     #[test]
