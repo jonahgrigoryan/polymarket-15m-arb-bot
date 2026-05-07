@@ -31,7 +31,7 @@ Execution Gate Status: LA6 NOT RUN
 | ttl_seconds | `BLOCKED - NOT RUN` |
 | gtd_policy | `post-only GTD with Polymarket one-minute buffer - NOT LIVE AUTHORIZED` |
 | cancel_policy | `exact order ID only; cancel-all disallowed - NOT LIVE AUTHORIZED` |
-| no_trade_window_policy | `default TTL-bound exit; no immediate cancel solely on no-trade entry - NOT LIVE AUTHORIZED` |
+| no_trade_window_policy | `default exact-order-ID cancel or halt inside no-trade window; leaving open requires explicit final approval - NOT LIVE AUTHORIZED` |
 | risk_limits | `BLOCKED - NOT RUN` |
 | rollback_owner | `BLOCKED - NOT RUN` |
 | monitoring_owner | `BLOCKED - NOT RUN` |

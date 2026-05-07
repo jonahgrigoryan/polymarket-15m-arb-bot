@@ -250,6 +250,7 @@ pub enum QuoteDecisionReason {
     ReconciliationMismatch,
     ReconciliationUnknown,
     NoTradeWindowBlocksNewOrders,
+    NoTradeWindowCancelOpenQuote,
     NoTradeWindowTtlExitPending,
     MinQuoteLifetime,
     MaxCancelRate,
@@ -292,6 +293,7 @@ impl QuoteDecisionReason {
             Self::ReconciliationMismatch => "reconciliation_mismatch",
             Self::ReconciliationUnknown => "reconciliation_unknown",
             Self::NoTradeWindowBlocksNewOrders => "no_trade_window_blocks_new_orders",
+            Self::NoTradeWindowCancelOpenQuote => "no_trade_window_cancel_open_quote",
             Self::NoTradeWindowTtlExitPending => "no_trade_window_ttl_exit_pending",
             Self::MinQuoteLifetime => "min_quote_lifetime",
             Self::MaxCancelRate => "max_cancel_rate",
@@ -508,12 +510,20 @@ fn evaluate_existing_quote(
     if quote_is_ttl_expired(input, quote) {
         return exact_order_decision(input, quote, vec![QuoteDecisionReason::TtlExpired], true);
     }
-    if in_no_trade_window(input) && !input.policy.leave_open_in_no_trade_window {
-        return QuoteManagerDecision::LeaveQuote {
-            quote_id: quote.quote_id.clone(),
-            order_id: quote.order_id.clone(),
-            reasons: vec![QuoteDecisionReason::NoTradeWindowTtlExitPending],
-        };
+    if in_no_trade_window(input) {
+        if input.policy.leave_open_in_no_trade_window {
+            return QuoteManagerDecision::LeaveQuote {
+                quote_id: quote.quote_id.clone(),
+                order_id: quote.order_id.clone(),
+                reasons: vec![QuoteDecisionReason::NoTradeWindowTtlExitPending],
+            };
+        }
+        return exact_order_decision(
+            input,
+            quote,
+            vec![QuoteDecisionReason::NoTradeWindowCancelOpenQuote],
+            false,
+        );
     }
 
     let replace_reasons = approved_replacement_reasons(input, quote);
@@ -856,10 +866,17 @@ pub struct QuoteApprovalFields {
     pub gtd_policy: String,
     pub cancel_policy: String,
     pub no_trade_window_policy: String,
+    pub risk_limits: String,
     pub rollback_owner: String,
     pub monitoring_owner: String,
     pub authenticated_readback_evidence: String,
     pub operator_approval_timestamp: String,
+    pub available_pusd_units: u64,
+    pub reserved_pusd_units: u64,
+    pub open_order_count: u64,
+    pub trade_count: u64,
+    pub heartbeat_status: String,
+    pub funder_allowance_units: u64,
 }
 
 pub const LA6_APPROVAL_REQUIRED_FIELDS: &[&str] = &[
@@ -874,10 +891,17 @@ pub const LA6_APPROVAL_REQUIRED_FIELDS: &[&str] = &[
     "gtd_policy",
     "cancel_policy",
     "no_trade_window_policy",
+    "risk_limits",
     "rollback_owner",
     "monitoring_owner",
     "authenticated_readback_evidence",
     "operator_approval_timestamp",
+    "available_pusd_units",
+    "reserved_pusd_units",
+    "open_order_count",
+    "trade_count",
+    "heartbeat_status",
+    "funder_allowance_units",
 ];
 
 pub fn validate_la6_approval_artifact_text(
@@ -919,10 +943,17 @@ pub fn validate_la6_approval_artifact_text(
         gtd_policy: approval_string(text, "gtd_policy")?,
         cancel_policy: approval_string(text, "cancel_policy")?,
         no_trade_window_policy: approval_string(text, "no_trade_window_policy")?,
+        risk_limits: approval_string(text, "risk_limits")?,
         rollback_owner: approval_string(text, "rollback_owner")?,
         monitoring_owner: approval_string(text, "monitoring_owner")?,
         authenticated_readback_evidence: approval_string(text, "authenticated_readback_evidence")?,
         operator_approval_timestamp: approval_string(text, "operator_approval_timestamp")?,
+        available_pusd_units: approval_u64(text, "available_pusd_units")?,
+        reserved_pusd_units: approval_u64(text, "reserved_pusd_units")?,
+        open_order_count: approval_u64(text, "open_order_count")?,
+        trade_count: approval_u64(text, "trade_count")?,
+        heartbeat_status: approval_string(text, "heartbeat_status")?,
+        funder_allowance_units: approval_u64(text, "funder_allowance_units")?,
     })
 }
 
@@ -1203,10 +1234,26 @@ mod tests {
     }
 
     #[test]
-    fn live_quote_manager_no_trade_window_existing_quote_waits_for_ttl_exit() {
+    fn live_quote_manager_no_trade_window_existing_quote_cancels_by_default() {
         let mut input = sample_input_with_quote();
         input.market.time_remaining_seconds = Some(500);
         input.fair_probability = 0.30;
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [QuoteManagerDecision::CancelQuote { order_id, reasons, .. }]
+                if order_id == &exact_order_id()
+                    && reasons == &[QuoteDecisionReason::NoTradeWindowCancelOpenQuote]
+        ));
+    }
+
+    #[test]
+    fn live_quote_manager_no_trade_window_can_leave_only_when_policy_allows() {
+        let mut input = sample_input_with_quote();
+        input.market.time_remaining_seconds = Some(500);
+        input.fair_probability = 0.30;
+        input.policy.leave_open_in_no_trade_window = true;
         let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
 
         assert!(matches!(
@@ -1310,6 +1357,25 @@ mod tests {
             .expect_err("consumed approval must fail");
 
         assert!(error.to_string().contains("approval_artifact_consumed"));
+    }
+
+    #[test]
+    fn live_quote_manager_approval_artifact_requires_final_readback_fields() {
+        let artifact = valid_approval_artifact()
+            .replace(
+                "| available_pusd_units | `6314318` |",
+                "| available_pusd_units | `NOT RUN` |",
+            )
+            .replace(
+                "| funder_allowance_units | `18446744073709551615` |",
+                "| funder_allowance_units | `BLOCKED - NOT RUN` |",
+            );
+        let error = validate_la6_approval_artifact_text(&artifact, "LA6-approval-1")
+            .expect_err("blocked readback fields must fail");
+        let error = error.to_string();
+
+        assert!(error.contains("approval_field_pending:available_pusd_units"));
+        assert!(error.contains("approval_field_pending:funder_allowance_units"));
     }
 
     #[test]
@@ -1471,10 +1537,17 @@ Execution Gate Status: READY
 | gtd_policy | `post-only GTD now+60+ttl` |
 | cancel_policy | `exact order ID only` |
 | no_trade_window_policy | `TTL-bound exit` |
+| risk_limits | `max_orders=1 max_replacements=1 max_duration_sec=300` |
 | rollback_owner | `Jonah / operator` |
 | monitoring_owner | `Jonah / operator` |
 | authenticated_readback_evidence | `readback-run-1` |
 | operator_approval_timestamp | `2026-05-06T22:00:00-07:00` |
+| available_pusd_units | `6314318` |
+| reserved_pusd_units | `0` |
+| open_order_count | `0` |
+| trade_count | `23` |
+| heartbeat_status | `not_started_no_open_orders` |
+| funder_allowance_units | `18446744073709551615` |
 "#
         .to_string()
     }

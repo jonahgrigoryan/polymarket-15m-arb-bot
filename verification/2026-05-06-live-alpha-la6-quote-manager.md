@@ -2,7 +2,7 @@
 
 ## Status
 
-LA6 IMPLEMENTED FOR DRY-RUN AND FAIL-CLOSED LIVE GATING. No live submit or live cancel was authorized or run because `verification/2026-05-06-live-alpha-la6-approval.md` is incomplete and intentionally blocked.
+LA6 IMPLEMENTED FOR DRY-RUN AND FAIL-CLOSED LIVE GATING, WITH 2026-05-07 POLICY REMEDIATION. No live submit or live cancel was run because `verification/2026-05-06-live-alpha-la6-approval.md` is incomplete and intentionally blocked, and this shell is missing the required authenticated L2 secret handles.
 
 LA6 remains the only active scope in this branch. LA7 is out of scope.
 
@@ -62,8 +62,9 @@ Note: the untracked kickoff prompt observed on `main` was not present in the fin
 
 - Added `src/live_quote_manager.rs` with typed deterministic inputs, quote state, policy, decision outputs, approval artifact parsing, and regression coverage.
 - Wired `live-alpha-quote-manager` CLI with `--dry-run` and `--human-approved` modes.
-- Dry-run emits a non-network quote lifecycle plan with place, leave, cancel, replace, expire, skip, and halt decisions.
-- Human-approved path validates compile-time/runtime gates, config mode, approval artifact, geoblock, secret-handle presence, account config, and authenticated readback. It defines the atomic LA6 approval-cap reservation step for future submit/cancel dispatch, but live dispatch is blocked in this PR because the LA6 approval artifact is incomplete.
+- Dry-run emits a non-network quote lifecycle plan with place, leave, cancel, replace, expire, skip, no-trade exact-cancel, and halt decisions.
+- Existing quotes entering the no-trade window default to exact-order-ID cancel or halt; leaving open is allowed only when the explicit policy flag and final approval artifact allow it.
+- Human-approved path validates compile-time/runtime gates, config mode, approval artifact, geoblock, secret-handle presence, account config, authenticated readback, and approval/readback value binding. It defines the atomic LA6 approval-cap reservation step for future submit/cancel dispatch, but live dispatch is blocked in this PR because the LA6 approval artifact is incomplete and this shell lacks the required L2 handles.
 - Added LA6 journal events and metrics names for quote started/stopped, planned, placed, left, cancel requested/confirmed, replace requested/submitted/accepted/rejected, expired, halted, reconciliation result, and anti-churn triggers.
 
 ## Config Snapshot
@@ -101,6 +102,7 @@ Dry-run plan decisions:
 - `replace_quote`: exact-order-ID replacement decision for fair-value movement.
 - `expire_quote`: TTL expiry decision.
 - `skip_market`: no-trade window blocked a new quote.
+- `cancel_quote`: no-trade window default exact-order-ID cancel for an existing quote.
 - `halt_quote`: reconciliation mismatch failed closed.
 
 ## Approval And Live Evidence
@@ -108,6 +110,7 @@ Dry-run plan decisions:
 - Approval ID: `LA6-2026-05-06-001` is reserved as a placeholder only.
 - Approval artifact: `verification/2026-05-06-live-alpha-la6-approval.md`.
 - Approval status: `BLOCKED`.
+- 2026-05-07 live-readback attempt: `cargo run --features live-alpha-orders -- --config config/local.toml validate --live-readback-preflight` exited 1 with run ID `18ad370aacd98880-873d-0`; geoblock passed, but `P15M_LIVE_BETA_CLOB_L2_ACCESS`, `P15M_LIVE_BETA_CLOB_L2_CREDENTIAL`, and `P15M_LIVE_BETA_CLOB_L2_PASSPHRASE` were missing from this shell.
 - Markets touched: `NOT RUN`.
 - Quotes placed: `NOT RUN`.
 - Quotes left alone: `NOT RUN`.
@@ -132,14 +135,27 @@ Initial focused check:
 
 ```text
 cargo test --offline live_quote_manager
-PASS: 27 passed; 0 failed
+PASS: 29 passed; 0 failed after 2026-05-07 remediation
 ```
 
 Dry-run command:
 
 ```text
 cargo run --features live-alpha-orders -- --config config/default.toml live-alpha-quote-manager --dry-run
-PASS: non-live dry-run emitted place/leave/cancel/replace/expire/skip/halt plan
+PASS: non-live dry-run emitted place/leave/cancel/replace/expire/skip/no-trade-cancel/halt plan, run_id=18ad371718b927e8-890b-0
+```
+
+2026-05-07 remediation checks:
+
+```text
+cargo test --offline live_quote_manager
+PASS: 29 passed; 0 failed
+
+cargo test --offline la6_approval
+PASS: main 2 passed; 0 failed
+
+cargo run --features live-alpha-orders -- --config config/local.toml validate --live-readback-preflight
+EXPECTED BLOCK: missing L2 handles; no live submit/cancel attempted
 ```
 
 Required final verification:
@@ -155,7 +171,7 @@ cargo test --offline post_only_safety
 PASS: 1 passed; 0 failed
 
 cargo test --offline no_trade_window
-PASS: library 4 passed; main 1 passed; 0 failed
+PASS: library 5 passed; main 1 passed; 0 failed
 
 cargo test --offline live_reconciliation
 PASS: 24 passed; 0 failed
@@ -164,7 +180,7 @@ cargo fmt --check
 PASS
 
 cargo test --offline
-PASS: library 371 passed; main 50 passed; doc 0 passed; 0 failed
+PASS: library 373 passed; main 52 passed; doc 0 passed; 0 failed
 
 cargo clippy --offline -- -D warnings
 PASS
@@ -176,11 +192,14 @@ PASS
 Safety/no-secret scans:
 
 ```text
-rg -n -i "(cancel.?all|batch|FOK|FAK|marketable|taker)" src config runbooks verification
-PASS with expected historical and guardrail hits only. Count-only rerun after cleanup: 485.
+rg -n -i "(submit.*order|post.*order|place.*order|create.*order|createAndPostOrder|createAndPostMarketOrder|postOrder|postOrders|cancel.*order|cancelOrder|cancelOrders|cancelAll|/order|/orders|/cancel|live[_ -]?order|live[_ -]?trading|FOK|FAK|GTD|GTC|post[_ -]?only)" src Cargo.toml config runbooks *.md
+PASS with expected historical and guardrail hits only. Count-only rerun after cleanup: 1102 for the plan order/cancel scan.
 
-rg -n -i "(wallet|private.*key|secret|passphrase|mnemonic|seed|0x[0-9a-fA-F]{64})" src config runbooks verification
-PASS with expected public addresses/order IDs/feed IDs, secret-handle names, tests, and guardrail text only. Count-only rerun: 776.
+rg -n -i "(wallet|private[_ -]?key|secret|api[_ -]?key|passphrase|signing|signature|mnemonic|seed|ethers|web3|alloy|secp256k1|k256|ecdsa|POLY_API_KEY|POLY_SECRET|POLY_PASSPHRASE|0x[0-9a-fA-F]{64})" src Cargo.toml config runbooks verification *.md
+PASS with expected public addresses/order IDs/feed IDs, secret-handle names, tests, and guardrail text only. Count-only rerun: 1296.
+
+rg -n -i "(LIVE_ORDER_PLACEMENT_ENABLED|LIVE_ALPHA|live-alpha-orders|kill_switch|geoblock|heartbeat|reconciliation|risk_halt)" src Cargo.toml config
+PASS with expected live-gate/config/journal hits only. Count-only rerun: 1531.
 
 test ! -e .env || git check-ignore .env
 PASS: .env is ignored.
@@ -200,8 +219,8 @@ Expected scan-hit classes: older LA3 FAK/taker approval code, historical docs an
 - No cancel-all runtime path was added.
 - No production sizing, multi-wallet deployment, or asset expansion was added.
 - Live order placement remains controlled by `--features live-alpha-orders` and `LIVE_ORDER_PLACEMENT_ENABLED`.
-- The human-approved LA6 path is blocked by the incomplete LA6 approval artifact.
+- The human-approved LA6 path is blocked by the incomplete LA6 approval artifact and missing L2 handles in this shell.
 
 ## LA7 Decision
 
-LA7 go/no-go: `NO-GO`. LA6 needs review, final verification, PR handoff, and a separate human decision before any LA7 work.
+LA7 go/no-go: `NO-GO`. LA6 needs review, final approval/readback evidence, and a separate human decision before any LA7 work.

@@ -63,9 +63,9 @@ use polymarket_15m_arb_bot::{
     live_position_book::LivePositionBook,
     live_quote_manager::{
         evaluate_quote_manager_tick, validate_la6_approval_artifact_text, LiveQuoteState,
-        QuoteManagerDecision, QuoteManagerPolicy, QuoteManagerTickInput, QuoteMarketSnapshot,
-        QuoteMarketStatus, QuoteProposal, QuoteRateLimitSnapshot, QuoteReconciliationStatus,
-        QuoteRiskSnapshot, QuoteStatus,
+        QuoteApprovalFields, QuoteManagerDecision, QuoteManagerPolicy, QuoteManagerTickInput,
+        QuoteMarketSnapshot, QuoteMarketStatus, QuoteProposal, QuoteRateLimitSnapshot,
+        QuoteReconciliationStatus, QuoteRiskSnapshot, QuoteStatus,
     },
     live_reconciliation::{
         reconcile_live_state, LiveReconciliationInput, LocalLiveState, VenueLiveState,
@@ -3057,6 +3057,12 @@ async fn run_live_alpha_quote_manager_command(
         )
         .into());
     }
+    let funder_allowance_units = readback
+        .collateral
+        .as_ref()
+        .map(|collateral| collateral.allowance_units)
+        .ok_or("LA6 quote manager blocked: missing collateral allowance readback")?;
+    validate_la6_approval_against_account_readback(&approval, &readback, funder_allowance_units)?;
     if !la6_live_dispatch_enabled() {
         return Err(
             "LA6 live quote manager dispatch is blocked in this PR until a final approval artifact and explicit live-run authorization are supplied"
@@ -3186,6 +3192,11 @@ fn la6_quote_manager_dry_run_plans(
         Some(policy.no_trade_seconds_before_close.saturating_sub(1));
     decisions.extend(evaluate_quote_manager_tick(&skip)?);
 
+    let mut no_trade_cancel = la6_sample_quote_tick(policy, true);
+    no_trade_cancel.market.time_remaining_seconds =
+        Some(policy.no_trade_seconds_before_close.saturating_sub(1));
+    decisions.extend(evaluate_quote_manager_tick(&no_trade_cancel)?);
+
     let mut halt = la6_sample_quote_tick(policy, true);
     halt.reconciliation_status = QuoteReconciliationStatus::Mismatch;
     decisions.extend(evaluate_quote_manager_tick(&halt)?);
@@ -3294,7 +3305,7 @@ fn validate_la6_live_runtime_gate_values(
 }
 
 fn validate_la6_approval_against_cli_and_config(
-    approval: &polymarket_15m_arb_bot::live_quote_manager::QuoteApprovalFields,
+    approval: &QuoteApprovalFields,
     config: &AppConfig,
     approval_id: &str,
     max_orders: u64,
@@ -3346,6 +3357,43 @@ fn validate_la6_approval_against_cli_and_config(
         mismatches.dedup();
         Err(format!(
             "LA6 approval artifact does not match CLI/config: {}",
+            mismatches.join(",")
+        )
+        .into())
+    }
+}
+
+fn validate_la6_approval_against_account_readback(
+    approval: &QuoteApprovalFields,
+    readback: &ReadbackPreflightValidation,
+    funder_allowance_units: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut mismatches = Vec::<String>::new();
+    if approval.available_pusd_units != readback.report.available_pusd_units {
+        mismatches.push("approval_available_pusd_units_mismatch".to_string());
+    }
+    if approval.reserved_pusd_units != readback.report.reserved_pusd_units {
+        mismatches.push("approval_reserved_pusd_units_mismatch".to_string());
+    }
+    if approval.open_order_count != readback.report.open_order_count as u64 {
+        mismatches.push("approval_open_order_count_mismatch".to_string());
+    }
+    if approval.trade_count != readback.report.trade_count as u64 {
+        mismatches.push("approval_trade_count_mismatch".to_string());
+    }
+    if approval.heartbeat_status != readback.report.heartbeat {
+        mismatches.push("approval_heartbeat_status_mismatch".to_string());
+    }
+    if approval.funder_allowance_units != funder_allowance_units {
+        mismatches.push("approval_funder_allowance_units_mismatch".to_string());
+    }
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        mismatches.sort_unstable();
+        mismatches.dedup();
+        Err(format!(
+            "LA6 approval artifact does not match authenticated readback: {}",
             mismatches.join(",")
         )
         .into())
@@ -9909,6 +9957,61 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
         validate_la5_plan_against_approval(&approval, &plan, 0.0).expect("matching plan passes");
         validate_la5_session_against_approval(&approval, &outcomes, 2.55)
             .expect("matching session passes");
+    }
+
+    #[test]
+    fn la6_approval_binding_rejects_mismatched_readback_values() {
+        let mut approval = la6_test_approval_fields();
+        approval.available_pusd_units = 123;
+        approval.funder_allowance_units = 1;
+        let readback = la5_test_readback();
+
+        let error = validate_la6_approval_against_account_readback(
+            &approval,
+            &readback,
+            18446744073709551615,
+        )
+        .expect_err("LA6 artifact readback fields must match authenticated readback")
+        .to_string();
+
+        assert!(error.contains("approval_available_pusd_units_mismatch"));
+        assert!(error.contains("approval_funder_allowance_units_mismatch"));
+    }
+
+    #[test]
+    fn la6_approval_binding_accepts_matching_readback_values() {
+        let approval = la6_test_approval_fields();
+        let readback = la5_test_readback();
+
+        validate_la6_approval_against_account_readback(&approval, &readback, 18446744073709551615)
+            .expect("matching LA6 readback fields pass");
+    }
+
+    fn la6_test_approval_fields() -> QuoteApprovalFields {
+        QuoteApprovalFields {
+            approval_id: "LA6-approval-1".to_string(),
+            approved_wallet: "0x1111111111111111111111111111111111111111".to_string(),
+            approved_funder: "0x2222222222222222222222222222222222222222".to_string(),
+            approved_markets_assets: "BTC/ETH/SOL only".to_string(),
+            max_orders: 1,
+            max_replacements: 1,
+            max_duration_sec: 300,
+            ttl_seconds: 30,
+            gtd_policy: "post-only GTD now+60+ttl".to_string(),
+            cancel_policy: "exact order ID only".to_string(),
+            no_trade_window_policy: "default exact-order-ID cancel".to_string(),
+            risk_limits: "max_orders=1 max_replacements=1 max_duration_sec=300".to_string(),
+            rollback_owner: "Jonah / operator".to_string(),
+            monitoring_owner: "Jonah / operator".to_string(),
+            authenticated_readback_evidence: "readback-run-1".to_string(),
+            operator_approval_timestamp: "2026-05-06T22:00:00-07:00".to_string(),
+            available_pusd_units: 6_314_318,
+            reserved_pusd_units: 0,
+            open_order_count: 0,
+            trade_count: 23,
+            heartbeat_status: "not_started_no_open_orders".to_string(),
+            funder_allowance_units: 18446744073709551615,
+        }
     }
 
     fn la5_valid_approval_artifact_text() -> String {
