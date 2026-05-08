@@ -3496,17 +3496,10 @@ async fn run_la6_live_quote_manager_session(
     let submission = match submit_maker_order_with_official_sdk(submit_input.clone()).await {
         Ok(submission) => submission,
         Err(error) => {
-            append_la6_journal_event(
-                &journal,
-                run_id,
-                LiveJournalEventType::QuoteReplacementRejected,
-                serde_json::json!({
-                    "order_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    "intent_id": plan.intent_id,
-                    "status": "submit_error",
-                    "error": error.to_string(),
-                }),
-            )?;
+            let error_message = error.to_string();
+            let (event_type, payload) =
+                la6_quote_submit_error_journal_event(&plan.intent_id, &error_message);
+            append_la6_journal_event(&journal, run_id, event_type, payload)?;
             return Err(format!("LA6 quote submit failed before acceptance: {error}").into());
         }
     };
@@ -4086,6 +4079,20 @@ fn la6_quote_submit_rejected_journal_event(
     }
 }
 
+fn la6_quote_submit_error_journal_event(
+    intent_id: &str,
+    error: &str,
+) -> (LiveJournalEventType, serde_json::Value) {
+    (
+        LiveJournalEventType::MakerOrderRejected,
+        serde_json::json!({
+            "intent_id": intent_id,
+            "status": "submit_error",
+            "error": error,
+        }),
+    )
+}
+
 fn validate_la6_live_runtime_gates(config: &AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     validate_la6_live_runtime_gate_values(
         live_alpha_gate::LIVE_ALPHA_ORDER_FEATURE_ENABLED,
@@ -4269,8 +4276,17 @@ fn la6_compare_risk_limit_u64(
 }
 
 fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
-    !la6_policy_contains_negated_approval_language(policy)
-        && policy.to_ascii_lowercase().contains("exact")
+    if la6_policy_contains_negated_approval_language(policy) {
+        return false;
+    }
+    let policy = policy.to_ascii_lowercase();
+    let tokens = policy
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    tokens.windows(3).any(|window| {
+        window[0] == "exact" && window[1] == "order" && matches!(window[2], "id" | "ids")
+    })
 }
 
 fn la6_approved_markets_assets_are_exact(approved_markets_assets: &str) -> bool {
@@ -4322,6 +4338,8 @@ fn la6_policy_contains_negated_approval_language(policy: &str) -> bool {
         || policy.contains("disallowed")
         || policy.contains("blocked")
         || policy.contains("requires explicit")
+        || compact.contains("inexact")
+        || compact.contains("nonexact")
         || compact.contains("notexact")
 }
 
@@ -10995,7 +11013,12 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     #[test]
     fn la6_approval_binding_rejects_negated_exact_cancel_policy() {
         let config = la5_test_config();
-        for cancel_policy in ["exact order ID not approved", "not exact order ID"] {
+        for cancel_policy in [
+            "exact order ID not approved",
+            "not exact order ID",
+            "inexact order IDs allowed",
+            "non-exact order IDs allowed",
+        ] {
             let mut approval = la6_test_approval_fields();
             approval.cancel_policy = cancel_policy.to_string();
 
@@ -11066,6 +11089,27 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         assert!(error.contains("approval_max_single_order_notional_mismatch"));
         assert!(error.contains("approval_max_total_live_notional_mismatch"));
+    }
+
+    #[test]
+    fn la6_pre_acceptance_submit_error_uses_intent_level_journal_event() {
+        let (event_type, payload) =
+            la6_quote_submit_error_journal_event("intent-submit-error", "network submit failure");
+
+        assert_eq!(event_type, LiveJournalEventType::MakerOrderRejected);
+        assert!(payload.get("order_id").is_none());
+
+        let event = LiveJournalEvent::new(
+            "run-submit-error",
+            "event-submit-error",
+            event_type,
+            0,
+            payload,
+        );
+        let state = reduce_live_journal_events(&[event]).expect("submit error event replays");
+
+        assert!(state.intents.contains("intent-submit-error"));
+        assert!(state.orders.is_empty());
     }
 
     #[test]
