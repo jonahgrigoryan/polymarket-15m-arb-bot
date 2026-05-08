@@ -3016,6 +3016,7 @@ async fn run_live_alpha_quote_manager_command(
         max_replacements,
         max_duration_sec,
     )?;
+    require_la6_journal_preflight(config)?;
 
     let geoblock = run_geoblock_validation(config).await?;
     if geoblock.blocked {
@@ -3338,12 +3339,8 @@ async fn run_la6_live_quote_manager_session(
     if max_replacements > 1 {
         return Err("LA6 live quote manager currently supports at most one replacement slot per approved run".into());
     }
-    let journal_path = config
-        .live_alpha
-        .journal_path()
-        .ok_or("LA6 requires live_alpha.journal_path for journal/replay evidence")?;
+    let journal_path = require_la6_journal_preflight(config)?;
     let journal = LiveOrderJournal::new(journal_path);
-    journal.replay()?;
     append_la6_journal_event(
         &journal,
         run_id,
@@ -4095,6 +4092,15 @@ fn la6_quote_submit_non_exact_order_id_journal_event(
             "reason": "non_exact_order_id",
         }),
     )
+}
+
+fn require_la6_journal_preflight(config: &AppConfig) -> Result<&str, Box<dyn std::error::Error>> {
+    let journal_path = config
+        .live_alpha
+        .journal_path()
+        .ok_or("LA6 requires live_alpha.journal_path for journal/replay evidence")?;
+    LiveOrderJournal::new(journal_path).replay()?;
+    Ok(journal_path)
 }
 
 fn la6_pre_submit_risk_rejected_journal_event(
@@ -11498,6 +11504,38 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             la6_exact_accepted_order_id(&submission).expect("exact order id accepted"),
             exact_id
         );
+    }
+
+    #[test]
+    fn la6_pre_reservation_journal_preflight_rejects_missing_path() {
+        let mut config = la5_test_config();
+        config.live_alpha.journal_path = "   ".to_string();
+
+        let error = require_la6_journal_preflight(&config)
+            .expect_err("missing journal path must fail before approval cap reservation")
+            .to_string();
+
+        assert!(error.contains("live_alpha.journal_path"));
+    }
+
+    #[test]
+    fn la6_pre_reservation_journal_preflight_replays_existing_path() {
+        let mut config = la5_test_config();
+        let path = std::env::temp_dir().join(format!(
+            "p15m-la6-journal-preflight-{}-{}.jsonl",
+            std::process::id(),
+            monotonic_like_ns()
+        ));
+        config.live_alpha.journal_path = path.display().to_string();
+
+        assert_eq!(
+            require_la6_journal_preflight(&config).expect("empty journal path preflights"),
+            path.display().to_string()
+        );
+
+        if path.exists() {
+            fs::remove_file(path).expect("test journal state removed");
+        }
     }
 
     #[test]
