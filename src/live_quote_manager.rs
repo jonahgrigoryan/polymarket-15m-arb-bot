@@ -602,6 +602,16 @@ fn evaluate_existing_quote(
         );
     }
 
+    if rate_count_last_min(&input.rate_limits.cancel_timestamps_ms, input.now_ms)
+        >= input.policy.max_cancel_rate_per_min
+    {
+        return QuoteManagerDecision::HaltQuote {
+            quote_id: Some(quote.quote_id.clone()),
+            order_id: quote.order_id.clone(),
+            reasons: vec![QuoteDecisionReason::MaxCancelRate],
+        };
+    }
+
     let Some(order_id) = exact_order_id_or_none(quote) else {
         return exact_order_halt(quote);
     };
@@ -1213,6 +1223,21 @@ mod tests {
             decisions.as_slice(),
             [QuoteManagerDecision::HaltQuote { reasons, .. }]
                 if reasons == &[QuoteDecisionReason::MaxReplacementRate]
+        ));
+    }
+
+    #[test]
+    fn live_quote_manager_replacement_respects_cancel_rate_limit() {
+        let mut input = sample_input_with_quote();
+        input.fair_probability = 0.25;
+        input.proposed_quote.as_mut().expect("proposal").edge_bps = 500.0;
+        input.rate_limits.cancel_timestamps_ms = vec![input.now_ms - 10_000];
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [QuoteManagerDecision::HaltQuote { reasons, .. }]
+                if reasons == &[QuoteDecisionReason::MaxCancelRate]
         ));
     }
 
