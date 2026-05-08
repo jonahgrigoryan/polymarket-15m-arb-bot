@@ -62,10 +62,10 @@ use polymarket_15m_arb_bot::{
     },
     live_position_book::LivePositionBook,
     live_quote_manager::{
-        evaluate_quote_manager_tick, validate_la6_approval_artifact_text, LiveQuoteState,
-        QuoteApprovalFields, QuoteManagerDecision, QuoteManagerPolicy, QuoteManagerTickInput,
-        QuoteMarketSnapshot, QuoteMarketStatus, QuoteProposal, QuoteRateLimitSnapshot,
-        QuoteReconciliationStatus, QuoteRiskSnapshot, QuoteStatus,
+        evaluate_quote_manager_tick, is_exact_order_id, validate_la6_approval_artifact_text,
+        LiveQuoteState, QuoteApprovalFields, QuoteManagerDecision, QuoteManagerPolicy,
+        QuoteManagerTickInput, QuoteMarketSnapshot, QuoteMarketStatus, QuoteProposal,
+        QuoteRateLimitSnapshot, QuoteReconciliationStatus, QuoteRiskSnapshot, QuoteStatus,
     },
     live_reconciliation::{
         reconcile_live_state, LiveReconciliationInput, LocalLiveState, VenueLiveState,
@@ -3507,13 +3507,24 @@ async fn run_la6_live_quote_manager_session(
         )
         .into());
     }
+    let accepted_order_id = match la6_exact_accepted_order_id(&submission) {
+        Ok(order_id) => order_id,
+        Err(error) => {
+            let (event_type, payload) = la6_quote_submit_non_exact_order_id_journal_event(
+                &plan.intent_id,
+                &submission.venue_status,
+            );
+            append_la6_journal_event(&journal, run_id, event_type, payload)?;
+            return Err(error.into());
+        }
+    };
     if let Err(error) = append_la6_journal_event(
         &journal,
         run_id,
         LiveJournalEventType::QuotePlaced,
         serde_json::json!({
             "quote_id": quote_id,
-            "order_id": submission.order_id,
+            "order_id": accepted_order_id,
             "intent_id": plan.intent_id,
             "status": submission.venue_status,
             "trade_ids": submission.trade_ids,
@@ -3522,14 +3533,13 @@ async fn run_la6_live_quote_manager_session(
         return Err(la5_cleanup_accepted_order_before_error(
             &journal,
             run_id,
-            &submission.order_id,
+            &accepted_order_id,
             &plan.intent_id,
             1,
             "la6_quote_placed_journal_append_failed",
             error.to_string(),
             || async {
-                cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
-                    .await
+                cancel_exact_maker_order_with_official_sdk(&submit_input, &accepted_order_id).await
             },
         )
         .await);
@@ -3543,7 +3553,7 @@ async fn run_la6_live_quote_manager_session(
                     return Err(la5_cleanup_accepted_order_before_error(
                         &journal,
                         run_id,
-                        &submission.order_id,
+                        &accepted_order_id,
                         &plan.intent_id,
                         1,
                         $reason,
@@ -3551,7 +3561,7 @@ async fn run_la6_live_quote_manager_session(
                         || async {
                             cancel_exact_maker_order_with_official_sdk(
                                 &submit_input,
-                                &submission.order_id,
+                                &accepted_order_id,
                             )
                             .await
                         },
@@ -3567,7 +3577,7 @@ async fn run_la6_live_quote_manager_session(
         "la6_post_order_account_readback_failed"
     );
     let order_readback = la6_try_after_accept!(
-        read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await,
+        read_maker_order_with_official_sdk(&submit_input, &accepted_order_id).await,
         "la6_post_order_exact_readback_failed"
     );
     let order_trade_ids = la5_order_trade_ids(
@@ -3579,7 +3589,7 @@ async fn run_la6_live_quote_manager_session(
     let open_reconciliation = la6_try_after_accept!(
         reconcile_la5_order_state(
             run_id,
-            &submission.order_id,
+            &accepted_order_id,
             &order_readback,
             &post_order_readback,
             &order_trade_ids,
@@ -3588,19 +3598,14 @@ async fn run_la6_live_quote_manager_session(
         "la6_post_order_reconciliation_error"
     );
     la6_try_after_accept!(
-        append_la6_reconciliation_event(
-            &journal,
-            run_id,
-            &submission.order_id,
-            &open_reconciliation
-        ),
+        append_la6_reconciliation_event(&journal, run_id, &accepted_order_id, &open_reconciliation),
         "la6_post_order_reconciliation_journal_failed"
     );
     if open_reconciliation.status() != "passed" {
         return Err(la5_cleanup_accepted_order_before_error(
             &journal,
             run_id,
-            &submission.order_id,
+            &accepted_order_id,
             &plan.intent_id,
             1,
             "la6_post_order_reconciliation_failed",
@@ -3609,8 +3614,7 @@ async fn run_la6_live_quote_manager_session(
                 open_reconciliation.mismatch_list()
             ),
             || async {
-                cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
-                    .await
+                cancel_exact_maker_order_with_official_sdk(&submit_input, &accepted_order_id).await
             },
         )
         .await);
@@ -3620,14 +3624,14 @@ async fn run_la6_live_quote_manager_session(
     let stale_probe_wait_seconds = policy.ttl_seconds.min(6);
     tokio::time::sleep(Duration::from_secs(stale_probe_wait_seconds)).await;
     let latest_order = la6_try_after_accept!(
-        read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await,
+        read_maker_order_with_official_sdk(&submit_input, &accepted_order_id).await,
         "la6_pre_cancel_exact_readback_failed"
     );
     let quote_age_ms = (unix_time_ms() as u64).saturating_sub(submitted_at_ms);
     let quote_state = LiveQuoteState {
         quote_id: quote_id.clone(),
         intent_id: plan.intent_id.clone(),
-        order_id: Some(submission.order_id.clone()),
+        order_id: Some(accepted_order_id.clone()),
         market: market_intent.market.slug.clone(),
         token_id: plan.token_id.clone(),
         side: plan.side,
@@ -3662,13 +3666,13 @@ async fn run_la6_live_quote_manager_session(
             return Err(la5_cleanup_accepted_order_before_error(
                 &journal,
                 run_id,
-                &submission.order_id,
+                &accepted_order_id,
                 &plan.intent_id,
                 1,
                 "la6_cancel_decision_missing",
                 "LA6 cancel decision missing".to_string(),
                 || async {
-                    cancel_exact_maker_order_with_official_sdk(&submit_input, &submission.order_id)
+                    cancel_exact_maker_order_with_official_sdk(&submit_input, &accepted_order_id)
                         .await
                 },
             )
@@ -3686,7 +3690,7 @@ async fn run_la6_live_quote_manager_session(
                 return Err(la5_cleanup_accepted_order_before_error(
                     &journal,
                     run_id,
-                    &submission.order_id,
+                    &accepted_order_id,
                     &plan.intent_id,
                     1,
                     "la6_cancel_decision_not_exact",
@@ -3697,7 +3701,7 @@ async fn run_la6_live_quote_manager_session(
                     || async {
                         cancel_exact_maker_order_with_official_sdk(
                             &submit_input,
-                            &submission.order_id,
+                            &accepted_order_id,
                         )
                         .await
                     },
@@ -3755,8 +3759,7 @@ async fn run_la6_live_quote_manager_session(
     let heartbeat_id = post_maker_heartbeat_with_official_sdk(&submit_input, None).await?;
     println!("live_alpha_quote_manager_heartbeat_id={heartbeat_id}");
 
-    let final_order =
-        read_maker_order_with_official_sdk(&submit_input, &submission.order_id).await?;
+    let final_order = read_maker_order_with_official_sdk(&submit_input, &accepted_order_id).await?;
     let final_readback = live_alpha_authenticated_readback(config).await?;
     let final_trade_ids = la5_order_trade_ids(
         &baseline_trade_ids,
@@ -3767,18 +3770,13 @@ async fn run_la6_live_quote_manager_session(
     let filled = la5_order_status_is_filled(&final_order) || !final_trade_ids.is_empty();
     let final_reconciliation = reconcile_la5_order_state(
         run_id,
-        &submission.order_id,
+        &accepted_order_id,
         &final_order,
         &final_readback,
         &final_trade_ids,
         true,
     )?;
-    append_la6_reconciliation_event(
-        &journal,
-        run_id,
-        &submission.order_id,
-        &final_reconciliation,
-    )?;
+    append_la6_reconciliation_event(&journal, run_id, &accepted_order_id, &final_reconciliation)?;
     if final_reconciliation.status() != "passed" {
         return Err(format!(
             "LA6 final reconciliation failed: {}",
@@ -3790,7 +3788,7 @@ async fn run_la6_live_quote_manager_session(
     {
         return Err(format!(
             "LA6 final readback not flat after order {}: open_orders={}, reserved_pusd_units={}",
-            submission.order_id,
+            accepted_order_id,
             final_readback.report.open_order_count,
             final_readback.report.reserved_pusd_units
         )
@@ -3806,7 +3804,7 @@ async fn run_la6_live_quote_manager_session(
         price: plan.price,
         size: plan.size,
         notional: plan.notional,
-        order_id: submission.order_id.clone(),
+        order_id: accepted_order_id.clone(),
         accepted_status: submission.venue_status.clone(),
         final_status: final_order.venue_status.clone(),
         cancel_decision: cancel_decision.kind().to_string(),
@@ -4071,6 +4069,32 @@ fn la6_quote_submit_rejected_journal_event(
             }),
         )
     }
+}
+
+fn la6_exact_accepted_order_id(submission: &LiveMakerSubmissionReport) -> Result<String, String> {
+    let order_id = submission.order_id.trim();
+    if is_exact_order_id(order_id) {
+        Ok(order_id.to_string())
+    } else {
+        Err(format!(
+            "LA6 quote submit returned non-exact order id: status={}",
+            submission.venue_status
+        ))
+    }
+}
+
+fn la6_quote_submit_non_exact_order_id_journal_event(
+    intent_id: &str,
+    venue_status: &str,
+) -> (LiveJournalEventType, serde_json::Value) {
+    (
+        LiveJournalEventType::MakerOrderRejected,
+        serde_json::json!({
+            "intent_id": intent_id,
+            "status": venue_status,
+            "reason": "non_exact_order_id",
+        }),
+    )
 }
 
 fn la6_pre_submit_risk_rejected_journal_event(
@@ -11435,6 +11459,48 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     }
 
     #[test]
+    fn la6_successful_submit_rejects_non_exact_order_id_before_order_state() {
+        let submission = la6_test_submission_report("not-an-exact-order-id", true);
+        let error = la6_exact_accepted_order_id(&submission)
+            .expect_err("accepted non-exact venue order id must fail closed");
+        assert!(error.contains("non-exact order id"));
+
+        let (event_type, payload) = la6_quote_submit_non_exact_order_id_journal_event(
+            "intent-non-exact-order-id",
+            &submission.venue_status,
+        );
+        assert_eq!(event_type, LiveJournalEventType::MakerOrderRejected);
+        assert!(payload.get("order_id").is_none());
+        assert_eq!(
+            payload.get("reason").and_then(serde_json::Value::as_str),
+            Some("non_exact_order_id")
+        );
+
+        let event = LiveJournalEvent::new(
+            "run-non-exact-order-id",
+            "event-non-exact-order-id",
+            event_type,
+            0,
+            payload,
+        );
+        let state = reduce_live_journal_events(&[event]).expect("non-exact rejection replays");
+
+        assert!(state.intents.contains("intent-non-exact-order-id"));
+        assert!(state.orders.is_empty());
+    }
+
+    #[test]
+    fn la6_successful_submit_accepts_trimmed_exact_order_id() {
+        let exact_id = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let submission = la6_test_submission_report(&format!(" {exact_id} "), true);
+
+        assert_eq!(
+            la6_exact_accepted_order_id(&submission).expect("exact order id accepted"),
+            exact_id
+        );
+    }
+
+    #[test]
     fn la6_approval_binding_rejects_unapproved_no_trade_leave_open() {
         let mut approval = la6_test_approval_fields();
         approval.no_trade_window_policy =
@@ -11503,6 +11569,20 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     fn la6_dry_run_caps_still_allow_multi_order_planning_range() {
         validate_la6_quote_manager_requested_caps(3, 3, 300, false)
             .expect("dry-run can still exercise the broader planning range");
+    }
+
+    fn la6_test_submission_report(order_id: &str, success: bool) -> LiveMakerSubmissionReport {
+        LiveMakerSubmissionReport {
+            status: "submitted".to_string(),
+            order_id: order_id.to_string(),
+            venue_status: "accepted".to_string(),
+            success,
+            making_amount: "5000000".to_string(),
+            taking_amount: "950000".to_string(),
+            trade_ids: Vec::new(),
+            transaction_hashes: Vec::new(),
+            not_submitted: false,
+        }
     }
 
     fn la6_test_approval_fields() -> QuoteApprovalFields {
