@@ -4293,7 +4293,7 @@ fn la6_compare_risk_limit_u64(
 }
 
 fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
-    if la6_policy_contains_negated_approval_language(policy) {
+    if la6_cancel_policy_negates_exact_order_id(policy) {
         return false;
     }
     let policy = policy.to_ascii_lowercase();
@@ -4304,6 +4304,48 @@ fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
     tokens.windows(3).any(|window| {
         window[0] == "exact" && window[1] == "order" && matches!(window[2], "id" | "ids")
     })
+}
+
+fn la6_cancel_policy_negates_exact_order_id(policy: &str) -> bool {
+    let policy = policy.to_ascii_lowercase();
+    let compact = policy
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != '-' && *character != '_')
+        .collect::<String>();
+    if compact.contains("inexact") || compact.contains("nonexact") || compact.contains("notexact") {
+        return true;
+    }
+    let tokens = policy
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    for (index, window) in tokens.windows(3).enumerate() {
+        if window[0] != "exact" || window[1] != "order" || !matches!(window[2], "id" | "ids") {
+            continue;
+        }
+        if index > 0 && matches!(tokens[index - 1], "not" | "no") {
+            return true;
+        }
+        let after = &tokens[index + 3..];
+        if matches!(
+            after.first().copied(),
+            Some("disallowed" | "blocked" | "denied" | "forbidden")
+        ) {
+            return true;
+        }
+        if after.first() == Some(&"not")
+            && matches!(
+                after.get(1).copied(),
+                Some("approved" | "allowed" | "authorized")
+            )
+        {
+            return true;
+        }
+        if after.first() == Some(&"requires") && after.get(1) == Some(&"explicit") {
+            return true;
+        }
+    }
+    false
 }
 
 fn la6_approved_markets_assets_are_exact(approved_markets_assets: &str) -> bool {
@@ -11025,6 +11067,28 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         validate_la6_approval_against_account_readback(&approval, &readback, 18446744073709551615)
             .expect("matching LA6 readback fields pass");
+    }
+
+    #[test]
+    fn la6_approval_binding_accepts_exact_cancel_policy_with_cancel_all_disallowed() {
+        let config = la5_test_config();
+        for cancel_policy in [
+            "exact order ID only; cancel-all disallowed",
+            "cancel-all disallowed; exact order ID only",
+        ] {
+            let mut approval = la6_test_approval_fields();
+            approval.cancel_policy = cancel_policy.to_string();
+
+            validate_la6_approval_against_cli_and_config(
+                &approval,
+                &config,
+                "LA6-approval-1",
+                1,
+                1,
+                300,
+            )
+            .unwrap_or_else(|error| panic!("cancel_policy={cancel_policy}: {error}"));
+        }
     }
 
     #[test]
