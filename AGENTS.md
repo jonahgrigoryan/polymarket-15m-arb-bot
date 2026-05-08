@@ -54,3 +54,24 @@ Optimize for correctness, auditability, deterministic replay, and risk control b
 - Keep changes surgical and tied to the PRD.
 - If API behavior is uncertain, verify rather than guessing.
 - If implementation choices materially affect latency, correctness, or compliance, surface the tradeoff before coding.
+
+## Review Guidelines
+
+- Treat any weakening of live gates, approval gates, feature gates, geoblock checks, heartbeat freshness, authenticated readback, journal integrity, reconciliation, risk limits, stale-data handling, kill switches, or secret handling as high priority.
+- Treat any live-order, cancel, signing, wallet, or API-secret behavior that is not explicitly authorized by the current Live Alpha phase as high priority.
+- Treat scope drift into the next milestone as a review finding. The current phase and stop point are defined by `STATUS.md` plus the relevant `LIVE_ALPHA_*` docs and dated verification note.
+- Treat missing or insufficient regression tests for live-path safety changes as a review finding.
+
+## Codex Autofix Guidelines
+
+When an automated `@codex` request asks for P1/P2 review fixes:
+
+- Read `AGENTS.md`, `STATUS.md`, and the relevant implementation and verification docs before editing.
+- Address only unresolved, non-outdated P1/P2 review findings on the current PR branch.
+- Keep each change surgical and traceable to a review finding.
+- Do not start the next milestone or broaden the PR scope.
+- Do not weaken any safety, approval, feature, geoblock, heartbeat, readback, journal, reconciliation, risk, stale-data, kill-switch, or secret-handling gate.
+- Add or update focused regression tests for each behavior fix.
+- Run the narrow tests relevant to the changed files, then run `scripts/verify-pr.sh`.
+- If `STATUS.md` or a dated verification note requires stricter phase-specific checks, run those too.
+- If a review finding is incorrect, leave a concise PR comment explaining why instead of changing behavior.
