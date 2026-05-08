@@ -481,6 +481,14 @@ fn evaluate_existing_quote_with_in_tick_usage(
         return evaluate_existing_quote(input, quote);
     }
 
+    let effective_input = input_with_in_tick_usage(input, in_tick_usage);
+    evaluate_existing_quote(&effective_input, quote)
+}
+
+fn input_with_in_tick_usage(
+    input: &QuoteManagerTickInput,
+    in_tick_usage: InTickExecutableUsage,
+) -> QuoteManagerTickInput {
     let mut effective_input = input.clone();
     effective_input.risk.replacements_used_for_approval = effective_input
         .risk
@@ -505,7 +513,7 @@ fn evaluate_existing_quote_with_in_tick_usage(
             .push(input.now_ms);
     }
 
-    evaluate_existing_quote(&effective_input, quote)
+    effective_input
 }
 
 fn evaluate_new_quote(input: &QuoteManagerTickInput) -> QuoteManagerDecision {
@@ -797,11 +805,20 @@ fn cancel_each_exact_or_halt(
             reasons,
         }];
     }
-    input
-        .own_open_quotes
-        .iter()
-        .map(|quote| exact_order_decision(input, quote, reasons.clone(), false))
-        .collect()
+
+    let mut decisions = Vec::new();
+    let mut in_tick_usage = InTickExecutableUsage::default();
+    for quote in &input.own_open_quotes {
+        let decision = if in_tick_usage == InTickExecutableUsage::default() {
+            exact_order_decision(input, quote, reasons.clone(), false)
+        } else {
+            let effective_input = input_with_in_tick_usage(input, in_tick_usage);
+            exact_order_decision(&effective_input, quote, reasons.clone(), false)
+        };
+        in_tick_usage.record_decision(&decision);
+        decisions.push(decision);
+    }
+    decisions
 }
 
 fn halt_all_or_skip(
@@ -1272,6 +1289,29 @@ mod tests {
             [QuoteManagerDecision::HaltQuote { reasons, .. }]
                 if reasons == &[QuoteDecisionReason::MaxCancelRate]
         ));
+    }
+
+    #[test]
+    fn live_quote_manager_in_tick_stale_cancel_cap_limits_batch() {
+        let mut input = sample_input_with_two_quotes();
+        input.market.book_age_ms = Some(9_999);
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [
+                QuoteManagerDecision::CancelQuote { reasons: cancel_reasons, .. },
+                QuoteManagerDecision::HaltQuote { reasons: halt_reasons, .. }
+            ] if cancel_reasons == &[QuoteDecisionReason::BookStale]
+                && halt_reasons == &[QuoteDecisionReason::MaxCancelRate]
+        ));
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| matches!(decision, QuoteManagerDecision::CancelQuote { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]
