@@ -4340,11 +4340,13 @@ fn la6_gtd_policy_approves_post_only_gtd_buffer(policy: &str) -> bool {
         || tokens
             .windows(2)
             .any(|window| window[0] == "post" && window[1] == "only");
-    has_post_only
-        && tokens.contains(&"gtd")
-        && tokens.contains(&"now")
+    let has_explicit_ttl_buffer = tokens.contains(&"now")
         && tokens.contains(&buffer_seconds.as_str())
-        && tokens.contains(&"ttl")
+        && tokens.contains(&"ttl");
+    let has_one_minute_buffer = tokens.contains(&"buffer")
+        && tokens.contains(&"minute")
+        && (tokens.contains(&"one") || tokens.contains(&"1"));
+    has_post_only && tokens.contains(&"gtd") && (has_explicit_ttl_buffer || has_one_minute_buffer)
 }
 
 fn la6_gtd_policy_negates_live_maker_shape(policy: &str) -> bool {
@@ -4366,7 +4368,12 @@ fn la6_gtd_policy_negates_live_maker_shape(policy: &str) -> bool {
         || compact.contains("gtddisallowed")
         || compact.contains("postonlydisallowed")
         || compact.contains("withoutbuffer")
+        || (compact.contains("without") && compact.contains("buffer"))
         || compact.contains("nobuffer")
+        || compact.contains("nooneminutebuffer")
+        || compact.contains("no1minutebuffer")
+        || compact.contains("notoneminutebuffer")
+        || compact.contains("not1minutebuffer")
 }
 
 fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
@@ -11147,11 +11154,32 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     }
 
     #[test]
+    fn la6_approval_binding_accepts_one_minute_gtd_buffer_wording() {
+        let config = la5_test_config();
+        let approval = la6_test_approval_fields();
+        let plan = la5_test_maker_plan();
+
+        validate_la6_approval_against_cli_and_config(
+            &approval,
+            &config,
+            "LA6-approval-1",
+            1,
+            1,
+            300,
+        )
+        .expect("committed LA6 GTD wording binds config");
+        validate_la6_live_plan(&config, &approval, &plan)
+            .expect("committed LA6 GTD wording binds submitted plan");
+    }
+
+    #[test]
     fn la6_approval_binding_rejects_unapproved_gtd_policy() {
         let config = la5_test_config();
         for gtd_policy in [
             "post-only GTD now+ttl",
             "post-only GTD not approved",
+            "post-only GTD without one-minute buffer",
+            "post-only GTD no one-minute buffer",
             "post-only FOK now+60+ttl",
             "GTD now+60+ttl",
         ] {
@@ -11487,7 +11515,7 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
             max_replacements: 1,
             max_duration_sec: 300,
             ttl_seconds: 30,
-            gtd_policy: "post-only GTD now+60+ttl".to_string(),
+            gtd_policy: "post-only GTD with Polymarket one-minute buffer".to_string(),
             cancel_policy: "exact order ID only".to_string(),
             no_trade_window_policy:
                 "default exact-order-ID cancel or halt; leaving open not approved".to_string(),
