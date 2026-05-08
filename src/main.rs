@@ -3906,6 +3906,9 @@ fn validate_la6_live_plan(
     if plan.effective_quote_ttl_seconds != approval.ttl_seconds {
         mismatches.push("approval_plan_ttl_seconds_mismatch".to_string());
     }
+    if !la6_gtd_policy_allows_plan(&approval.gtd_policy, plan) {
+        mismatches.push("approval_plan_gtd_policy_mismatch".to_string());
+    }
     if plan.notional > config.live_alpha.risk.max_single_order_notional + LA5_FLOAT_EPSILON {
         mismatches.push("approval_plan_single_notional_exceeds_config_cap".to_string());
     }
@@ -4168,6 +4171,9 @@ fn validate_la6_approval_against_cli_and_config(
     if approval.ttl_seconds != config.live_alpha.maker.ttl_seconds {
         mismatches.push("approval_ttl_seconds_mismatch".to_string());
     }
+    if !la6_gtd_policy_allows_config(&approval.gtd_policy, config) {
+        mismatches.push("approval_gtd_policy_mismatch".to_string());
+    }
     validate_la6_approval_risk_limits_against_config(
         &approval.risk_limits,
         config,
@@ -4290,6 +4296,77 @@ fn la6_compare_risk_limit_u64(
     if approved_value != config_value {
         mismatches.push(format!("approval_{key}_mismatch"));
     }
+}
+
+fn la6_gtd_policy_allows_config(gtd_policy: &str, config: &AppConfig) -> bool {
+    config.live_alpha.maker.post_only
+        && config
+            .live_alpha
+            .maker
+            .order_type
+            .eq_ignore_ascii_case("GTD")
+        && la6_gtd_policy_approves_post_only_gtd_buffer(gtd_policy)
+}
+
+fn la6_gtd_policy_allows_plan(gtd_policy: &str, plan: &LiveMakerOrderPlan) -> bool {
+    let plan_start_unix = plan
+        .cancel_after_unix
+        .saturating_sub(plan.effective_quote_ttl_seconds);
+    let plan_gtd_delta = plan.gtd_expiration_unix.saturating_sub(plan_start_unix);
+    plan.post_only
+        && plan.order_type.eq_ignore_ascii_case("GTD")
+        && plan_gtd_delta
+            == plan
+                .effective_quote_ttl_seconds
+                .saturating_add(GTD_SECURITY_BUFFER_SECONDS)
+        && la6_gtd_policy_approves_post_only_gtd_buffer(gtd_policy)
+}
+
+fn la6_gtd_policy_approves_post_only_gtd_buffer(policy: &str) -> bool {
+    if la6_gtd_policy_negates_live_maker_shape(policy) {
+        return false;
+    }
+    let policy = policy.to_ascii_lowercase();
+    let compact = policy
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    let tokens = policy
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let buffer_seconds = GTD_SECURITY_BUFFER_SECONDS.to_string();
+    let has_post_only = compact.contains("postonly")
+        || tokens
+            .windows(2)
+            .any(|window| window[0] == "post" && window[1] == "only");
+    has_post_only
+        && tokens.contains(&"gtd")
+        && tokens.contains(&"now")
+        && tokens.contains(&buffer_seconds.as_str())
+        && tokens.contains(&"ttl")
+}
+
+fn la6_gtd_policy_negates_live_maker_shape(policy: &str) -> bool {
+    let policy = policy.to_ascii_lowercase();
+    let compact = policy
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    policy.contains("not approved")
+        || policy.contains("not allowed")
+        || policy.contains("requires explicit")
+        || policy.contains("blocked")
+        || compact.contains("notgtd")
+        || compact.contains("nogtd")
+        || compact.contains("nongtd")
+        || compact.contains("notpostonly")
+        || compact.contains("nopostonly")
+        || compact.contains("nonpostonly")
+        || compact.contains("gtddisallowed")
+        || compact.contains("postonlydisallowed")
+        || compact.contains("withoutbuffer")
+        || compact.contains("nobuffer")
 }
 
 fn la6_cancel_policy_allows_exact_order_id(policy: &str) -> bool {
@@ -11067,6 +11144,50 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         validate_la6_approval_against_account_readback(&approval, &readback, 18446744073709551615)
             .expect("matching LA6 readback fields pass");
+    }
+
+    #[test]
+    fn la6_approval_binding_rejects_unapproved_gtd_policy() {
+        let config = la5_test_config();
+        for gtd_policy in [
+            "post-only GTD now+ttl",
+            "post-only GTD not approved",
+            "post-only FOK now+60+ttl",
+            "GTD now+60+ttl",
+        ] {
+            let mut approval = la6_test_approval_fields();
+            approval.gtd_policy = gtd_policy.to_string();
+
+            let error = validate_la6_approval_against_cli_and_config(
+                &approval,
+                &config,
+                "LA6-approval-1",
+                1,
+                1,
+                300,
+            )
+            .expect_err("LA6 GTD policy must bind approved expiry shape")
+            .to_string();
+
+            assert!(
+                error.contains("approval_gtd_policy_mismatch"),
+                "gtd_policy={gtd_policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn la6_plan_binding_rejects_unapproved_gtd_policy() {
+        let mut approval = la6_test_approval_fields();
+        approval.gtd_policy = "post-only GTD now+ttl".to_string();
+        let config = la5_test_config();
+        let plan = la5_test_maker_plan();
+
+        let error = validate_la6_live_plan(&config, &approval, &plan)
+            .expect_err("submitted plan must bind approved GTD policy")
+            .to_string();
+
+        assert!(error.contains("approval_plan_gtd_policy_mismatch"));
     }
 
     #[test]
