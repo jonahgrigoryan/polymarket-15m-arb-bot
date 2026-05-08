@@ -440,10 +440,72 @@ pub fn evaluate_quote_manager_tick(
         return Ok(decisions);
     }
 
+    let mut in_tick_usage = InTickExecutableUsage::default();
     for quote in &input.own_open_quotes {
-        decisions.push(evaluate_existing_quote(input, quote));
+        let decision = evaluate_existing_quote_with_in_tick_usage(input, quote, in_tick_usage);
+        in_tick_usage.record_decision(&decision);
+        decisions.push(decision);
     }
     Ok(decisions)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InTickExecutableUsage {
+    replacements: u64,
+    cancels: u64,
+    submits: u64,
+}
+
+impl InTickExecutableUsage {
+    fn record_decision(&mut self, decision: &QuoteManagerDecision) {
+        match decision {
+            QuoteManagerDecision::ReplaceQuote { .. } => {
+                self.replacements = self.replacements.saturating_add(1);
+                self.cancels = self.cancels.saturating_add(1);
+                self.submits = self.submits.saturating_add(1);
+            }
+            QuoteManagerDecision::CancelQuote { .. } | QuoteManagerDecision::ExpireQuote { .. } => {
+                self.cancels = self.cancels.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn evaluate_existing_quote_with_in_tick_usage(
+    input: &QuoteManagerTickInput,
+    quote: &LiveQuoteState,
+    in_tick_usage: InTickExecutableUsage,
+) -> QuoteManagerDecision {
+    if in_tick_usage == InTickExecutableUsage::default() {
+        return evaluate_existing_quote(input, quote);
+    }
+
+    let mut effective_input = input.clone();
+    effective_input.risk.replacements_used_for_approval = effective_input
+        .risk
+        .replacements_used_for_approval
+        .saturating_add(in_tick_usage.replacements);
+    for _ in 0..in_tick_usage.replacements {
+        effective_input
+            .rate_limits
+            .replacement_timestamps_ms
+            .push(input.now_ms);
+    }
+    for _ in 0..in_tick_usage.cancels {
+        effective_input
+            .rate_limits
+            .cancel_timestamps_ms
+            .push(input.now_ms);
+    }
+    for _ in 0..in_tick_usage.submits {
+        effective_input
+            .rate_limits
+            .submit_timestamps_ms
+            .push(input.now_ms);
+    }
+
+    evaluate_existing_quote(&effective_input, quote)
 }
 
 fn evaluate_new_quote(input: &QuoteManagerTickInput) -> QuoteManagerDecision {
@@ -1242,6 +1304,67 @@ mod tests {
     }
 
     #[test]
+    fn live_quote_manager_in_tick_replacement_rate_cap_limits_batch() {
+        let mut input = sample_input_with_two_quotes();
+        input.fair_probability = 0.25;
+        input.proposed_quote.as_mut().expect("proposal").edge_bps = 500.0;
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [
+                QuoteManagerDecision::ReplaceQuote { .. },
+                QuoteManagerDecision::HaltQuote { reasons, .. }
+            ] if reasons == &[QuoteDecisionReason::MaxReplacementRate]
+        ));
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|decision| matches!(decision, QuoteManagerDecision::ReplaceQuote { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn live_quote_manager_in_tick_replacement_approval_cap_limits_batch() {
+        let mut input = sample_input_with_two_quotes();
+        input.policy.max_replacement_rate_per_min = 2;
+        input.policy.max_submit_rate_per_min = 2;
+        input.policy.max_cancel_rate_per_min = 2;
+        input.fair_probability = 0.25;
+        input.proposed_quote.as_mut().expect("proposal").edge_bps = 500.0;
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [
+                QuoteManagerDecision::ReplaceQuote { .. },
+                QuoteManagerDecision::HaltQuote { reasons, .. }
+            ] if reasons == &[QuoteDecisionReason::MaxReplacementsReached]
+        ));
+    }
+
+    #[test]
+    fn live_quote_manager_in_tick_replacement_cancel_cap_limits_batch() {
+        let mut input = sample_input_with_two_quotes();
+        input.policy.max_replacement_rate_per_min = 2;
+        input.policy.max_submit_rate_per_min = 2;
+        input.policy.max_replacements_for_approval = 2;
+        input.fair_probability = 0.25;
+        input.proposed_quote.as_mut().expect("proposal").edge_bps = 500.0;
+        let decisions = evaluate_quote_manager_tick(&input).expect("tick evaluates");
+
+        assert!(matches!(
+            decisions.as_slice(),
+            [
+                QuoteManagerDecision::ReplaceQuote { .. },
+                QuoteManagerDecision::HaltQuote { reasons, .. }
+            ] if reasons == &[QuoteDecisionReason::MaxCancelRate]
+        ));
+    }
+
+    #[test]
     fn live_quote_manager_anti_churn_minimum_quote_lifetime_leaves_quote() {
         let mut input = sample_input_with_quote();
         input.now_ms = 1_002_000;
@@ -1599,6 +1722,16 @@ mod tests {
         input
     }
 
+    fn sample_input_with_two_quotes() -> QuoteManagerTickInput {
+        let mut input = sample_input_with_quote();
+        input.own_open_quotes.push(sample_second_quote());
+        input.risk.open_orders_for_approval = 2;
+        input.risk.max_open_orders = 2;
+        input.risk.max_live_orders_for_approval = 2;
+        input.policy.max_live_orders_for_approval = 2;
+        input
+    }
+
     fn sample_quote() -> LiveQuoteState {
         LiveQuoteState {
             quote_id: "quote-1".to_string(),
@@ -1619,8 +1752,20 @@ mod tests {
         }
     }
 
+    fn sample_second_quote() -> LiveQuoteState {
+        let mut quote = sample_quote();
+        quote.quote_id = "quote-2".to_string();
+        quote.intent_id = "intent-2".to_string();
+        quote.order_id = Some(second_exact_order_id());
+        quote
+    }
+
     fn exact_order_id() -> String {
         "0x1111111111111111111111111111111111111111111111111111111111111111".to_string()
+    }
+
+    fn second_exact_order_id() -> String {
+        "0x2222222222222222222222222222222222222222222222222222222222222222".to_string()
     }
 
     fn valid_approval_artifact() -> String {
