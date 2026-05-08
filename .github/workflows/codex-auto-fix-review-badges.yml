@@ -1,0 +1,106 @@
+name: Codex Auto-Fix Review Badges
+
+on:
+  pull_request_review_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: codex-autofix-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  trigger-codex-fix:
+    name: Ask Codex to fix P1/P2 review findings
+    runs-on: ubuntu-latest
+    if: >
+      github.event.sender.login == 'chatgpt-codex-connector' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+
+    steps:
+      - name: Trigger Codex fix for P1/P2 badge
+        uses: actions/github-script@v7
+        env:
+          MAX_CODEX_AUTOFIX_ATTEMPTS_PER_PR: "3"
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const comment = context.payload.comment;
+            const body = comment?.body || "";
+
+            const hasP1OrP2 =
+              /P1 Badge|badge\/P1|\bP1\b|P2 Badge|badge\/P2|\bP2\b/i.test(body);
+
+            if (!hasP1OrP2) {
+              core.info("No P1/P2 badge found in Codex review comment.");
+              return;
+            }
+
+            const markerPrefix = `<!-- codex-autofix:${pr.number}:`;
+            const marker = `${markerPrefix}${pr.head.sha} -->`;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              per_page: 100,
+            });
+
+            if (comments.some((existing) => existing.body?.includes(marker))) {
+              core.info("Already requested Codex auto-fix for this PR head SHA.");
+              return;
+            }
+
+            const attemptCount = comments.filter((existing) =>
+              existing.body?.includes(markerPrefix)
+            ).length;
+            const maxAttempts = Number(process.env.MAX_CODEX_AUTOFIX_ATTEMPTS_PER_PR || "3");
+
+            if (attemptCount >= maxAttempts) {
+              core.info(`Reached Codex auto-fix attempt cap (${maxAttempts}) for this PR.`);
+              return;
+            }
+
+            const prompt = [
+              marker,
+              `@codex address all unresolved, non-outdated P1 and P2 Codex review comments on PR #${pr.number}.`,
+              "",
+              `Current branch: ${pr.head.ref}`,
+              `Base branch: ${pr.base.ref}`,
+              `PR title: ${pr.title}`,
+              "",
+              "Project rules:",
+              "- Read AGENTS.md, STATUS.md, and the relevant implementation/verification docs before editing.",
+              "- Keep the patch scoped to the current PR branch and current milestone only.",
+              "- Do not start the next milestone.",
+              "- Do not weaken safety gates, approval gates, feature gates, geoblock, heartbeat, readback, journal, reconciliation, risk, stale-data, kill-switch, or secret-handling behavior.",
+              "- Do not add live trading behavior beyond what this PR already authorizes.",
+              "- Do not print, commit, or infer secret values.",
+              "- Preserve unrelated work.",
+              "",
+              "Fix rules:",
+              "- Address only unresolved, non-outdated P1/P2 review findings.",
+              "- Add or update focused regression tests for each bug fixed.",
+              "- If a review finding is incorrect, leave a concise PR comment explaining why instead of changing behavior.",
+              "- Keep changes surgical.",
+              "",
+              "Verification:",
+              "- Run the narrow tests relevant to the changed code.",
+              "- Run scripts/verify-pr.sh.",
+              "- If STATUS.md or the dated verification notes require stricter phase-specific commands, run those too.",
+              "",
+              "After fixing:",
+              "- Push commits back to this PR branch.",
+              "- Summarize which P1/P2 comments were addressed and which tests passed.",
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: prompt,
+            });
