@@ -63,6 +63,15 @@ min_edge_bps = 0
 replace_tolerance_bps = 0
 min_quote_lifetime_ms = 0
 
+[live_alpha.quote_manager]
+enabled = false
+max_replacements = 0
+min_edge_improvement_bps = 0
+cooldown_after_failed_submit_ms = 0
+cooldown_after_failed_cancel_ms = 0
+cooldown_after_reconciliation_mismatch_ms = 0
+leave_open_in_no_trade_window = false
+
 [live_alpha.taker]
 enabled = false
 max_notional = 0.0

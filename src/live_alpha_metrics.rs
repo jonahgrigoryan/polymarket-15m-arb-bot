@@ -61,6 +61,21 @@ pub const LIVE_ALPHA_COUNTERS: &[&str] = &[
     "live_balance_mismatch_total",
     "live_position_mismatch_total",
     "live_reserved_balance_mismatch_total",
+    "live_quote_manager_started_total",
+    "live_quote_manager_stopped_total",
+    "live_quotes_planned_total",
+    "live_quotes_placed_total",
+    "live_quotes_left_alone_total",
+    "live_quote_cancel_requested_total",
+    "live_quote_cancel_confirmed_total",
+    "live_quote_replace_requested_total",
+    "live_quote_replacement_submitted_total",
+    "live_quote_replacement_accepted_total",
+    "live_quote_replacement_rejected_total",
+    "live_quotes_expired_total",
+    "live_quotes_halted_total",
+    "live_quote_reconciliation_results_total",
+    "live_quote_anti_churn_triggers_total",
 ];
 
 pub const LIVE_ALPHA_GAUGES: &[&str] = &[
@@ -72,6 +87,10 @@ pub const LIVE_ALPHA_GAUGES: &[&str] = &[
     "live_realized_pnl",
     "live_unrealized_pnl",
     "live_fee_spend",
+    "live_quote_cancel_rate_per_min",
+    "live_quote_replacement_rate_per_min",
+    "live_open_quote_count",
+    "live_quote_reserved_pusd",
 ];
 
 #[cfg(test)]
