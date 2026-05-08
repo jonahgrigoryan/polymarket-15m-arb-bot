@@ -3390,17 +3390,11 @@ async fn run_la6_live_quote_manager_session(
     let risk_approval = match risk_decision {
         LiveRiskDecision::Approved(approval) => approval,
         LiveRiskDecision::Rejected(rejected) => {
-            append_la6_journal_event(
-                &journal,
-                run_id,
-                LiveJournalEventType::QuoteHalted,
-                serde_json::json!({
-                    "quote_id": "la6-before-submit",
-                    "order_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    "reason": "risk_rejected",
-                    "reason_codes": rejected.reason_codes,
-                }),
-            )?;
+            let (event_type, payload) = la6_pre_submit_risk_rejected_journal_event(
+                &rejected.intent_id,
+                &rejected.reason_codes,
+            );
+            append_la6_journal_event(&journal, run_id, event_type, payload)?;
             return Err(format!(
                 "LA6 quote manager risk rejected: {}",
                 rejected.reason_codes.join(",")
@@ -3408,16 +3402,13 @@ async fn run_la6_live_quote_manager_session(
             .into());
         }
         LiveRiskDecision::Halt(halt) => {
-            append_la6_journal_event(
-                &journal,
-                run_id,
-                LiveJournalEventType::QuoteHalted,
-                serde_json::json!({
-                    "quote_id": "la6-before-submit",
-                    "order_id": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                    "reason": halt.reason,
-                }),
-            )?;
+            let intent_id = halt
+                .intent_id
+                .as_deref()
+                .unwrap_or(&market_intent.intent.intent_id);
+            let (event_type, payload) =
+                la6_pre_submit_risk_halt_journal_event(intent_id, &halt.reason);
+            append_la6_journal_event(&journal, run_id, event_type, payload)?;
             return Err(format!("LA6 quote manager risk halted: {}", halt.reason).into());
         }
     };
@@ -4069,7 +4060,7 @@ fn la6_quote_submit_rejected_journal_event(
         )
     } else {
         (
-            LiveJournalEventType::QuoteReplacementRejected,
+            LiveJournalEventType::MakerOrderRejected,
             serde_json::json!({
                 "order_id": order_id,
                 "intent_id": intent_id,
@@ -4077,6 +4068,32 @@ fn la6_quote_submit_rejected_journal_event(
             }),
         )
     }
+}
+
+fn la6_pre_submit_risk_rejected_journal_event(
+    intent_id: &str,
+    reason_codes: &[String],
+) -> (LiveJournalEventType, serde_json::Value) {
+    (
+        LiveJournalEventType::MakerRiskRejected,
+        serde_json::json!({
+            "intent_id": intent_id,
+            "reason_codes": reason_codes,
+        }),
+    )
+}
+
+fn la6_pre_submit_risk_halt_journal_event(
+    intent_id: &str,
+    reason: &str,
+) -> (LiveJournalEventType, serde_json::Value) {
+    (
+        LiveJournalEventType::MakerRiskHalt,
+        serde_json::json!({
+            "intent_id": intent_id,
+            "reason": reason,
+        }),
+    )
 }
 
 fn la6_quote_submit_error_journal_event(
@@ -11113,6 +11130,43 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     }
 
     #[test]
+    fn la6_pre_submit_risk_events_do_not_create_venue_order_state() {
+        let reason_codes = vec!["max_single_order_notional".to_string()];
+        let (rejected_type, rejected_payload) =
+            la6_pre_submit_risk_rejected_journal_event("intent-risk-reject", &reason_codes);
+        let (halt_type, halt_payload) =
+            la6_pre_submit_risk_halt_journal_event("intent-risk-halt", "geoblock_unknown");
+
+        assert_eq!(rejected_type, LiveJournalEventType::MakerRiskRejected);
+        assert_eq!(halt_type, LiveJournalEventType::MakerRiskHalt);
+        assert!(rejected_payload.get("order_id").is_none());
+        assert!(halt_payload.get("order_id").is_none());
+
+        let events = vec![
+            LiveJournalEvent::new(
+                "run-risk-pre-submit",
+                "event-risk-reject",
+                rejected_type,
+                0,
+                rejected_payload,
+            ),
+            LiveJournalEvent::new(
+                "run-risk-pre-submit",
+                "event-risk-halt",
+                halt_type,
+                1,
+                halt_payload,
+            ),
+        ];
+        let state = reduce_live_journal_events(&events).expect("risk events replay");
+
+        assert!(state.intents.contains("intent-risk-reject"));
+        assert!(state.intents.contains("intent-risk-halt"));
+        assert!(state.orders.is_empty());
+        assert!(state.risk_halted);
+    }
+
+    #[test]
     fn la6_empty_rejected_submission_uses_replay_valid_journal_event() {
         let (event_type, payload) =
             la6_quote_submit_rejected_journal_event("intent-empty-reject", "rejected", "");
@@ -11131,6 +11185,40 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
 
         assert!(state.intents.contains("intent-empty-reject"));
         assert!(state.orders.is_empty());
+    }
+
+    #[test]
+    fn la6_initial_submit_rejection_with_order_id_is_not_replacement_event() {
+        let (event_type, payload) = la6_quote_submit_rejected_journal_event(
+            "intent-venue-reject",
+            "rejected",
+            "order-venue-reject",
+        );
+
+        assert_eq!(event_type, LiveJournalEventType::MakerOrderRejected);
+        assert_eq!(
+            payload.get("order_id").and_then(serde_json::Value::as_str),
+            Some("order-venue-reject")
+        );
+
+        let event = LiveJournalEvent::new(
+            "run-venue-reject",
+            "event-venue-reject",
+            event_type,
+            0,
+            payload,
+        );
+        let state = reduce_live_journal_events(&[event]).expect("venue rejection event replays");
+
+        assert!(state.intents.contains("intent-venue-reject"));
+        assert!(state.orders.contains_key("order-venue-reject"));
+        assert_eq!(
+            state
+                .orders
+                .get("order-venue-reject")
+                .and_then(|order| order.latest_status),
+            Some(LiveJournalEventType::MakerOrderRejected)
+        );
     }
 
     #[test]
