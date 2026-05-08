@@ -18,7 +18,10 @@ jobs:
     name: Ask Codex to fix P1/P2 review findings
     runs-on: ubuntu-latest
     if: >
-      github.event.sender.login == 'chatgpt-codex-connector' &&
+      (
+        github.event.sender.login == 'chatgpt-codex-connector' ||
+        github.event.sender.login == 'chatgpt-codex-connector[bot]'
+      ) &&
       github.event.pull_request.head.repo.full_name == github.repository
 
     steps:
