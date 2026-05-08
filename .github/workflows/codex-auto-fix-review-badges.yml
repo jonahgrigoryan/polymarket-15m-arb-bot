@@ -173,7 +173,7 @@ jobs:
           effort: high
           safety-strategy: drop-sudo
           sandbox: workspace-write
-          allow-bots: chatgpt-codex-connector[bot]
+          allow-bots: true
 
       - name: Remove generated Codex files
         if: always()
