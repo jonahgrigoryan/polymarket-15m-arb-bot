@@ -64,10 +64,10 @@ Optimize for correctness, auditability, deterministic replay, and risk control b
 
 ## Codex Autofix Guidelines
 
-When an automated `@codex` request asks for P1/P2 review fixes:
+When an automated Codex workflow asks for P1/P2 review fixes:
 
 - Read `AGENTS.md`, `STATUS.md`, and the relevant implementation and verification docs before editing.
-- Address only unresolved, non-outdated P1/P2 review findings on the current PR branch.
+- Address only the triggering P1/P2 review finding on the current PR branch unless the workflow prompt explicitly asks for more.
 - Keep each change surgical and traceable to a review finding.
 - Do not start the next milestone or broaden the PR scope.
 - Do not weaken any safety, approval, feature, geoblock, heartbeat, readback, journal, reconciliation, risk, stale-data, kill-switch, or secret-handling gate.
