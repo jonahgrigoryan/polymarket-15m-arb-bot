@@ -388,6 +388,28 @@ cargo test --offline live_taker_gate
 
 No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
 
+## 2026-05-09 Fifth PR Review Follow-Up
+
+One additional P1 finding was accepted and fixed narrowly:
+
+- LA7 approval artifact validation now compares the parsed `approval_id` table row to the CLI `--approval-id`. A free-text/path/note mention of the CLI approval ID no longer satisfies the binding if the executable approval row contains a different approval ID.
+
+Focused verification added and passed:
+
+```bash
+cargo fmt --check
+cargo test --offline la7_taker_approval_requires_parsed_id_to_match_cli_id
+cargo test --offline live_taker_gate
+cargo test --offline live_alpha_taker_canary
+cargo test --offline live_alpha_taker_live_review
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+scripts/verify-pr.sh
+```
+
+No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
+
 ## 2026-05-09 Fourth PR Review Follow-Up
 
 One additional P1 finding was accepted and fixed narrowly:

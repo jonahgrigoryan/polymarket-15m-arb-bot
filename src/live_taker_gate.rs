@@ -396,9 +396,6 @@ fn validate_la7_taker_approval_artifact_text_for_status(
     if !text.contains(required_status) {
         errors.push("approval_status_missing".to_string());
     }
-    if !text.contains(approval_id) {
-        errors.push("approval_id_missing".to_string());
-    }
     if approval_artifact_indicates_consumed_or_not_approved(text) {
         errors.push("approval_artifact_not_approved_or_consumed".to_string());
     }
@@ -439,7 +436,15 @@ fn validate_la7_taker_approval_artifact_text_for_status(
         cancel_all: approval_string(text, "cancel_all")?,
     };
 
+    if fields.approval_id != approval_id {
+        errors.push("approval_id_mismatch".to_string());
+    }
     validate_approval_fields(&fields)?;
+    if !errors.is_empty() {
+        errors.sort_unstable();
+        errors.dedup();
+        return Err(LiveTakerApprovalError::Approval(errors));
+    }
     Ok(fields)
 }
 
@@ -1770,6 +1775,24 @@ mod tests {
             LiveTakerApprovalError::Approval(errors) => {
                 assert!(errors.contains(&"approval_status_missing".to_string()));
                 assert!(errors.contains(&"approval_artifact_not_approved_or_consumed".to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn la7_taker_approval_requires_parsed_id_to_match_cli_id() {
+        let text = valid_la7_taker_approval_artifact().replace(
+            "| approval_id | LA7-2026-05-08-taker-dry-run-001 |",
+            "| approval_id | LA7-2026-05-08-taker-dry-run-other |",
+        ) + "\nNote: requested CLI approval LA7-2026-05-08-taker-dry-run-001.\n";
+
+        let error =
+            validate_la7_taker_approval_artifact_text(&text, "LA7-2026-05-08-taker-dry-run-001")
+                .expect_err("substring mention must not satisfy approval id binding");
+
+        match error {
+            LiveTakerApprovalError::Approval(errors) => {
+                assert!(errors.contains(&"approval_id_mismatch".to_string()));
             }
         }
     }
