@@ -4,6 +4,7 @@ pub mod domain;
 pub mod events;
 pub mod execution_intent;
 pub mod feed_ingestion;
+pub mod live_account_baseline;
 pub mod live_alpha_config;
 pub mod live_alpha_gate;
 pub mod live_alpha_metrics;
@@ -24,6 +25,7 @@ pub mod live_quote_manager;
 pub mod live_reconciliation;
 pub mod live_risk_engine;
 pub mod live_startup_recovery;
+pub mod live_taker_gate;
 pub mod live_user_events;
 pub mod market_discovery;
 pub mod metrics;
@@ -52,6 +54,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_alpha_gate::MODULE,
         live_alpha_metrics::MODULE,
         live_alpha_preflight::MODULE,
+        live_account_baseline::MODULE,
         live_fill_canary::MODULE,
         live_balance_tracker::MODULE,
         live_beta_canary::MODULE,
@@ -68,6 +71,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_reconciliation::MODULE,
         live_risk_engine::MODULE,
         live_startup_recovery::MODULE,
+        live_taker_gate::MODULE,
         live_user_events::MODULE,
         market_discovery::MODULE,
         metrics::MODULE,

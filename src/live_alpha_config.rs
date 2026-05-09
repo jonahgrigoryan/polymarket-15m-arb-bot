@@ -108,8 +108,11 @@ impl LiveAlphaConfig {
                     .to_string(),
             );
         }
-        if self.taker.enabled {
-            errors.push("live_alpha.taker.enabled must remain false during LA3".to_string());
+        if self.taker.enabled && (!self.enabled || self.mode != LiveAlphaMode::TakerGate) {
+            errors.push(
+                "live_alpha.taker.enabled requires live_alpha.enabled=true and mode=taker_gate during LA7"
+                    .to_string(),
+            );
         }
         if self.fill_canary.allow_fok {
             errors
@@ -381,6 +384,12 @@ pub struct LiveAlphaTakerConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
+    pub baseline_id: String,
+    #[serde(default)]
+    pub baseline_capture_run_id: String,
+    #[serde(default)]
+    pub baseline_artifact_path: String,
+    #[serde(default)]
     pub max_notional: f64,
     #[serde(default)]
     pub min_ev_after_all_costs_bps: u64,
@@ -394,6 +403,9 @@ impl Default for LiveAlphaTakerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            baseline_id: String::new(),
+            baseline_capture_run_id: String::new(),
+            baseline_artifact_path: String::new(),
             max_notional: 0.0,
             min_ev_after_all_costs_bps: 0,
             max_slippage_bps: 0,
@@ -405,6 +417,19 @@ impl Default for LiveAlphaTakerConfig {
 impl LiveAlphaTakerConfig {
     fn validate(&self, errors: &mut Vec<String>) {
         require_non_negative_f64(errors, "live_alpha.taker.max_notional", self.max_notional);
+        if self.enabled {
+            require_non_empty(errors, "live_alpha.taker.baseline_id", &self.baseline_id);
+            require_non_empty(
+                errors,
+                "live_alpha.taker.baseline_capture_run_id",
+                &self.baseline_capture_run_id,
+            );
+            require_non_empty(
+                errors,
+                "live_alpha.taker.baseline_artifact_path",
+                &self.baseline_artifact_path,
+            );
+        }
     }
 }
 
@@ -419,6 +444,12 @@ fn default_gtd() -> String {
 fn require_non_negative_f64(errors: &mut Vec<String>, name: &str, value: f64) {
     if !value.is_finite() || value < 0.0 {
         errors.push(format!("{name} must be finite and non-negative"));
+    }
+}
+
+fn require_non_empty(errors: &mut Vec<String>, name: &str, value: &str) {
+    if value.trim().is_empty() {
+        errors.push(format!("{name} must be set"));
     }
 }
 
@@ -465,6 +496,42 @@ mod tests {
     }
 
     #[test]
+    fn live_alpha_config_allows_taker_only_for_enabled_taker_gate_mode() {
+        let mut config = LiveAlphaConfig {
+            enabled: true,
+            mode: LiveAlphaMode::TakerGate,
+            ..LiveAlphaConfig::default()
+        };
+        config.taker.enabled = true;
+        config.taker.baseline_id = "LA7-2026-05-08-wallet-baseline-001".to_string();
+        config.taker.baseline_capture_run_id = "baseline-run-1".to_string();
+        config.taker.baseline_artifact_path =
+            "artifacts/live_alpha/LA7-2026-05-08-wallet-baseline-001/account_baseline.redacted.json"
+                .to_string();
+
+        config.validate().expect("LA7 taker gate config validates");
+    }
+
+    #[test]
+    fn live_alpha_config_requires_baseline_binding_for_enabled_taker() {
+        let mut config = LiveAlphaConfig {
+            enabled: true,
+            mode: LiveAlphaMode::TakerGate,
+            ..LiveAlphaConfig::default()
+        };
+        config.taker.enabled = true;
+
+        let errors = config
+            .validate()
+            .expect_err("enabled taker without baseline binding fails");
+        let rendered = errors.join(",");
+
+        assert!(rendered.contains("baseline_id"));
+        assert!(rendered.contains("baseline_capture_run_id"));
+        assert!(rendered.contains("baseline_artifact_path"));
+    }
+
+    #[test]
     fn live_alpha_config_allows_fak_only_for_enabled_fill_canary_mode() {
         let mut config = LiveAlphaConfig {
             enabled: true,
@@ -484,5 +551,6 @@ mod tests {
         assert!(LiveAlphaMode::FillCanary.can_place_live_orders());
         assert!(LiveAlphaMode::MakerMicro.can_place_live_orders());
         assert!(LiveAlphaMode::QuoteManager.can_place_live_orders());
+        assert!(LiveAlphaMode::TakerGate.can_place_live_orders());
     }
 }
