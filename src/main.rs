@@ -87,7 +87,7 @@ use polymarket_15m_arb_bot::{
         validate_la7_taker_approval_artifact_text, validate_la7_taker_live_approval_artifact_text,
         validate_taker_submit_input_without_network, LiveTakerCanaryApprovalFields,
         LiveTakerCanaryLiveApprovalFields, LiveTakerGateDecision, LiveTakerRuntimeState,
-        LiveTakerSubmissionReport, LiveTakerSubmitInput,
+        LiveTakerSubmissionReport, LiveTakerSubmitInput, LA7_TAKER_CANARY_FOK_OR_FAK,
     },
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
@@ -8175,6 +8175,7 @@ struct LiveAlphaTakerCanaryLiveReport {
     order_cap_state_path: String,
     pre_submit_report: LiveAlphaTakerCanaryDryRunReport,
     submission: Option<LiveTakerSubmissionReport>,
+    submit_error: Option<String>,
     post_submit_readback_status: Option<String>,
     post_submit_open_order_count: Option<usize>,
     post_submit_reserved_pusd_units: Option<u64>,
@@ -8183,6 +8184,7 @@ struct LiveAlphaTakerCanaryLiveReport {
     post_submit_reconciliation_mismatches: Vec<String>,
     no_batch_orders: bool,
     no_fok_or_fak: bool,
+    no_resting_gtc_remainder: bool,
     no_cancel_all: bool,
     no_retry_after_ambiguous_submit: bool,
 }
@@ -8609,7 +8611,45 @@ async fn run_live_alpha_taker_canary_human_approved(
         },
     )?;
 
-    let submission = submit_taker_canary_with_official_sdk(submit_input).await?;
+    let submission = match submit_taker_canary_with_official_sdk(submit_input).await {
+        Ok(submission) => submission,
+        Err(error) => {
+            let submit_error = error.to_string();
+            let post_submit = la7_post_submit_evidence_from_submit_error(&error);
+            let block_reasons = la7_live_post_submit_block_reasons(&post_submit);
+            let live_report = LiveAlphaTakerCanaryLiveReport {
+                schema_version: "la7_taker_canary_live_v1",
+                run_id: run_id.to_string(),
+                status: "submit_error_blocked".to_string(),
+                block_reasons: block_reasons.clone(),
+                approval: live_approval.clone(),
+                approval_artifact_path: approval_artifact.display().to_string(),
+                approval_artifact_sha256: approval_artifact_sha256.clone(),
+                dry_run_evidence: dry_run_evidence.clone(),
+                order_cap_state_path: order_cap_state.display().to_string(),
+                pre_submit_report: pre_submit_report.clone(),
+                submission: None,
+                submit_error: Some(submit_error.clone()),
+                post_submit_readback_status: post_submit.post_submit_readback_status,
+                post_submit_open_order_count: post_submit.post_submit_open_order_count,
+                post_submit_reserved_pusd_units: post_submit.post_submit_reserved_pusd_units,
+                post_submit_position_count: post_submit.post_submit_position_count,
+                post_submit_reconciliation_status: post_submit.post_submit_reconciliation_status,
+                post_submit_reconciliation_mismatches: post_submit
+                    .post_submit_reconciliation_mismatches,
+                no_batch_orders: true,
+                no_fok_or_fak: !LA7_TAKER_CANARY_FOK_OR_FAK,
+                no_resting_gtc_remainder: true,
+                no_cancel_all: true,
+                no_retry_after_ambiguous_submit: true,
+            };
+            persist_la7_taker_live_report(config, run_id, order_cap_state, &live_report)?;
+            return Err(format!(
+                "LA7 taker live submit result ambiguous after cap reservation: {submit_error}"
+            )
+            .into());
+        }
+    };
     update_la7_taker_cap_after_submit(
         order_cap_state,
         approval_id,
@@ -8644,6 +8684,7 @@ async fn run_live_alpha_taker_canary_human_approved(
         order_cap_state_path: order_cap_state.display().to_string(),
         pre_submit_report,
         submission: Some(submission),
+        submit_error: None,
         post_submit_readback_status: post_submit.post_submit_readback_status,
         post_submit_open_order_count: post_submit.post_submit_open_order_count,
         post_submit_reserved_pusd_units: post_submit.post_submit_reserved_pusd_units,
@@ -8651,15 +8692,34 @@ async fn run_live_alpha_taker_canary_human_approved(
         post_submit_reconciliation_status: post_submit.post_submit_reconciliation_status,
         post_submit_reconciliation_mismatches: post_submit.post_submit_reconciliation_mismatches,
         no_batch_orders: true,
-        no_fok_or_fak: true,
+        no_fok_or_fak: !LA7_TAKER_CANARY_FOK_OR_FAK,
+        no_resting_gtc_remainder: true,
         no_cancel_all: true,
         no_retry_after_ambiguous_submit: true,
     };
+    persist_la7_taker_live_report(config, run_id, order_cap_state, &live_report)?;
+
+    if !block_reasons.is_empty() {
+        return Err(format!(
+            "LA7 taker live post-submit checks blocked: {}",
+            block_reasons.join(",")
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn persist_la7_taker_live_report(
+    config: &AppConfig,
+    run_id: &str,
+    order_cap_state: &Path,
+    live_report: &LiveAlphaTakerCanaryLiveReport,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let storage = FileSessionStorage::for_run(&config.replay.output_dir, run_id)?;
     let report_path = storage.write_session_artifact(
         run_id,
         "live_alpha_taker_canary_live_report.json",
-        &serde_json::to_vec_pretty(&live_report)?,
+        &serde_json::to_vec_pretty(live_report)?,
     )?;
     println!("live_alpha_taker_canary_mode=human_approved");
     println!("live_alpha_taker_canary_status={}", live_report.status);
@@ -8685,17 +8745,9 @@ async fn run_live_alpha_taker_canary_human_approved(
     );
     println!(
         "live_alpha_taker_canary_report={}",
-        serde_json::to_string(&live_report)?
+        serde_json::to_string(live_report)?
     );
-
-    if !block_reasons.is_empty() {
-        return Err(format!(
-            "LA7 taker live post-submit checks blocked: {}",
-            block_reasons.join(",")
-        )
-        .into());
-    }
-    Ok(())
+    Ok(report_path)
 }
 
 async fn build_live_alpha_taker_canary_gate_report(
@@ -9160,6 +9212,19 @@ fn la7_post_submit_evidence_from_error(
     }
 }
 
+fn la7_post_submit_evidence_from_submit_error(
+    error: &dyn fmt::Display,
+) -> LiveAlphaTakerCanaryPostSubmitEvidence {
+    LiveAlphaTakerCanaryPostSubmitEvidence {
+        post_submit_readback_status: Some("blocked".to_string()),
+        post_submit_open_order_count: None,
+        post_submit_reserved_pusd_units: None,
+        post_submit_position_count: None,
+        post_submit_reconciliation_status: Some("halt_required".to_string()),
+        post_submit_reconciliation_mismatches: vec![format!("submit_error:{error}")],
+    }
+}
+
 fn la7_live_post_submit_block_reasons(
     post_submit: &LiveAlphaTakerCanaryPostSubmitEvidence,
 ) -> Vec<String> {
@@ -9186,6 +9251,13 @@ fn la7_live_post_submit_block_reasons(
         .any(|mismatch| mismatch.starts_with("post_submit_evidence_error:"))
     {
         block_reasons.push("post_submit_evidence_error".to_string());
+    }
+    if post_submit
+        .post_submit_reconciliation_mismatches
+        .iter()
+        .any(|mismatch| mismatch.starts_with("submit_error:"))
+    {
+        block_reasons.push("submit_error".to_string());
     }
     block_reasons.sort_unstable();
     block_reasons.dedup();
@@ -12223,6 +12295,32 @@ mod tests {
             .post_submit_reconciliation_mismatches
             .contains(&"post_submit_evidence_error:readback timeout".to_string()));
         assert!(block_reasons.contains(&"post_submit_evidence_error".to_string()));
+        assert!(block_reasons.contains(&"post_submit_readback_not_passed".to_string()));
+        assert!(block_reasons.contains(&"post_submit_reconciliation_not_passed".to_string()));
+        assert!(block_reasons.contains(&"post_submit_open_orders_unknown".to_string()));
+        assert!(block_reasons.contains(&"post_submit_reserved_pusd_unknown".to_string()));
+    }
+
+    #[test]
+    fn la7_submit_error_still_builds_fail_closed_report_state() {
+        let error = std::io::Error::new(ErrorKind::TimedOut, "submit timeout");
+        let evidence = la7_post_submit_evidence_from_submit_error(&error);
+        let block_reasons = la7_live_post_submit_block_reasons(&evidence);
+
+        assert_eq!(
+            evidence.post_submit_readback_status.as_deref(),
+            Some("blocked")
+        );
+        assert_eq!(
+            evidence.post_submit_reconciliation_status.as_deref(),
+            Some("halt_required")
+        );
+        assert_eq!(evidence.post_submit_open_order_count, None);
+        assert_eq!(evidence.post_submit_reserved_pusd_units, None);
+        assert!(evidence
+            .post_submit_reconciliation_mismatches
+            .contains(&"submit_error:submit timeout".to_string()));
+        assert!(block_reasons.contains(&"submit_error".to_string()));
         assert!(block_reasons.contains(&"post_submit_readback_not_passed".to_string()));
         assert!(block_reasons.contains(&"post_submit_reconciliation_not_passed".to_string()));
         assert!(block_reasons.contains(&"post_submit_open_orders_unknown".to_string()));

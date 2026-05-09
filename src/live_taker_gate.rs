@@ -180,6 +180,9 @@ pub struct LiveTakerSubmitInput {
     pub approval_sha256: String,
 }
 
+pub const LA7_TAKER_CANARY_ORDER_TYPE: &str = "FAK";
+pub const LA7_TAKER_CANARY_FOK_OR_FAK: bool = true;
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, Default)]
 pub struct LiveTakerShadowReport {
     pub evaluation_count: u64,
@@ -563,7 +566,7 @@ pub async fn submit_taker_canary_with_official_sdk(
     input: LiveTakerSubmitInput,
 ) -> LiveTakerSubmitResult<LiveTakerSubmissionReport> {
     use polymarket_client_sdk_v2::auth::{Credentials, LocalSigner, Signer as _, Uuid};
-    use polymarket_client_sdk_v2::clob::types::{OrderType, Side as SdkSide};
+    use polymarket_client_sdk_v2::clob::types::{Amount, OrderType, Side as SdkSide};
     use polymarket_client_sdk_v2::clob::{Client, Config};
     use polymarket_client_sdk_v2::types::{Decimal, U256};
     use polymarket_client_sdk_v2::POLYGON;
@@ -613,13 +616,14 @@ pub async fn submit_taker_canary_with_official_sdk(
         Side::Sell => SdkSide::Sell,
     };
 
+    let amount = Amount::shares(size).map_err(sdk_error)?;
     let signable_order = client
-        .limit_order()
+        .market_order()
         .token_id(token_id)
         .price(price)
-        .size(size)
+        .amount(amount)
         .side(side)
-        .order_type(OrderType::GTC)
+        .order_type(OrderType::FAK)
         .build()
         .await
         .map_err(sdk_error)?;
@@ -645,9 +649,9 @@ pub async fn submit_taker_canary_with_official_sdk(
         approval_sha256: input.approval_sha256,
         not_submitted: false,
         submitted_order_count: 1,
-        order_type: "GTC".to_string(),
+        order_type: LA7_TAKER_CANARY_ORDER_TYPE.to_string(),
         post_only: false,
-        fok_or_fak: false,
+        fok_or_fak: LA7_TAKER_CANARY_FOK_OR_FAK,
         batch_orders: false,
     })
 }
@@ -690,8 +694,17 @@ fn validate_taker_submit_shape(input: &LiveTakerSubmitInput) -> LiveTakerSubmitR
         errors.push("decision_notional_exceeds_approval".to_string());
     }
     match taker_order_price(input) {
-        Ok(price) if price <= input.approval.worst_price + PRICE_EPSILON => {}
-        Ok(_) => errors.push("decision_worst_price_limit_exceeds_approval".to_string()),
+        Ok(price) => {
+            if price > input.approval.worst_price + PRICE_EPSILON {
+                errors.push("decision_worst_price_limit_exceeds_approval".to_string());
+            }
+            if input.decision.size.is_finite()
+                && input.decision.size > 0.0
+                && input.decision.size * price > input.approval.max_notional + PRICE_EPSILON
+            {
+                errors.push("decision_worst_case_notional_exceeds_approval".to_string());
+            }
+        }
         Err(error) => errors.push(error.to_string()),
     }
     if input
@@ -1846,9 +1859,11 @@ mod tests {
     }
 
     #[test]
-    fn la7_taker_submit_shape_is_one_gtc_buy_without_batch_or_fok_fak() {
+    fn la7_taker_submit_shape_is_one_fak_buy_without_batch_or_retry() {
         let mut input = sample_taker_submit_input();
         validate_taker_submit_shape(&input).expect("safe shape validates");
+        assert_eq!(LA7_TAKER_CANARY_ORDER_TYPE, "FAK");
+        assert!(LA7_TAKER_CANARY_FOK_OR_FAK);
 
         input.decision.worst_price_limit = Some(0.49);
         let error = validate_taker_submit_shape(&input)
@@ -1856,6 +1871,14 @@ mod tests {
         assert!(error
             .to_string()
             .contains("decision_worst_price_limit_exceeds_approval"));
+
+        input = sample_taker_submit_input();
+        input.approval.max_notional = 1.72;
+        let error = validate_taker_submit_shape(&input)
+            .expect_err("worst-case FAK share notional must stay under approval");
+        assert!(error
+            .to_string()
+            .contains("decision_worst_case_notional_exceeds_approval"));
 
         input = sample_taker_submit_input();
         input.approval.batch_orders = "allowed".to_string();

@@ -66,14 +66,14 @@ Primary docs rechecked on 2026-05-09:
 - Order overview: post-only cannot be combined with FOK/FAK; order readback exposes status, market, asset, side, sizes, price, and order type; successful insert statuses include `matched`, `live`, `delayed`, and `unmatched`.
   - https://docs.polymarket.com/trading/orders/overview
 
-Implementation decision: LA7 live taker uses the official `polymarket_client_sdk_v2` path already present in the repo, submits one BUY GTC marketable limit with a strict worst-price limit, and does not use batch orders, cancel-all, FOK, FAK, post-only, or retry after ambiguous submit.
+Initial implementation decision: LA7 live taker used the official `polymarket_client_sdk_v2` path already present in the repo, submitted one BUY GTC marketable limit with a strict worst-price limit, and did not use batch orders, cancel-all, FOK, FAK, post-only, or retry after ambiguous submit. The later PR review follow-up keeps the historical live report immutable and changes the future submit path to BUY FAK with the approved worst-price limit and share amount so any unfilled taker remainder cannot rest.
 
 ## Implementation Summary
 
 - `src/live_taker_gate.rs`
   - Added live-only approval parsing with `Status: LA7 TAKER LIVE CANARY APPROVED`.
   - Live approval requires expiry plus exact dry-run report/decision paths and hashes.
-  - Added official SDK submit helper for one BUY GTC marketable-limit taker canary.
+  - Added official SDK submit helper for one BUY GTC marketable-limit taker canary; later PR review follow-up changes future submit attempts to BUY FAK to avoid resting remainders.
   - Added no-network submit-shape validation for approval/decision binding, no batch, no FOK/FAK, no retry policy, exact approval hash format, and approval bounds.
 - `src/main.rs`
   - Preserved the dry-run path.
@@ -360,9 +360,9 @@ git diff --check
 scripts/verify-pr.sh
 ```
 
-Observed result on 2026-05-09: all commands above passed. The focused `la7_post_submit` filter ran 4 tests including the bounded poll policy; the cap filters covered both resolved-flat success state and pre-submit failure/ambiguity state; the full offline suite passed 414 lib tests and 86 main tests.
+Observed result on 2026-05-09: all commands above passed. The focused `la7_post_submit` filter ran 5 tests including the bounded poll policy; the cap filters covered both resolved-flat success state and pre-submit failure/ambiguity state; the full offline suite passed 414 lib tests and 89 main tests after the PR review follow-ups.
 
-Safety scans were rerun with the Live Alpha order/cancel surface, secret/key surface, and gate/reconciliation regexes from `LIVE_ALPHA_IMPLEMENTATION_PLAN.md`. Hits remain expected documented live-gated code paths, public fixture/order IDs, public approval/readback metadata, secret handle names, and prior verification scan text. No secret values, cap reset, second live submit path, batch/FOK/FAK path, cancel-all behavior, or LA8 scope was added.
+Safety scans were rerun with the Live Alpha order/cancel surface, secret/key surface, and gate/reconciliation regexes from `LIVE_ALPHA_IMPLEMENTATION_PLAN.md`. Hits remain expected documented live-gated code paths, public fixture/order IDs, public approval/readback metadata, secret handle names, and prior verification scan text. No secret values, cap reset, second live submit path, batch path, cancel-all behavior, or LA8 scope was added.
 
 Human review decision: LA7 accepted after post-canary review. The code-level false `unexpected_fill` classification is fixed for the next report generation path and future post-submit checks now poll within a bounded window, but the already executed live canary's historical report remains `submitted_post_check_blocked`. Human review accepted the later flat/post-resolution baseline, confirmed canary trade evidence, and offline verification suite as sufficient LA7 closure evidence without rewriting the immediate post-submit failure. Taker remains disabled by default, the one-order cap remains consumed, and no LA8, second live canary, cap reset, or broad taker enablement is authorized from this branch state. Proceed only to the reviewed PR/merge path.
 
@@ -384,6 +384,33 @@ cargo test --offline la7_taker_canary_freshness_uses_evidence_age_not_capture_ti
 cargo test --offline la7_post_submit
 cargo test --offline live_alpha_taker_canary
 cargo test --offline live_taker_gate
+```
+
+No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
+
+## 2026-05-09 Second PR Review Follow-Up
+
+Two additional P1 findings were accepted and fixed narrowly:
+
+- If SDK submit errors after the one-order cap has already been reserved, `src/main.rs` now still writes `live_alpha_taker_canary_live_report.json` with `status=submit_error_blocked`, `submission=null`, `submit_error`, unknown post-submit open-order/reserved-pUSD counts, `halt_required`, and `submit_error`/post-submit block reasons. The cap remains consumed and no retry path is introduced.
+- `src/live_taker_gate.rs` now builds the future live canary submit as a BUY `FAK` market order with the approved worst-price limit and share amount. Submit-shape validation also caps size times worst-price at the approved max notional. This preserves the one-order, no-batch, no-post-only, no-cancel-all, no-retry shape while preventing an unfilled taker remainder from resting as GTC/GTD exposure.
+
+The historical executed canary remains unchanged: it was one BUY GTC taker order, it matched, and its immutable live report remains `submitted_post_check_blocked`.
+
+Focused verification added and passed:
+
+```bash
+cargo fmt --check
+cargo test --offline la7_submit_error_still_builds_fail_closed_report_state
+cargo test --offline la7_taker_submit_shape_is_one_fak_buy_without_batch_or_retry
+cargo test --offline la7_post_submit
+cargo test --offline live_taker_gate
+cargo test --offline live_alpha_taker_canary
+cargo test --offline live_alpha_taker_live_review
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+scripts/verify-pr.sh
 ```
 
 No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
