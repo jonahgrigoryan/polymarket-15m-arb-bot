@@ -8565,12 +8565,11 @@ async fn run_live_alpha_taker_canary_human_approved(
     let live_approval = validate_la7_taker_live_approval_artifact_text(&approval_text, approval_id)
         .map_err(|error| format!("LA7 taker live approval artifact validation failed: {error}"))?;
     let now_unix = unix_time_secs();
-    if now_unix >= live_approval.approval_expires_at_unix {
-        return Err(format!(
-            "LA7 taker live approval expired at {}",
-            live_approval.approval_expires_at_unix
-        )
-        .into());
+    if let Err(error) = validate_la7_taker_live_approval_not_expired(
+        live_approval.approval_expires_at_unix,
+        now_unix,
+    ) {
+        return Err(error.into());
     }
     let dry_run_evidence = review_la7_taker_dry_run_evidence(&live_approval)?;
     if dry_run_evidence.status != "passed" {
@@ -8644,6 +8643,13 @@ async fn run_live_alpha_taker_canary_human_approved(
         approval_sha256: approval_artifact_sha256.clone(),
     };
     validate_taker_submit_input_without_network(&submit_input)?;
+    let reserve_submit_unix = unix_time_secs();
+    if let Err(error) = validate_la7_taker_live_approval_not_expired(
+        live_approval.approval_expires_at_unix,
+        reserve_submit_unix,
+    ) {
+        return Err(error.into());
+    }
     reserve_la7_taker_cap(
         order_cap_state,
         &LiveAlphaTakerCanaryCapArtifact {
@@ -8653,7 +8659,7 @@ async fn run_live_alpha_taker_canary_human_approved(
             approval_artifact_path: approval_artifact.display().to_string(),
             dry_run_report_sha256: dry_run_evidence.report_sha256.clone(),
             dry_run_decision_sha256: dry_run_evidence.decision_sha256.clone(),
-            reserved_at_unix: now_unix,
+            reserved_at_unix: reserve_submit_unix,
             submission_attempted: true,
             venue_order_id: None,
             venue_status: None,
@@ -9540,6 +9546,19 @@ fn la7_post_submit_readback_only_has_pending_trade_status(
             .block_reasons
             .iter()
             .all(|reason| *reason == "nonterminal_trade_status")
+}
+
+fn validate_la7_taker_live_approval_not_expired(
+    approval_expires_at_unix: u64,
+    now_unix: u64,
+) -> Result<(), String> {
+    if now_unix >= approval_expires_at_unix {
+        Err(format!(
+            "LA7 taker live approval expired at {approval_expires_at_unix}"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn reserve_la7_taker_cap(
@@ -12509,6 +12528,26 @@ mod tests {
         assert_eq!(
             la7_evidence_age_block_reason("reference", report_evidence.age_ms, 500).as_deref(),
             Some("reference_stale")
+        );
+    }
+
+    #[test]
+    fn la7_live_approval_expiry_recheck_blocks_at_expiry_boundary() {
+        let expires_at_unix = 1_778_000_000;
+
+        assert!(
+            validate_la7_taker_live_approval_not_expired(expires_at_unix, expires_at_unix - 1)
+                .is_ok()
+        );
+        assert_eq!(
+            validate_la7_taker_live_approval_not_expired(expires_at_unix, expires_at_unix)
+                .expect_err("approval expires at the boundary"),
+            "LA7 taker live approval expired at 1778000000"
+        );
+        assert_eq!(
+            validate_la7_taker_live_approval_not_expired(expires_at_unix, expires_at_unix + 1)
+                .expect_err("approval stays expired after boundary"),
+            "LA7 taker live approval expired at 1778000000"
         );
     }
 

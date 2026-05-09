@@ -388,6 +388,28 @@ cargo test --offline live_taker_gate
 
 No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
 
+## 2026-05-09 Fourth PR Review Follow-Up
+
+One additional P1 finding was accepted and fixed narrowly:
+
+- LA7 live approval expiry is now checked twice: once after parsing the live approval artifact, and again immediately before one-order cap reservation and SDK submit. If fresh pre-submit gates run past `approval_expires_at_unix`, the command fails closed before consuming the cap or submitting an order. The cap reservation timestamp now uses that final pre-submit timestamp.
+
+Focused verification added and passed:
+
+```bash
+cargo fmt --check
+cargo test --offline la7_live_approval_expiry_recheck_blocks_at_expiry_boundary
+cargo test --offline live_alpha_taker_canary
+cargo test --offline live_alpha_taker_live_review
+cargo test --offline live_taker_gate
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+scripts/verify-pr.sh
+```
+
+No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
+
 ## 2026-05-09 Third PR Review Follow-Up
 
 Two additional P1 findings were accepted and fixed narrowly:
