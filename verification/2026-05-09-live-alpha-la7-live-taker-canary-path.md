@@ -367,3 +367,23 @@ Safety scans were rerun with the Live Alpha order/cancel surface, secret/key sur
 Human review decision: LA7 accepted after post-canary review. The code-level false `unexpected_fill` classification is fixed for the next report generation path and future post-submit checks now poll within a bounded window, but the already executed live canary's historical report remains `submitted_post_check_blocked`. Human review accepted the later flat/post-resolution baseline, confirmed canary trade evidence, and offline verification suite as sufficient LA7 closure evidence without rewriting the immediate post-submit failure. Taker remains disabled by default, the one-order cap remains consumed, and no LA8, second live canary, cap reset, or broad taker enablement is authorized from this branch state. Proceed only to the reviewed PR/merge path.
 
 Cleanup note: raw redacted baseline artifacts under `artifacts/live_alpha/*` were local evidence and were removed from the working tree after this verification note captured the relevant baseline IDs, run IDs, hashes, counts, and canary order/transaction evidence. Ignored `reports/` outputs remain local runtime evidence and are not staged for the LA7 commit.
+
+## 2026-05-09 PR Review Follow-Up
+
+Two PR review P1 findings were accepted and fixed narrowly in `src/main.rs`:
+
+- LA7 canary stale-data gates now preserve evidence age when applying fetched book/reference/predictive evidence into `StateStore`; stale or missing measured evidence age is also added as an explicit canary block reason.
+- If SDK submit succeeds but post-submit readback/reconciliation evidence collection errors, the live canary path now builds a fail-closed post-submit evidence state and still writes `live_alpha_taker_canary_live_report.json` with the submission details, `submitted_post_check_blocked` status, and `post_submit_evidence_error` evidence.
+
+Focused verification added and passed:
+
+```bash
+cargo fmt --check
+cargo test --offline la7_post_submit_evidence_error_still_builds_fail_closed_report_state
+cargo test --offline la7_taker_canary_freshness_uses_evidence_age_not_capture_time
+cargo test --offline la7_post_submit
+cargo test --offline live_alpha_taker_canary
+cargo test --offline live_taker_gate
+```
+
+No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.

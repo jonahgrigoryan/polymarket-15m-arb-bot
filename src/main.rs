@@ -8620,28 +8620,12 @@ async fn run_live_alpha_taker_canary_human_approved(
     )?;
 
     let post_submit =
-        build_la7_taker_post_submit_report(config, run_id, &live_approval, &submission).await?;
-    let mut block_reasons = Vec::new();
-    if post_submit.post_submit_readback_status.as_deref() != Some("passed") {
-        block_reasons.push("post_submit_readback_not_passed".to_string());
-    }
-    if post_submit.post_submit_reconciliation_status.as_deref() != Some("passed") {
-        block_reasons.push("post_submit_reconciliation_not_passed".to_string());
-    }
-    if post_submit
-        .post_submit_open_order_count
-        .unwrap_or(usize::MAX)
-        != 0
-    {
-        block_reasons.push("post_submit_open_orders_nonzero".to_string());
-    }
-    if post_submit
-        .post_submit_reserved_pusd_units
-        .unwrap_or(u64::MAX)
-        != 0
-    {
-        block_reasons.push("post_submit_reserved_pusd_nonzero".to_string());
-    }
+        match build_la7_taker_post_submit_report(config, run_id, &live_approval, &submission).await
+        {
+            Ok(post_submit) => post_submit,
+            Err(error) => la7_post_submit_evidence_from_error(error.as_ref()),
+        };
+    let block_reasons = la7_live_post_submit_block_reasons(&post_submit);
 
     let status = if block_reasons.is_empty() {
         "submitted_reconciled"
@@ -9163,6 +9147,51 @@ fn la7_should_poll_post_submit_readback(
             == "submitted_order_trade_missing_from_readback"
 }
 
+fn la7_post_submit_evidence_from_error(
+    error: &dyn std::error::Error,
+) -> LiveAlphaTakerCanaryPostSubmitEvidence {
+    LiveAlphaTakerCanaryPostSubmitEvidence {
+        post_submit_readback_status: Some("blocked".to_string()),
+        post_submit_open_order_count: None,
+        post_submit_reserved_pusd_units: None,
+        post_submit_position_count: None,
+        post_submit_reconciliation_status: Some("halt_required".to_string()),
+        post_submit_reconciliation_mismatches: vec![format!("post_submit_evidence_error:{error}")],
+    }
+}
+
+fn la7_live_post_submit_block_reasons(
+    post_submit: &LiveAlphaTakerCanaryPostSubmitEvidence,
+) -> Vec<String> {
+    let mut block_reasons = Vec::new();
+    if post_submit.post_submit_readback_status.as_deref() != Some("passed") {
+        block_reasons.push("post_submit_readback_not_passed".to_string());
+    }
+    if post_submit.post_submit_reconciliation_status.as_deref() != Some("passed") {
+        block_reasons.push("post_submit_reconciliation_not_passed".to_string());
+    }
+    match post_submit.post_submit_open_order_count {
+        Some(0) => {}
+        Some(_) => block_reasons.push("post_submit_open_orders_nonzero".to_string()),
+        None => block_reasons.push("post_submit_open_orders_unknown".to_string()),
+    }
+    match post_submit.post_submit_reserved_pusd_units {
+        Some(0) => {}
+        Some(_) => block_reasons.push("post_submit_reserved_pusd_nonzero".to_string()),
+        None => block_reasons.push("post_submit_reserved_pusd_unknown".to_string()),
+    }
+    if post_submit
+        .post_submit_reconciliation_mismatches
+        .iter()
+        .any(|mismatch| mismatch.starts_with("post_submit_evidence_error:"))
+    {
+        block_reasons.push("post_submit_evidence_error".to_string());
+    }
+    block_reasons.sort_unstable();
+    block_reasons.dedup();
+    block_reasons
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct La7PostSubmitReconciliation {
     matching_trade_ids: Vec<String>,
@@ -9583,6 +9612,14 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     now_ms: i64,
 ) -> Result<LiveAlphaTakerCanarySnapshotEvidence, Box<dyn std::error::Error>> {
     let mut block_reasons = Vec::new();
+    let max_book_age_ms = stricter_positive_u64_main(
+        config.live_alpha.risk.max_book_staleness_ms,
+        config.risk.stale_book_ms,
+    );
+    let max_reference_age_ms = stricter_positive_u64_main(
+        config.live_alpha.risk.max_reference_staleness_ms,
+        config.risk.stale_reference_ms,
+    );
     let discovery = MarketDiscoveryClient::new(
         &config.polymarket.gamma_markets_url,
         &config.polymarket.clob_rest_url,
@@ -9643,6 +9680,11 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     if book.is_none() {
         block_reasons.push("book_missing".to_string());
     }
+    if book.is_some() {
+        if let Some(reason) = la7_evidence_age_block_reason("book", book_age_ms, max_book_age_ms) {
+            block_reasons.push(reason);
+        }
+    }
     if best_bid.is_none() {
         block_reasons.push("book_best_bid_missing".to_string());
     }
@@ -9659,6 +9701,10 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     };
     if reference.price.is_none() {
         block_reasons.push("reference_price_missing".to_string());
+    } else if let Some(reason) =
+        la7_evidence_age_block_reason("reference", reference.age_ms, max_reference_age_ms)
+    {
+        block_reasons.push(reason);
     }
 
     let predictive = match live_alpha_predictive_evidence(config, market.asset).await {
@@ -9670,6 +9716,10 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     };
     if predictive.price.is_none() {
         block_reasons.push("predictive_price_missing".to_string());
+    } else if let Some(reason) =
+        la7_evidence_age_block_reason("predictive", predictive.age_ms, config.feeds.stale_after_ms)
+    {
+        block_reasons.push(reason);
     }
 
     let mut store = StateStore::new();
@@ -9686,17 +9736,18 @@ async fn live_alpha_taker_canary_snapshot_evidence(
         apply_taker_canary_event(
             &mut store,
             run_id,
-            now_ms,
+            la7_book_evidence_recv_wall_ts(now_ms, book),
             1,
             NormalizedEvent::BookSnapshot { book: book.clone() },
         )?;
     }
     if let Some(reference_price) = reference.price {
         let source_ts = price_source_ts(now_ms, reference.age_ms);
+        let recv_wall_ts = la7_price_evidence_recv_wall_ts(now_ms, reference.age_ms);
         apply_taker_canary_event(
             &mut store,
             run_id,
-            now_ms,
+            recv_wall_ts,
             2,
             NormalizedEvent::ReferenceTick {
                 price: ReferencePrice {
@@ -9710,17 +9761,18 @@ async fn live_alpha_taker_canary_snapshot_evidence(
                     provider: reference.snapshot_id.clone(),
                     matches_market_resolution_source: Some(true),
                     source_ts: Some(source_ts),
-                    recv_wall_ts: now_ms,
+                    recv_wall_ts,
                 },
             },
         )?;
     }
     if let Some(predictive_price) = predictive.price {
         let source_ts = price_source_ts(now_ms, predictive.age_ms);
+        let recv_wall_ts = la7_price_evidence_recv_wall_ts(now_ms, predictive.age_ms);
         apply_taker_canary_event(
             &mut store,
             run_id,
-            now_ms,
+            recv_wall_ts,
             3,
             NormalizedEvent::PredictiveTick {
                 price: ReferencePrice {
@@ -9731,7 +9783,7 @@ async fn live_alpha_taker_canary_snapshot_evidence(
                     provider: predictive.snapshot_id.clone(),
                     matches_market_resolution_source: None,
                     source_ts: Some(source_ts),
-                    recv_wall_ts: now_ms,
+                    recv_wall_ts,
                 },
             },
         )?;
@@ -10050,6 +10102,31 @@ fn price_source_ts(now_ms: i64, age_ms: Option<u64>) -> i64 {
     age_ms
         .and_then(|age| i64::try_from(age).ok())
         .map_or(now_ms, |age| now_ms.saturating_sub(age))
+}
+
+fn la7_book_evidence_recv_wall_ts(now_ms: i64, book: &OrderBookSnapshot) -> i64 {
+    book.source_ts
+        .filter(|source_ts| *source_ts > 0 && *source_ts <= now_ms)
+        .unwrap_or(now_ms)
+}
+
+fn la7_price_evidence_recv_wall_ts(now_ms: i64, age_ms: Option<u64>) -> i64 {
+    price_source_ts(now_ms, age_ms)
+}
+
+fn la7_evidence_age_block_reason(
+    label: &str,
+    age_ms: Option<u64>,
+    max_age_ms: u64,
+) -> Option<String> {
+    if max_age_ms == 0 {
+        return None;
+    }
+    match age_ms {
+        Some(age) if age <= max_age_ms => None,
+        Some(_) => Some(format!("{label}_stale")),
+        None => Some(format!("{label}_age_missing")),
+    }
 }
 
 fn option_f64_label(value: Option<f64>) -> String {
@@ -12124,6 +12201,142 @@ mod tests {
         assert!(la7_should_poll_post_submit_readback(&missing_trade, 1, 3));
         assert!(!la7_should_poll_post_submit_readback(&pending, 3, 3));
         assert!(!la7_should_poll_post_submit_readback(&hard_halt, 1, 3));
+    }
+
+    #[test]
+    fn la7_post_submit_evidence_error_still_builds_fail_closed_report_state() {
+        let error = std::io::Error::new(ErrorKind::TimedOut, "readback timeout");
+        let evidence = la7_post_submit_evidence_from_error(&error);
+        let block_reasons = la7_live_post_submit_block_reasons(&evidence);
+
+        assert_eq!(
+            evidence.post_submit_readback_status.as_deref(),
+            Some("blocked")
+        );
+        assert_eq!(
+            evidence.post_submit_reconciliation_status.as_deref(),
+            Some("halt_required")
+        );
+        assert_eq!(evidence.post_submit_open_order_count, None);
+        assert_eq!(evidence.post_submit_reserved_pusd_units, None);
+        assert!(evidence
+            .post_submit_reconciliation_mismatches
+            .contains(&"post_submit_evidence_error:readback timeout".to_string()));
+        assert!(block_reasons.contains(&"post_submit_evidence_error".to_string()));
+        assert!(block_reasons.contains(&"post_submit_readback_not_passed".to_string()));
+        assert!(block_reasons.contains(&"post_submit_reconciliation_not_passed".to_string()));
+        assert!(block_reasons.contains(&"post_submit_open_orders_unknown".to_string()));
+        assert!(block_reasons.contains(&"post_submit_reserved_pusd_unknown".to_string()));
+    }
+
+    #[test]
+    fn la7_taker_canary_freshness_uses_evidence_age_not_capture_time() {
+        let now_ms = 1_777_000_000_000;
+        let stale_age_ms = 750;
+        let stale_source_ts = now_ms - stale_age_ms;
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_alpha.enabled = true;
+        config.live_alpha.mode = LiveAlphaMode::TakerGate;
+        config.live_alpha.taker.enabled = true;
+        config.live_alpha.taker.max_notional = 10.0;
+        config.live_alpha.taker.max_orders_per_day = 1;
+        config.live_alpha.risk.max_fee_spend = 1.0;
+        config.live_alpha.risk.max_total_live_notional = 10.0;
+        config.live_alpha.risk.max_book_staleness_ms = 500;
+        config.live_alpha.risk.max_reference_staleness_ms = 500;
+        config.risk.stale_book_ms = 1_000;
+        config.risk.stale_reference_ms = 1_000;
+        let market = test_paper_market(Asset::Sol, now_ms - 60_000, now_ms + 840_000);
+        let token_id = market.outcomes[0].token_id.clone();
+        let book = OrderBookSnapshot {
+            market_id: market.market_id.clone(),
+            token_id: token_id.clone(),
+            bids: vec![OrderBookLevel {
+                price: 0.40,
+                size: 10.0,
+            }],
+            asks: vec![OrderBookLevel {
+                price: 0.41,
+                size: 10.0,
+            }],
+            hash: Some("stale-book".to_string()),
+            source_ts: Some(stale_source_ts),
+        };
+        let mut store = StateStore::new();
+
+        apply_taker_canary_event(
+            &mut store,
+            "la7-stale-evidence-test",
+            now_ms,
+            0,
+            NormalizedEvent::MarketDiscovered {
+                market: market.clone(),
+            },
+        )
+        .expect("market event applies");
+        apply_taker_canary_event(
+            &mut store,
+            "la7-stale-evidence-test",
+            la7_book_evidence_recv_wall_ts(now_ms, &book),
+            1,
+            NormalizedEvent::BookSnapshot { book },
+        )
+        .expect("book event applies");
+        apply_taker_canary_event(
+            &mut store,
+            "la7-stale-evidence-test",
+            la7_price_evidence_recv_wall_ts(now_ms, Some(stale_age_ms as u64)),
+            2,
+            NormalizedEvent::ReferenceTick {
+                price: ReferencePrice {
+                    asset: market.asset,
+                    source: market
+                        .resolution_source
+                        .clone()
+                        .expect("test market has resolution source"),
+                    price: 150.0,
+                    confidence: None,
+                    provider: Some("test-reference".to_string()),
+                    matches_market_resolution_source: Some(true),
+                    source_ts: Some(stale_source_ts),
+                    recv_wall_ts: stale_source_ts,
+                },
+            },
+        )
+        .expect("reference event applies");
+
+        let snapshot = store
+            .decision_snapshot(&market.market_id, now_ms, 500, 500)
+            .expect("decision snapshot builds");
+        let decision = evaluate_taker_canary_snapshot(
+            &config,
+            &snapshot,
+            LiveTakerRuntimeState {
+                geoblock_passed: true,
+                heartbeat_healthy: true,
+                reconciliation_clean: true,
+                inventory_clean: true,
+                baseline_ready: true,
+                live_risk_controls_passed: true,
+                existing_taker_orders_today: 0,
+                existing_taker_fee_spend: 0.0,
+                current_total_live_notional: 0.0,
+            },
+            &token_id,
+            "Up",
+            Side::Buy,
+            5.0,
+        );
+
+        assert_eq!(
+            la7_evidence_age_block_reason("book", Some(stale_age_ms as u64), 500).as_deref(),
+            Some("book_stale")
+        );
+        assert!(decision.reason_codes.contains(&"book_stale".to_string()));
+        assert!(decision
+            .reason_codes
+            .contains(&"reference_stale".to_string()));
     }
 
     #[test]
