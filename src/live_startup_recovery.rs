@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use crate::live_account_baseline::{
+    reconcile_live_state_with_account_baseline, AccountBaselineArtifact,
+};
 use crate::live_alpha_config::LiveAlphaMode;
 use crate::live_balance_tracker::LiveBalanceSnapshot;
 use crate::live_beta_readback::{
@@ -46,6 +49,9 @@ pub struct LiveStartupRecoveryInput {
     pub recent_trades_readback_status: StartupRecoveryCheckStatus,
     pub journal_replay_status: StartupRecoveryCheckStatus,
     pub position_reconstruction_status: StartupRecoveryCheckStatus,
+    pub account_baseline_required: bool,
+    pub account_baseline_status: StartupRecoveryCheckStatus,
+    pub account_baseline: Option<AccountBaselineArtifact>,
     pub reconciliation_input: Option<LiveReconciliationInput>,
 }
 
@@ -63,6 +69,9 @@ impl LiveStartupRecoveryInput {
             recent_trades_readback_status: StartupRecoveryCheckStatus::Unknown,
             journal_replay_status: StartupRecoveryCheckStatus::Unknown,
             position_reconstruction_status: StartupRecoveryCheckStatus::Unknown,
+            account_baseline_required: false,
+            account_baseline_status: StartupRecoveryCheckStatus::Unknown,
+            account_baseline: None,
             reconciliation_input: None,
         }
     }
@@ -127,6 +136,9 @@ pub enum LiveStartupRecoveryBlockReason {
     JournalReplayUnknown,
     PositionReconstructionFailed,
     PositionReconstructionUnknown,
+    AccountBaselineFailed,
+    AccountBaselineUnknown,
+    AccountBaselinePositionEvidenceIncomplete,
     ReconciliationFailed,
     ReconciliationUnknown,
 }
@@ -150,6 +162,11 @@ impl LiveStartupRecoveryBlockReason {
             Self::JournalReplayUnknown => "journal_replay_unknown",
             Self::PositionReconstructionFailed => "position_reconstruction_failed",
             Self::PositionReconstructionUnknown => "position_reconstruction_unknown",
+            Self::AccountBaselineFailed => "account_baseline_failed",
+            Self::AccountBaselineUnknown => "account_baseline_unknown",
+            Self::AccountBaselinePositionEvidenceIncomplete => {
+                "account_baseline_position_evidence_incomplete"
+            }
             Self::ReconciliationFailed => "reconciliation_failed",
             Self::ReconciliationUnknown => "reconciliation_unknown",
         }
@@ -210,8 +227,38 @@ pub fn evaluate_startup_recovery(input: LiveStartupRecoveryInput) -> LiveStartup
         LiveStartupRecoveryBlockReason::PositionReconstructionFailed,
         LiveStartupRecoveryBlockReason::PositionReconstructionUnknown,
     );
+    if input.account_baseline_required {
+        push_check_status(
+            input.account_baseline_status,
+            &mut block_reasons,
+            LiveStartupRecoveryBlockReason::AccountBaselineFailed,
+            LiveStartupRecoveryBlockReason::AccountBaselineUnknown,
+        );
+        if input
+            .account_baseline
+            .as_ref()
+            .is_some_and(|baseline| !baseline.body.positions.evidence_complete)
+        {
+            block_reasons
+                .push(LiveStartupRecoveryBlockReason::AccountBaselinePositionEvidenceIncomplete);
+        }
+    }
 
-    let reconciliation = input.reconciliation_input.map(reconcile_live_state);
+    let account_baseline = input.account_baseline.as_ref();
+    let run_id_for_error = input.run_id.clone();
+    let checked_at_ms_for_error = input.checked_at_ms;
+    let reconciliation = input.reconciliation_input.map(|reconciliation_input| {
+        if let Some(baseline) = account_baseline {
+            reconcile_live_state_with_account_baseline(reconciliation_input, baseline)
+                .unwrap_or_else(|_| LiveReconciliationResult::HaltRequired {
+                    run_id: run_id_for_error.clone(),
+                    checked_at_ms: checked_at_ms_for_error,
+                    mismatches: vec![LiveReconciliationMismatch::UnexpectedFill],
+                })
+        } else {
+            reconcile_live_state(reconciliation_input)
+        }
+    });
     let reconciliation_mismatches = match &reconciliation {
         Some(LiveReconciliationResult::Passed { .. }) => Vec::new(),
         Some(LiveReconciliationResult::HaltRequired { mismatches, .. }) => {
@@ -445,6 +492,103 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_requires_account_baseline_when_taker_gate_requires_it() {
+        let mut input = passing_input();
+        input.live_alpha_mode = LiveAlphaMode::TakerGate;
+        input.account_baseline_required = true;
+        input.account_baseline_status = StartupRecoveryCheckStatus::Unknown;
+        input.account_baseline = None;
+
+        let report = evaluate_startup_recovery(input);
+
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(report
+            .block_reasons
+            .contains(&LiveStartupRecoveryBlockReason::AccountBaselineUnknown));
+    }
+
+    #[test]
+    fn startup_recovery_blocks_taker_gate_when_baseline_position_evidence_is_incomplete() {
+        let mut input = passing_input();
+        input.live_alpha_mode = LiveAlphaMode::TakerGate;
+        input.account_baseline_required = true;
+        input.account_baseline_status = StartupRecoveryCheckStatus::Passed;
+        input.account_baseline = Some(baseline_artifact(false));
+
+        let report = evaluate_startup_recovery(input);
+
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(report
+            .block_reasons
+            .contains(&LiveStartupRecoveryBlockReason::AccountBaselinePositionEvidenceIncomplete));
+    }
+
+    #[test]
+    fn startup_recovery_uses_account_baseline_to_ignore_history_but_not_new_trades() {
+        let baseline = baseline_artifact(true);
+        let mut local = LocalLiveState::default();
+        let mut venue = VenueLiveState::default();
+        venue.trades.insert(
+            "trade-baseline-1".to_string(),
+            VenueTradeState {
+                trade_id: "trade-baseline-1".to_string(),
+                order_id: "order-baseline-1".to_string(),
+                status: VenueTradeStatus::Confirmed,
+            },
+        );
+
+        let mut input = LiveStartupRecoveryInput {
+            run_id: "run-1".to_string(),
+            checked_at_ms: 1,
+            live_alpha_enabled: true,
+            live_alpha_mode: LiveAlphaMode::TakerGate,
+            geoblock_status: GeoblockGateStatus::Passed,
+            account_preflight_status: StartupRecoveryCheckStatus::Passed,
+            balance_allowance_status: StartupRecoveryCheckStatus::Passed,
+            open_orders_readback_status: StartupRecoveryCheckStatus::Passed,
+            recent_trades_readback_status: StartupRecoveryCheckStatus::Passed,
+            journal_replay_status: StartupRecoveryCheckStatus::Passed,
+            position_reconstruction_status: StartupRecoveryCheckStatus::Passed,
+            account_baseline_required: true,
+            account_baseline_status: StartupRecoveryCheckStatus::Passed,
+            account_baseline: Some(baseline),
+            reconciliation_input: Some(LiveReconciliationInput {
+                run_id: "run-1".to_string(),
+                checked_at_ms: 1,
+                local: local.clone(),
+                venue: venue.clone(),
+                venue_position_evidence_complete: false,
+            }),
+        };
+
+        let report = evaluate_startup_recovery(input.clone());
+        assert_eq!(report.status, LiveStartupRecoveryStatus::Passed);
+
+        local.known_trades.clear();
+        venue.trades.insert(
+            "trade-new-1".to_string(),
+            VenueTradeState {
+                trade_id: "trade-new-1".to_string(),
+                order_id: "order-new-1".to_string(),
+                status: VenueTradeStatus::Confirmed,
+            },
+        );
+        input.reconciliation_input = Some(LiveReconciliationInput {
+            run_id: "run-1".to_string(),
+            checked_at_ms: 1,
+            local,
+            venue,
+            venue_position_evidence_complete: false,
+        });
+
+        let report = evaluate_startup_recovery(input);
+        assert_eq!(report.status, LiveStartupRecoveryStatus::HaltRequired);
+        assert!(report
+            .reconciliation_mismatches
+            .contains(&LiveReconciliationMismatch::UnexpectedFill));
+    }
+
+    #[test]
     fn startup_recovery_readback_conversion_preserves_retrying_trade_state() {
         let trade = TradeReadback {
             id: "trade-1".to_string(),
@@ -512,6 +656,9 @@ mod tests {
             recent_trades_readback_status: StartupRecoveryCheckStatus::Passed,
             journal_replay_status: StartupRecoveryCheckStatus::Passed,
             position_reconstruction_status: StartupRecoveryCheckStatus::Passed,
+            account_baseline_required: false,
+            account_baseline_status: StartupRecoveryCheckStatus::Unknown,
+            account_baseline: None,
             reconciliation_input: Some(LiveReconciliationInput {
                 run_id: "run-1".to_string(),
                 checked_at_ms: 1,
@@ -529,5 +676,56 @@ mod tests {
             asset: Asset::Btc,
             outcome: "Up".to_string(),
         }
+    }
+
+    fn baseline_artifact(position_evidence_complete: bool) -> AccountBaselineArtifact {
+        use crate::live_account_baseline::{
+            AccountBaselineBody, BaselineCollateral, BaselinePositions, BaselineReadbackReport,
+            BaselineTrade, NoSecretsGuarantee,
+        };
+
+        AccountBaselineArtifact::new(AccountBaselineBody {
+            baseline_id: "baseline-1".to_string(),
+            run_id: "baseline-run-1".to_string(),
+            captured_at_ms: 1,
+            captured_at_rfc3339: "2026-05-08T00:00:00Z".to_string(),
+            wallet_address: "0x280ca8b14386Fe4203670538CCdE636C295d74E9".to_string(),
+            funder_address: "0xB06867f742290D25B7430fD35D7A8cE7bc3a1159".to_string(),
+            signature_type: "poly_proxy".to_string(),
+            readback_report: BaselineReadbackReport {
+                status: "passed".to_string(),
+                block_reasons: Vec::new(),
+                open_order_count: 0,
+                trade_count: 1,
+                reserved_pusd_units: 0,
+                required_collateral_allowance_units: 1,
+                available_pusd_units: 1,
+                venue_state: "trading_enabled".to_string(),
+                heartbeat: "not_started_no_open_orders".to_string(),
+                live_network_enabled: true,
+            },
+            collateral: BaselineCollateral {
+                asset_type: "collateral".to_string(),
+                token_id: None,
+                balance_units: 1,
+                allowance_units: 1,
+            },
+            open_orders: Vec::new(),
+            trades: vec![BaselineTrade {
+                id: "trade-baseline-1".to_string(),
+                market: "market-1".to_string(),
+                asset_id: "token-up".to_string(),
+                status: "confirmed".to_string(),
+                transaction_hash: Some("0xabc".to_string()),
+                maker_address: "0xB06867f742290D25B7430fD35D7A8cE7bc3a1159".to_string(),
+                order_id: Some("order-baseline-1".to_string()),
+            }],
+            positions: BaselinePositions {
+                evidence_complete: position_evidence_complete,
+                positions: Vec::new(),
+            },
+            no_secrets_guarantee: NoSecretsGuarantee::default(),
+        })
+        .expect("baseline artifact builds")
     }
 }

@@ -17,6 +17,9 @@ use crate::live_executor::{
     ExecutionDecision, ExecutionSink, ShadowLiveContext, ShadowLiveDecision, ShadowLiveExecution,
     ShadowLiveReasonCode,
 };
+use crate::live_taker_gate::{
+    evaluate_shadow_taker_snapshot, LiveTakerGateDecision, LiveTakerRuntimeState,
+};
 use crate::paper_executor::{
     FillSimulationInput, MarketSettlement, PaperExecutionAuditEvent, PaperExecutionError,
     PaperExecutor, PaperExecutorConfig, PaperPositionBook,
@@ -70,6 +73,7 @@ pub struct ReplayRunResult {
     pub position_snapshots: Vec<PositionSnapshot>,
     pub audit_events: Vec<PaperExecutionAuditEvent>,
     pub shadow_live_decisions: Vec<ShadowLiveDecision>,
+    pub shadow_taker_decisions: Vec<LiveTakerGateDecision>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +82,7 @@ pub struct ReplayEngine {
     signal_engine: SignalEngine,
     risk_engine: RiskEngine,
     shadow_live_enabled: bool,
+    shadow_taker_enabled: bool,
     shadow_live_readiness: ShadowLiveRuntimeReadiness,
 }
 
@@ -105,6 +110,7 @@ impl ReplayEngine {
             risk_engine: RiskEngine::from_config(&config.risk),
             config,
             shadow_live_enabled: false,
+            shadow_taker_enabled: false,
             shadow_live_readiness: ShadowLiveRuntimeReadiness::default(),
         }
     }
@@ -115,6 +121,11 @@ impl ReplayEngine {
 
     pub fn with_shadow_live(mut self, enabled: bool) -> Self {
         self.shadow_live_enabled = enabled;
+        self
+    }
+
+    pub fn with_shadow_taker(mut self, enabled: bool) -> Self {
+        self.shadow_taker_enabled = enabled;
         self
     }
 
@@ -142,6 +153,7 @@ impl ReplayEngine {
             storage,
             run_id,
             false,
+            false,
             ShadowLiveRuntimeReadiness::default(),
         )
     }
@@ -150,6 +162,7 @@ impl ReplayEngine {
         storage: &impl StorageBackend,
         run_id: &str,
         shadow_live_enabled: bool,
+        shadow_taker_enabled: bool,
         shadow_live_readiness: ShadowLiveRuntimeReadiness,
     ) -> ReplayResult<ReplayRunResult> {
         let snapshot = storage
@@ -159,6 +172,7 @@ impl ReplayEngine {
         let config = config_from_snapshot(snapshot)?;
         ReplayEngine::new(config)
             .with_shadow_live(shadow_live_enabled)
+            .with_shadow_taker(shadow_taker_enabled)
             .with_shadow_live_readiness(shadow_live_readiness)
             .replay_from_storage(storage, run_id)
     }
@@ -174,6 +188,7 @@ impl ReplayEngine {
             &self.signal_engine,
             &self.risk_engine,
             self.shadow_live_enabled,
+            self.shadow_taker_enabled,
             self.shadow_live_readiness,
         );
         replay.run(run_id, events)
@@ -310,6 +325,7 @@ struct ReplayExecution<'a> {
     signal_engine: &'a SignalEngine,
     risk_engine: &'a RiskEngine,
     shadow_live_enabled: bool,
+    shadow_taker_enabled: bool,
     shadow_live_readiness: ShadowLiveRuntimeReadiness,
     shadow_live_executor: ShadowLiveExecution,
     state: StateStore,
@@ -325,6 +341,7 @@ struct ReplayExecution<'a> {
     generated_fills: Vec<PaperFill>,
     audit_events: Vec<PaperExecutionAuditEvent>,
     shadow_live_decisions: Vec<ShadowLiveDecision>,
+    shadow_taker_decisions: Vec<LiveTakerGateDecision>,
     signals: Vec<SignalReplayRecord>,
     risk_decisions: Vec<RiskReplayRecord>,
 }
@@ -335,6 +352,7 @@ impl<'a> ReplayExecution<'a> {
         signal_engine: &'a SignalEngine,
         risk_engine: &'a RiskEngine,
         shadow_live_enabled: bool,
+        shadow_taker_enabled: bool,
         shadow_live_readiness: ShadowLiveRuntimeReadiness,
     ) -> Self {
         Self {
@@ -342,6 +360,7 @@ impl<'a> ReplayExecution<'a> {
             signal_engine,
             risk_engine,
             shadow_live_enabled,
+            shadow_taker_enabled,
             shadow_live_readiness,
             shadow_live_executor: ShadowLiveExecution::new(ShadowLiveContext::default()),
             state: StateStore::new(),
@@ -357,6 +376,7 @@ impl<'a> ReplayExecution<'a> {
             generated_fills: Vec::new(),
             audit_events: Vec::new(),
             shadow_live_decisions: Vec::new(),
+            shadow_taker_decisions: Vec::new(),
             signals: Vec::new(),
             risk_decisions: Vec::new(),
         }
@@ -413,6 +433,7 @@ impl<'a> ReplayExecution<'a> {
             position_snapshots,
             audit_events: self.audit_events,
             shadow_live_decisions: self.shadow_live_decisions,
+            shadow_taker_decisions: self.shadow_taker_decisions,
         })
     }
 
@@ -554,6 +575,7 @@ impl<'a> ReplayExecution<'a> {
         };
 
         snapshot.positions = self.position_book.position_snapshots(now_wall_ts);
+        self.record_shadow_taker_decisions(&snapshot);
         if snapshot.lifecycle_state != MarketLifecycleState::Active {
             self.record_signal(self.signal_engine.evaluate(&snapshot));
             return Ok(());
@@ -660,6 +682,64 @@ impl<'a> ReplayExecution<'a> {
             ExecutionDecision::ShadowLive(decision) => self.shadow_live_decisions.push(*decision),
             other => panic!("shadow live executor returned unexpected decision: {other:?}"),
         }
+    }
+
+    fn record_shadow_taker_decisions(&mut self, snapshot: &DecisionSnapshot) {
+        if !self.shadow_taker_enabled {
+            return;
+        }
+
+        let runtime = LiveTakerRuntimeState {
+            geoblock_passed: self.shadow_live_readiness.geoblock_passed,
+            heartbeat_healthy: self.shadow_live_readiness.heartbeat_healthy,
+            reconciliation_clean: self.shadow_live_readiness.reconciliation_clean,
+            inventory_clean: self.current_inventory_clean(snapshot),
+            baseline_ready: false,
+            live_risk_controls_passed: false,
+            existing_taker_orders_today: self.existing_taker_orders_today(),
+            existing_taker_fee_spend: self.existing_taker_fee_spend(),
+            current_total_live_notional: self.current_total_live_notional(snapshot),
+        };
+        self.shadow_taker_decisions
+            .extend(evaluate_shadow_taker_snapshot(
+                self.config,
+                snapshot,
+                runtime,
+            ));
+    }
+
+    fn existing_taker_orders_today(&self) -> u64 {
+        self.generated_orders
+            .values()
+            .filter(|order| order.order_kind == OrderKind::Taker)
+            .count() as u64
+    }
+
+    fn existing_taker_fee_spend(&self) -> f64 {
+        self.generated_fills
+            .iter()
+            .filter(|fill| fill.liquidity == OrderKind::Taker)
+            .map(|fill| fill.fee_paid)
+            .sum()
+    }
+
+    fn current_total_live_notional(&self, snapshot: &DecisionSnapshot) -> f64 {
+        snapshot
+            .positions
+            .iter()
+            .map(|position| position.size.abs() * position.average_price)
+            .sum::<f64>()
+            + self
+                .open_paper_orders()
+                .iter()
+                .map(|order| open_order_notional(order))
+                .sum::<f64>()
+    }
+
+    fn current_inventory_clean(&self, snapshot: &DecisionSnapshot) -> bool {
+        snapshot.positions.iter().all(|position| {
+            position.size.abs() <= f64::EPSILON && position.average_price.abs() <= f64::EPSILON
+        })
     }
 
     fn execution_intent_from_paper_intent(
@@ -1437,6 +1517,40 @@ mod tests {
             report.decision_count,
             shadow.shadow_live_decisions.len() as u64
         );
+    }
+
+    #[test]
+    fn shadow_taker_replay_records_gate_decisions_without_changing_paper_outputs() {
+        let config = config();
+        let events = synthetic_events();
+
+        let baseline = ReplayEngine::new(config.clone())
+            .replay_events(RUN_ID, events.clone())
+            .expect("baseline replay succeeds");
+        let shadow = ReplayEngine::new(config)
+            .with_shadow_taker(true)
+            .replay_events(RUN_ID, events)
+            .expect("shadow taker replay succeeds");
+
+        assert_eq!(baseline.generated_orders, shadow.generated_orders);
+        assert_eq!(baseline.generated_fills, shadow.generated_fills);
+        assert_eq!(
+            baseline.generated_paper_events,
+            shadow.generated_paper_events
+        );
+        assert!(!shadow.shadow_taker_decisions.is_empty());
+        assert!(shadow.shadow_taker_decisions.iter().all(|decision| {
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason == "taker_disabled")
+        }));
+        assert!(shadow.shadow_taker_decisions.iter().all(|decision| {
+            decision
+                .reason_codes
+                .iter()
+                .any(|reason| reason == "baseline_not_ready")
+        }));
     }
 
     #[test]

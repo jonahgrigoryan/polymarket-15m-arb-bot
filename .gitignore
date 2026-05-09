@@ -19,3 +19,6 @@ node_modules/
 
 # Cursor — project rules stay on your machine for agent chat; not tracked in git
 .cursor/rules/
+
+# Codex local workspace files
+.codex/

@@ -74,6 +74,9 @@ leave_open_in_no_trade_window = false
 
 [live_alpha.taker]
 enabled = false
+baseline_id = ""
+baseline_capture_run_id = ""
+baseline_artifact_path = ""
 max_notional = 0.0
 min_ev_after_all_costs_bps = 0
 max_slippage_bps = 0

@@ -673,6 +673,7 @@ impl ReadOnlyClobReadbackClient {
             .header("POLY_TIMESTAMP", timestamp.to_string())
             .header("POLY_API_KEY", &self.credentials.api_key)
             .header("POLY_PASSPHRASE", &self.credentials.api_passphrase)
+            .header("Accept-Encoding", "identity")
             .send()
             .await
             .map_err(|source| {
