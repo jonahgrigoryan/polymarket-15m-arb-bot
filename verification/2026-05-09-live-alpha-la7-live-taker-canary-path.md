@@ -388,6 +388,31 @@ cargo test --offline live_taker_gate
 
 No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
 
+## 2026-05-09 Third PR Review Follow-Up
+
+Two additional P1 findings were accepted and fixed narrowly:
+
+- If SDK submit succeeds but the post-submit cap update fails, `src/main.rs` now still writes `live_alpha_taker_canary_live_report.json` with the submission details, `status=submitted_cap_update_blocked`, `cap_update_error`, post-submit evidence when available, and fail-closed cap-update/post-submit block reasons. The pre-submit cap remains consumed and no retry path is introduced.
+- LA7 snapshot freshness is now aged at the final pre-submit decision point after book/reference/predictive probes complete. Book age is recomputed from the book `source_ts`, and reference/predictive age is recomputed from the preserved evidence `source_ts`, so slow probes cannot pass stale evidence against an older gate timestamp.
+
+Focused verification added and passed:
+
+```bash
+cargo fmt --check
+cargo test --offline la7_cap_update_error_still_builds_fail_closed_report_state
+cargo test --offline la7_price_evidence_age_is_recomputed_at_decision_time
+cargo test --offline la7_post_submit
+cargo test --offline live_taker_gate
+cargo test --offline live_alpha_taker_canary
+cargo test --offline live_alpha_taker_live_review
+cargo test --offline
+cargo clippy --offline -- -D warnings
+git diff --check
+scripts/verify-pr.sh
+```
+
+No live command, `--human-approved` command, second canary, cap reset, LA8 work, or broader taker enablement was run for this review follow-up.
+
 ## 2026-05-09 Second PR Review Follow-Up
 
 Two additional P1 findings were accepted and fixed narrowly:

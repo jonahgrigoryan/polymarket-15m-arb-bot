@@ -7588,14 +7588,56 @@ async fn fetch_live_alpha_book(
 
 struct LiveAlphaReferenceEvidence {
     snapshot_id: Option<String>,
+    source_ts: Option<i64>,
     age_ms: Option<u64>,
     price: Option<f64>,
 }
 
 struct LiveAlphaPredictiveEvidence {
     snapshot_id: Option<String>,
+    source_ts: Option<i64>,
     age_ms: Option<u64>,
     price: Option<f64>,
+}
+
+fn live_alpha_evidence_age_at(
+    source_ts: Option<i64>,
+    fallback_age_ms: Option<u64>,
+    now_ms: i64,
+) -> Option<u64> {
+    source_ts
+        .and_then(|source_ts| age_ms(now_ms, source_ts))
+        .or(fallback_age_ms)
+}
+
+impl LiveAlphaReferenceEvidence {
+    fn missing() -> Self {
+        Self {
+            snapshot_id: None,
+            source_ts: None,
+            age_ms: None,
+            price: None,
+        }
+    }
+
+    fn age_at(&self, now_ms: i64) -> Option<u64> {
+        live_alpha_evidence_age_at(self.source_ts, self.age_ms, now_ms)
+    }
+}
+
+impl LiveAlphaPredictiveEvidence {
+    fn missing() -> Self {
+        Self {
+            snapshot_id: None,
+            source_ts: None,
+            age_ms: None,
+            price: None,
+        }
+    }
+
+    fn age_at(&self, now_ms: i64) -> Option<u64> {
+        live_alpha_evidence_age_at(self.source_ts, self.age_ms, now_ms)
+    }
 }
 
 async fn live_alpha_predictive_evidence(
@@ -7690,6 +7732,7 @@ fn live_alpha_predictive_evidence_from_events(
     else {
         return LiveAlphaPredictiveEvidence {
             snapshot_id: None,
+            source_ts: None,
             age_ms: None,
             price: None,
         };
@@ -7702,6 +7745,7 @@ fn live_alpha_predictive_evidence_from_events(
             price.provider.unwrap_or_else(|| "unknown".to_string()),
             source_ts
         )),
+        source_ts: Some(source_ts),
         age_ms: age_ms(price.recv_wall_ts, source_ts),
         price: Some(price.price),
     }
@@ -7718,6 +7762,7 @@ async fn live_alpha_reference_evidence(
     if !config.reference_feed.is_pyth_proxy_enabled() {
         return Ok(LiveAlphaReferenceEvidence {
             snapshot_id: None,
+            source_ts: None,
             age_ms: None,
             price: None,
         });
@@ -7772,6 +7817,7 @@ async fn live_alpha_rtds_chainlink_reference_evidence(
 
     Ok(LiveAlphaReferenceEvidence {
         snapshot_id: None,
+        source_ts: None,
         age_ms: None,
         price: None,
     })
@@ -7787,6 +7833,7 @@ fn live_alpha_reference_evidence_from_events(
     }) else {
         return LiveAlphaReferenceEvidence {
             snapshot_id: None,
+            source_ts: None,
             age_ms: None,
             price: None,
         };
@@ -7799,6 +7846,7 @@ fn live_alpha_reference_evidence_from_events(
             price.provider.unwrap_or_else(|| "unknown".to_string()),
             source_ts
         )),
+        source_ts: Some(source_ts),
         age_ms: age_ms(price.recv_wall_ts, source_ts),
         price: Some(price.price),
     }
@@ -8176,6 +8224,7 @@ struct LiveAlphaTakerCanaryLiveReport {
     pre_submit_report: LiveAlphaTakerCanaryDryRunReport,
     submission: Option<LiveTakerSubmissionReport>,
     submit_error: Option<String>,
+    cap_update_error: Option<String>,
     post_submit_readback_status: Option<String>,
     post_submit_open_order_count: Option<usize>,
     post_submit_reserved_pusd_units: Option<u64>,
@@ -8212,6 +8261,7 @@ struct LiveAlphaTakerCanaryCommandArgs {
 }
 
 struct LiveAlphaTakerCanarySnapshotEvidence {
+    checked_at_ms: i64,
     market: LiveAlphaTakerCanaryMarketEvidence,
     reference: LiveAlphaTakerCanaryPriceEvidence,
     predictive: LiveAlphaTakerCanaryPriceEvidence,
@@ -8399,7 +8449,7 @@ async fn evaluate_live_alpha_taker_canary_dry_run(
         block_reasons.extend(validate_la7_taker_decision_against_approval(
             decision,
             &approval,
-            checked_at_ms,
+            snapshot_evidence.checked_at_ms,
             snapshot_evidence.market.market_end_unix,
         ));
         if !decision.live_allowed {
@@ -8630,6 +8680,7 @@ async fn run_live_alpha_taker_canary_human_approved(
                 pre_submit_report: pre_submit_report.clone(),
                 submission: None,
                 submit_error: Some(submit_error.clone()),
+                cap_update_error: None,
                 post_submit_readback_status: post_submit.post_submit_readback_status,
                 post_submit_open_order_count: post_submit.post_submit_open_order_count,
                 post_submit_reserved_pusd_units: post_submit.post_submit_reserved_pusd_units,
@@ -8650,14 +8701,57 @@ async fn run_live_alpha_taker_canary_human_approved(
             .into());
         }
     };
-    update_la7_taker_cap_after_submit(
+    if let Err(error) = update_la7_taker_cap_after_submit(
         order_cap_state,
         approval_id,
         &approval_artifact_sha256,
         approval_artifact,
         &dry_run_evidence,
         &submission,
-    )?;
+    ) {
+        let cap_update_error = error.to_string();
+        let post_submit =
+            match build_la7_taker_post_submit_report(config, run_id, &live_approval, &submission)
+                .await
+            {
+                Ok(post_submit) => post_submit,
+                Err(error) => la7_post_submit_evidence_from_error(error.as_ref()),
+            };
+        let post_submit =
+            la7_post_submit_evidence_with_cap_update_error(post_submit, error.as_ref());
+        let block_reasons = la7_live_post_submit_block_reasons(&post_submit);
+        let live_report = LiveAlphaTakerCanaryLiveReport {
+            schema_version: "la7_taker_canary_live_v1",
+            run_id: run_id.to_string(),
+            status: "submitted_cap_update_blocked".to_string(),
+            block_reasons: block_reasons.clone(),
+            approval: live_approval.clone(),
+            approval_artifact_path: approval_artifact.display().to_string(),
+            approval_artifact_sha256: approval_artifact_sha256.clone(),
+            dry_run_evidence: dry_run_evidence.clone(),
+            order_cap_state_path: order_cap_state.display().to_string(),
+            pre_submit_report: pre_submit_report.clone(),
+            submission: Some(submission.clone()),
+            submit_error: None,
+            cap_update_error: Some(cap_update_error.clone()),
+            post_submit_readback_status: post_submit.post_submit_readback_status,
+            post_submit_open_order_count: post_submit.post_submit_open_order_count,
+            post_submit_reserved_pusd_units: post_submit.post_submit_reserved_pusd_units,
+            post_submit_position_count: post_submit.post_submit_position_count,
+            post_submit_reconciliation_status: post_submit.post_submit_reconciliation_status,
+            post_submit_reconciliation_mismatches: post_submit
+                .post_submit_reconciliation_mismatches,
+            no_batch_orders: true,
+            no_fok_or_fak: !LA7_TAKER_CANARY_FOK_OR_FAK,
+            no_resting_gtc_remainder: true,
+            no_cancel_all: true,
+            no_retry_after_ambiguous_submit: true,
+        };
+        persist_la7_taker_live_report(config, run_id, order_cap_state, &live_report)?;
+        return Err(
+            format!("LA7 taker live cap update failed after submit: {cap_update_error}").into(),
+        );
+    }
 
     let post_submit =
         match build_la7_taker_post_submit_report(config, run_id, &live_approval, &submission).await
@@ -8685,6 +8779,7 @@ async fn run_live_alpha_taker_canary_human_approved(
         pre_submit_report,
         submission: Some(submission),
         submit_error: None,
+        cap_update_error: None,
         post_submit_readback_status: post_submit.post_submit_readback_status,
         post_submit_open_order_count: post_submit.post_submit_open_order_count,
         post_submit_reserved_pusd_units: post_submit.post_submit_reserved_pusd_units,
@@ -8870,7 +8965,7 @@ async fn build_live_alpha_taker_canary_gate_report(
         block_reasons.extend(validate_la7_taker_decision_against_approval(
             decision,
             approval,
-            checked_at_ms,
+            snapshot_evidence.checked_at_ms,
             snapshot_evidence.market.market_end_unix,
         ));
         if !decision.live_allowed {
@@ -9225,6 +9320,21 @@ fn la7_post_submit_evidence_from_submit_error(
     }
 }
 
+fn la7_post_submit_evidence_with_cap_update_error(
+    mut evidence: LiveAlphaTakerCanaryPostSubmitEvidence,
+    error: &dyn fmt::Display,
+) -> LiveAlphaTakerCanaryPostSubmitEvidence {
+    evidence.post_submit_reconciliation_status = Some("halt_required".to_string());
+    evidence
+        .post_submit_reconciliation_mismatches
+        .push(format!("cap_update_error:{error}"));
+    evidence
+        .post_submit_reconciliation_mismatches
+        .sort_unstable();
+    evidence.post_submit_reconciliation_mismatches.dedup();
+    evidence
+}
+
 fn la7_live_post_submit_block_reasons(
     post_submit: &LiveAlphaTakerCanaryPostSubmitEvidence,
 ) -> Vec<String> {
@@ -9258,6 +9368,13 @@ fn la7_live_post_submit_block_reasons(
         .any(|mismatch| mismatch.starts_with("submit_error:"))
     {
         block_reasons.push("submit_error".to_string());
+    }
+    if post_submit
+        .post_submit_reconciliation_mismatches
+        .iter()
+        .any(|mismatch| mismatch.starts_with("cap_update_error:"))
+    {
+        block_reasons.push("cap_update_error".to_string());
     }
     block_reasons.sort_unstable();
     block_reasons.dedup();
@@ -9681,7 +9798,7 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     config: &AppConfig,
     run_id: &str,
     approval: &LiveTakerCanaryApprovalFields,
-    now_ms: i64,
+    _now_ms: i64,
 ) -> Result<LiveAlphaTakerCanarySnapshotEvidence, Box<dyn std::error::Error>> {
     let mut block_reasons = Vec::new();
     let max_book_age_ms = stricter_positive_u64_main(
@@ -9704,6 +9821,7 @@ async fn live_alpha_taker_canary_snapshot_evidence(
         .await?;
     let Some(market) = market else {
         return Ok(LiveAlphaTakerCanarySnapshotEvidence {
+            checked_at_ms: unix_time_ms(),
             market: LiveAlphaTakerCanaryMarketEvidence::missing(),
             reference: LiveAlphaTakerCanaryPriceEvidence::missing(),
             predictive: LiveAlphaTakerCanaryPriceEvidence::missing(),
@@ -9737,10 +9855,6 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     }
 
     let book = fetch_live_alpha_book(config, &approval.token_id).await?;
-    let book_age_ms = book
-        .as_ref()
-        .and_then(|book| book.source_ts)
-        .and_then(|source_ts| age_ms(now_ms, source_ts));
     let (best_bid, best_bid_size) = book
         .as_ref()
         .and_then(best_bid_level)
@@ -9752,11 +9866,6 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     if book.is_none() {
         block_reasons.push("book_missing".to_string());
     }
-    if book.is_some() {
-        if let Some(reason) = la7_evidence_age_block_reason("book", book_age_ms, max_book_age_ms) {
-            block_reasons.push(reason);
-        }
-    }
     if best_bid.is_none() {
         block_reasons.push("book_best_bid_missing".to_string());
     }
@@ -9765,12 +9874,33 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     }
 
     let reference = match live_alpha_reference_evidence(config, market.asset).await {
-        Ok(evidence) => LiveAlphaTakerCanaryPriceEvidence::from_reference(evidence),
+        Ok(evidence) => evidence,
         Err(error) => {
             block_reasons.push(format!("reference_evidence_error:{error}"));
-            LiveAlphaTakerCanaryPriceEvidence::missing()
+            LiveAlphaReferenceEvidence::missing()
         }
     };
+    let predictive = match live_alpha_predictive_evidence(config, market.asset).await {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            block_reasons.push(format!("predictive_evidence_error:{error}"));
+            LiveAlphaPredictiveEvidence::missing()
+        }
+    };
+
+    let evidence_checked_at_ms = unix_time_ms();
+    let book_age_ms = book
+        .as_ref()
+        .and_then(|book| book.source_ts)
+        .and_then(|source_ts| age_ms(evidence_checked_at_ms, source_ts));
+    if book.is_some() {
+        if let Some(reason) = la7_evidence_age_block_reason("book", book_age_ms, max_book_age_ms) {
+            block_reasons.push(reason);
+        }
+    }
+
+    let reference =
+        LiveAlphaTakerCanaryPriceEvidence::from_reference_at(reference, evidence_checked_at_ms);
     if reference.price.is_none() {
         block_reasons.push("reference_price_missing".to_string());
     } else if let Some(reason) =
@@ -9779,13 +9909,8 @@ async fn live_alpha_taker_canary_snapshot_evidence(
         block_reasons.push(reason);
     }
 
-    let predictive = match live_alpha_predictive_evidence(config, market.asset).await {
-        Ok(evidence) => LiveAlphaTakerCanaryPriceEvidence::from_predictive(evidence),
-        Err(error) => {
-            block_reasons.push(format!("predictive_evidence_error:{error}"));
-            LiveAlphaTakerCanaryPriceEvidence::missing()
-        }
-    };
+    let predictive =
+        LiveAlphaTakerCanaryPriceEvidence::from_predictive_at(predictive, evidence_checked_at_ms);
     if predictive.price.is_none() {
         block_reasons.push("predictive_price_missing".to_string());
     } else if let Some(reason) =
@@ -9798,7 +9923,7 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     apply_taker_canary_event(
         &mut store,
         run_id,
-        now_ms,
+        evidence_checked_at_ms,
         0,
         NormalizedEvent::MarketDiscovered {
             market: market.clone(),
@@ -9808,14 +9933,15 @@ async fn live_alpha_taker_canary_snapshot_evidence(
         apply_taker_canary_event(
             &mut store,
             run_id,
-            la7_book_evidence_recv_wall_ts(now_ms, book),
+            la7_book_evidence_recv_wall_ts(evidence_checked_at_ms, book),
             1,
             NormalizedEvent::BookSnapshot { book: book.clone() },
         )?;
     }
     if let Some(reference_price) = reference.price {
-        let source_ts = price_source_ts(now_ms, reference.age_ms);
-        let recv_wall_ts = la7_price_evidence_recv_wall_ts(now_ms, reference.age_ms);
+        let source_ts = price_source_ts(evidence_checked_at_ms, reference.age_ms);
+        let recv_wall_ts =
+            la7_price_evidence_recv_wall_ts(evidence_checked_at_ms, reference.age_ms);
         apply_taker_canary_event(
             &mut store,
             run_id,
@@ -9839,8 +9965,9 @@ async fn live_alpha_taker_canary_snapshot_evidence(
         )?;
     }
     if let Some(predictive_price) = predictive.price {
-        let source_ts = price_source_ts(now_ms, predictive.age_ms);
-        let recv_wall_ts = la7_price_evidence_recv_wall_ts(now_ms, predictive.age_ms);
+        let source_ts = price_source_ts(evidence_checked_at_ms, predictive.age_ms);
+        let recv_wall_ts =
+            la7_price_evidence_recv_wall_ts(evidence_checked_at_ms, predictive.age_ms);
         apply_taker_canary_event(
             &mut store,
             run_id,
@@ -9863,7 +9990,7 @@ async fn live_alpha_taker_canary_snapshot_evidence(
 
     let snapshot = store.decision_snapshot(
         &market.market_id,
-        now_ms,
+        evidence_checked_at_ms,
         stricter_positive_u64_main(
             config.live_alpha.risk.max_book_staleness_ms,
             config.risk.stale_book_ms,
@@ -9878,6 +10005,7 @@ async fn live_alpha_taker_canary_snapshot_evidence(
     }
 
     Ok(LiveAlphaTakerCanarySnapshotEvidence {
+        checked_at_ms: evidence_checked_at_ms,
         market: LiveAlphaTakerCanaryMarketEvidence {
             market_found: true,
             market_active: market.lifecycle_state == MarketLifecycleState::Active,
@@ -10120,18 +10248,20 @@ impl LiveAlphaTakerCanaryPriceEvidence {
         }
     }
 
-    fn from_reference(evidence: LiveAlphaReferenceEvidence) -> Self {
+    fn from_reference_at(evidence: LiveAlphaReferenceEvidence, now_ms: i64) -> Self {
+        let age_ms = evidence.age_at(now_ms);
         Self {
             snapshot_id: evidence.snapshot_id,
-            age_ms: evidence.age_ms,
+            age_ms,
             price: evidence.price,
         }
     }
 
-    fn from_predictive(evidence: LiveAlphaPredictiveEvidence) -> Self {
+    fn from_predictive_at(evidence: LiveAlphaPredictiveEvidence, now_ms: i64) -> Self {
+        let age_ms = evidence.age_at(now_ms);
         Self {
             snapshot_id: evidence.snapshot_id,
-            age_ms: evidence.age_ms,
+            age_ms,
             price: evidence.price,
         }
     }
@@ -12328,6 +12458,61 @@ mod tests {
     }
 
     #[test]
+    fn la7_cap_update_error_still_builds_fail_closed_report_state() {
+        let error = std::io::Error::new(ErrorKind::PermissionDenied, "cap write denied");
+        let passed = LiveAlphaTakerCanaryPostSubmitEvidence {
+            post_submit_readback_status: Some("passed".to_string()),
+            post_submit_open_order_count: Some(0),
+            post_submit_reserved_pusd_units: Some(0),
+            post_submit_position_count: Some(0),
+            post_submit_reconciliation_status: Some("passed".to_string()),
+            post_submit_reconciliation_mismatches: Vec::new(),
+        };
+        let evidence = la7_post_submit_evidence_with_cap_update_error(passed, &error);
+        let block_reasons = la7_live_post_submit_block_reasons(&evidence);
+
+        assert_eq!(
+            evidence.post_submit_readback_status.as_deref(),
+            Some("passed")
+        );
+        assert_eq!(
+            evidence.post_submit_reconciliation_status.as_deref(),
+            Some("halt_required")
+        );
+        assert_eq!(evidence.post_submit_open_order_count, Some(0));
+        assert_eq!(evidence.post_submit_reserved_pusd_units, Some(0));
+        assert!(evidence
+            .post_submit_reconciliation_mismatches
+            .contains(&"cap_update_error:cap write denied".to_string()));
+        assert!(block_reasons.contains(&"cap_update_error".to_string()));
+        assert!(block_reasons.contains(&"post_submit_reconciliation_not_passed".to_string()));
+        assert!(!block_reasons.contains(&"post_submit_readback_not_passed".to_string()));
+        assert!(!block_reasons.contains(&"post_submit_open_orders_unknown".to_string()));
+        assert!(!block_reasons.contains(&"post_submit_reserved_pusd_unknown".to_string()));
+    }
+
+    #[test]
+    fn la7_price_evidence_age_is_recomputed_at_decision_time() {
+        let source_ts = 1_777_000_000_000;
+        let recv_wall_ts = source_ts + 100;
+        let decision_ts = source_ts + 900;
+        let evidence = LiveAlphaReferenceEvidence {
+            snapshot_id: Some("chainlink:test:1777000000000".to_string()),
+            source_ts: Some(source_ts),
+            age_ms: age_ms(recv_wall_ts, source_ts),
+            price: Some(100.0),
+        };
+        let report_evidence =
+            LiveAlphaTakerCanaryPriceEvidence::from_reference_at(evidence, decision_ts);
+
+        assert_eq!(report_evidence.age_ms, Some(900));
+        assert_eq!(
+            la7_evidence_age_block_reason("reference", report_evidence.age_ms, 500).as_deref(),
+            Some("reference_stale")
+        );
+    }
+
+    #[test]
     fn la7_taker_canary_freshness_uses_evidence_age_not_capture_time() {
         let now_ms = 1_777_000_000_000;
         let stale_age_ms = 750;
@@ -14117,11 +14302,13 @@ Status: LA5 APPROVED FOR THIS RUN ONLY
     fn la5_predictive_evidence_falls_through_stale_first_feed() {
         let stale_binance = LiveAlphaPredictiveEvidence {
             snapshot_id: Some("binance:unknown:1".to_string()),
+            source_ts: None,
             age_ms: Some(5_001),
             price: Some(99_000.0),
         };
         let fresh_coinbase = LiveAlphaPredictiveEvidence {
             snapshot_id: Some("coinbase:unknown:2".to_string()),
+            source_ts: None,
             age_ms: Some(100),
             price: Some(100_000.0),
         };
