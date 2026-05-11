@@ -66,7 +66,7 @@ live_alpha_scale_report_status=ok
 live_alpha_scale_report_from=2026-04-29
 live_alpha_scale_report_to=2026-05-09
 live_alpha_scale_report_decision=NO-GO: lifecycle unsafe
-live_alpha_scale_report_evidence_count=11
+live_alpha_scale_report_evidence_count=12
 live_alpha_scale_report_missing_evidence_count=0
 ```
 
@@ -74,7 +74,7 @@ Machine-readable summary from the command:
 
 - Paper evidence: `6` paper orders, `6` paper fills, all taker fills, filled notional `3.468000`, fees `0.226100`, total pre-settlement P&L `-0.472100`, post-settlement P&L `-3.694100`.
 - Paper P&L by asset: BTC `-0.181216`, ETH `-0.149084`, SOL `-0.141800`.
-- Live machine-readable evidence: `5` orders, `2` matched taker fills, `3` maker orders, `3` maker final canceled statuses, `0` maker fills.
+- Live machine-readable evidence: `8` orders, `2` matched taker fills, `6` maker orders, `6` live cancellations / maker final canceled statuses, `0` maker fills.
 - LA7 machine-readable post-submit mismatches: `3`.
 - LA7/local report halt or blocked statuses: `2`.
 - Shadow taker aggregate from local reports: `1204` evaluations, `0` would-take, `0` live-allowed.
@@ -112,7 +112,8 @@ Live Alpha known and bounded results:
   - Fees: `0`.
   - Realized/unrealized P&L: `0`.
 - LA6 quote manager:
-  - Maker quote placed: `1`.
+  - Maker quotes recorded in the LA6 quote-manager journal: `3` total `quote_placed` events across the supported LA8 evidence window.
+  - Final approved run maker quote placed: `1`.
   - Exact-order-ID cancel confirmed: `1`.
   - Replacements: `0`.
   - Fills: `0`.
@@ -215,6 +216,16 @@ cargo run --offline -- live-alpha-scale-report --from 2026-04-29 --to 2026-05-09
 ```
 
 Result: passed. The command still returned `live_alpha_scale_report_decision=NO-GO: lifecycle unsafe` for current evidence.
+
+Follow-up focused checks after the PR #41 review fix for LA6 journal aggregation and canceled-maker cancel counting:
+
+```text
+cargo fmt --check
+cargo test --offline live_alpha_report
+cargo run --offline -- live-alpha-scale-report --from 2026-04-29 --to 2026-05-09
+```
+
+Result: passed. The command still returned `live_alpha_scale_report_decision=NO-GO: lifecycle unsafe` for current evidence, with `live_alpha_scale_report_evidence_count=12`, `live_alpha_scale_report_missing_evidence_count=0`, `live.cancel_count=6`, and `live.maker_final_canceled_count=6`.
 
 Additional LA8 scope scans were run against source, config, runbooks, docs, and verification text:
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -179,6 +179,14 @@ pub fn build_live_alpha_scale_report(
         apply_la5_journal(&mut live, &la5_journal_path)?;
     } else {
         missing_evidence_paths.push(path_string(&la5_journal_path));
+    }
+
+    let la6_journal_path = reports_root.join("live-alpha-la6-quote-manager-journal.jsonl");
+    if la6_journal_path.exists() {
+        evidence_paths.push(path_string(&la6_journal_path));
+        apply_la6_journal(&mut live, &la6_journal_path)?;
+    } else {
+        missing_evidence_paths.push(path_string(&la6_journal_path));
     }
 
     for live_report_path in
@@ -405,6 +413,7 @@ fn apply_la5_journal(
                         }
                         if json_str(order, &["final_status"]) == Some("CANCELED") {
                             summary.maker_final_canceled_count += 1;
+                            summary.cancel_count += 1;
                         }
                     }
                 }
@@ -413,6 +422,90 @@ fn apply_la5_journal(
         }
     }
     Ok(())
+}
+
+fn apply_la6_journal(
+    summary: &mut LiveScaleSummary,
+    path: &Path,
+) -> Result<(), LiveAlphaReportError> {
+    let mut canceled_order_ids = BTreeSet::new();
+    for event in read_jsonl(path)? {
+        match json_str(&event, &["event_type"]) {
+            Some("quote_placed") => {
+                summary.order_count += 1;
+                summary.maker_order_count += 1;
+            }
+            Some("quote_cancel_confirmed") | Some("quote_expired") => {
+                record_maker_cancel(
+                    summary,
+                    &mut canceled_order_ids,
+                    json_str(&event, &["payload", "order_id"]),
+                );
+            }
+            Some("quote_replacement_submitted") => {
+                summary.replacement_count += 1;
+            }
+            Some("quote_reconciliation_result") => {
+                if let Some(status) = json_str(&event, &["payload", "status"]) {
+                    if status != "passed" {
+                        summary.halt_count += 1;
+                    }
+                }
+                summary.reconciliation_mismatch_count +=
+                    json_mismatch_count(&event, &["payload", "mismatches"]);
+            }
+            Some("quote_manager_stopped") => {
+                if let Some(status) = json_str(&event, &["payload", "status"]) {
+                    if status != "completed" {
+                        summary.halt_count += 1;
+                    }
+                }
+                if let Some(outcome) = value_at(&event, &["payload", "outcome"]) {
+                    if json_bool(outcome, &["filled"]).unwrap_or(false)
+                        || json_array(outcome, &["trade_ids"])
+                            .map(|trade_ids| !trade_ids.is_empty())
+                            .unwrap_or(false)
+                    {
+                        summary.fill_count += 1;
+                        summary.maker_fill_count += 1;
+                    }
+                    if json_str(outcome, &["final_status"]) == Some("CANCELED") {
+                        record_maker_cancel(
+                            summary,
+                            &mut canceled_order_ids,
+                            json_str(outcome, &["order_id"]),
+                        );
+                    }
+                    if let Some(status) = json_str(outcome, &["reconciliation_status"]) {
+                        if status != "passed" {
+                            summary.halt_count += 1;
+                            summary.reconciliation_mismatch_count +=
+                                json_mismatch_count(outcome, &["reconciliation_mismatches"]);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn record_maker_cancel(
+    summary: &mut LiveScaleSummary,
+    canceled_order_ids: &mut BTreeSet<String>,
+    order_id: Option<&str>,
+) {
+    if let Some(order_id) = order_id
+        .map(str::trim)
+        .filter(|order_id| !order_id.is_empty())
+    {
+        if !canceled_order_ids.insert(order_id.to_ascii_lowercase()) {
+            return;
+        }
+    }
+    summary.cancel_count += 1;
+    summary.maker_final_canceled_count += 1;
 }
 
 fn apply_la7_live_report(summary: &mut LiveScaleSummary, report: &Value) {
@@ -574,6 +667,17 @@ fn json_array<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Vec<Value>> {
     value_at(value, path).and_then(Value::as_array)
 }
 
+fn json_mismatch_count(value: &Value, path: &[&str]) -> u64 {
+    match value_at(value, path) {
+        Some(Value::Array(mismatches)) => mismatches.len() as u64,
+        Some(Value::String(mismatches)) => mismatches
+            .split(',')
+            .filter(|mismatch| !mismatch.trim().is_empty())
+            .count() as u64,
+        _ => 0,
+    }
+}
+
 fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -688,14 +792,27 @@ mod tests {
 "#,
         )
         .unwrap();
+        fs::write(
+            reports_root.join("live-alpha-la6-quote-manager-journal.jsonl"),
+            r#"{"event_type":"quote_placed","payload":{"order_id":"0xabc","status":"LIVE","trade_ids":[]}}
+{"event_type":"quote_replacement_submitted","payload":{"order_id":"0xdef"}}
+{"event_type":"quote_cancel_confirmed","payload":{"order_id":"0xabc"}}
+{"event_type":"quote_manager_stopped","payload":{"status":"completed","outcome":{"order_id":"0xabc","final_status":"CANCELED","filled":false,"trade_ids":[],"reconciliation_status":"passed","reconciliation_mismatches":""}}}
+"#,
+        )
+        .unwrap();
 
         let report =
             build_live_alpha_scale_report("2026-04-29", "2026-05-09", &reports_root).unwrap();
 
+        assert!(report.missing_evidence_paths.is_empty());
         assert_eq!(report.paper.fill_count, 2);
         assert_eq!(report.paper.taker_fill_count, 1);
         assert_eq!(report.live.taker_fill_count, 2);
-        assert_eq!(report.live.maker_order_count, 1);
+        assert_eq!(report.live.maker_order_count, 2);
+        assert_eq!(report.live.cancel_count, 2);
+        assert_eq!(report.live.maker_final_canceled_count, 2);
+        assert_eq!(report.live.replacement_count, 1);
         assert_eq!(report.live.reconciliation_mismatch_count, 2);
         assert!(report.live.la7_cap_consumed);
         assert_eq!(report.recommendation.decision, "NO-GO: lifecycle unsafe");
@@ -704,6 +821,57 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("negative")));
+
+        let _ = fs::remove_dir_all(reports_root);
+    }
+
+    #[test]
+    fn live_alpha_report_counts_la5_canceled_finals_in_live_cancel_total() {
+        let reports_root = unique_reports_root("la5_canceled_finals");
+        fs::create_dir_all(&reports_root).unwrap();
+        let journal_path = reports_root.join("live-alpha-la5-maker-micro-journal.jsonl");
+        fs::write(
+            &journal_path,
+            r#"{"event_type":"maker_micro_stopped","payload":{"orders":[{"final_status":"CANCELED","filled":false},{"final_status":"CANCELED","filled":false},{"final_status":"LIVE","filled":false}]}}
+"#,
+        )
+        .unwrap();
+        let mut live = LiveScaleSummary::default();
+
+        apply_la5_journal(&mut live, &journal_path).unwrap();
+
+        assert_eq!(live.cancel_count, 2);
+        assert_eq!(live.maker_final_canceled_count, 2);
+
+        let _ = fs::remove_dir_all(reports_root);
+    }
+
+    #[test]
+    fn live_alpha_report_counts_la6_quote_manager_lifecycle() {
+        let reports_root = unique_reports_root("la6_quote_manager");
+        fs::create_dir_all(&reports_root).unwrap();
+        let journal_path = reports_root.join("live-alpha-la6-quote-manager-journal.jsonl");
+        fs::write(
+            &journal_path,
+            r#"{"event_type":"quote_placed","payload":{"order_id":"0xabc","status":"LIVE","trade_ids":[]}}
+{"event_type":"quote_replacement_submitted","payload":{"order_id":"0xdef"}}
+{"event_type":"quote_cancel_confirmed","payload":{"order_id":"0xabc"}}
+{"event_type":"quote_reconciliation_result","payload":{"status":"failed","mismatches":"unexpected_fill,nonterminal_venue_trade_status"}}
+{"event_type":"quote_manager_stopped","payload":{"status":"completed","outcome":{"order_id":"0xabc","final_status":"CANCELED","filled":false,"trade_ids":[],"reconciliation_status":"passed","reconciliation_mismatches":""}}}
+"#,
+        )
+        .unwrap();
+        let mut live = LiveScaleSummary::default();
+
+        apply_la6_journal(&mut live, &journal_path).unwrap();
+
+        assert_eq!(live.order_count, 1);
+        assert_eq!(live.maker_order_count, 1);
+        assert_eq!(live.cancel_count, 1);
+        assert_eq!(live.maker_final_canceled_count, 1);
+        assert_eq!(live.replacement_count, 1);
+        assert_eq!(live.reconciliation_mismatch_count, 2);
+        assert_eq!(live.halt_count, 1);
 
         let _ = fs::remove_dir_all(reports_root);
     }
