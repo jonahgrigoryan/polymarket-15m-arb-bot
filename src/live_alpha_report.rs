@@ -9,6 +9,8 @@ use serde_json::Value;
 
 pub const MODULE: &str = "live_alpha_report";
 pub const SCALE_REPORT_SCHEMA_VERSION: &str = "live_alpha_scale_report_v1";
+pub const SUPPORTED_SCALE_REPORT_FROM: &str = "2026-04-29";
+pub const SUPPORTED_SCALE_REPORT_TO: &str = "2026-05-09";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveAlphaScaleReport {
@@ -131,6 +133,8 @@ pub fn build_live_alpha_scale_report(
     to: &str,
     reports_root: &Path,
 ) -> Result<LiveAlphaScaleReport, LiveAlphaReportError> {
+    validate_supported_period(from, to)?;
+
     let mut evidence_paths = Vec::new();
     let mut missing_evidence_paths = Vec::new();
     let mut paper = PaperScaleSummary::default();
@@ -233,6 +237,16 @@ pub fn build_live_alpha_scale_report(
         paper_live_comparison,
         recommendation,
     })
+}
+
+fn validate_supported_period(from: &str, to: &str) -> Result<(), LiveAlphaReportError> {
+    if from == SUPPORTED_SCALE_REPORT_FROM && to == SUPPORTED_SCALE_REPORT_TO {
+        return Ok(());
+    }
+
+    Err(LiveAlphaReportError::new(format!(
+        "unsupported LA8 scale report period: from={from}, to={to}; supported period is {SUPPORTED_SCALE_REPORT_FROM} to {SUPPORTED_SCALE_REPORT_TO}"
+    )))
 }
 
 fn recommend(
@@ -470,7 +484,7 @@ fn apply_shadow_taker_report(summary: &mut LiveScaleSummary, report: &Value) {
     summary.shadow_taker_would_take_count += json_u64(report, &["would_take_count"]).unwrap_or(0);
     summary.shadow_taker_live_allowed_count +=
         json_u64(report, &["live_allowed_count"]).unwrap_or(0);
-    summary.estimated_fees_paid += json_f64(report, &["estimated_fee"]).unwrap_or(0.0);
+    summary.estimated_fees_paid += json_f64(report, &["estimated_taker_fee"]).unwrap_or(0.0);
 }
 
 fn collect_total_pnl_map(report: &Value, path: &[&str], output: &mut BTreeMap<String, f64>) {
@@ -676,7 +690,7 @@ mod tests {
         .unwrap();
 
         let report =
-            build_live_alpha_scale_report("2026-05-03", "2026-05-09", &reports_root).unwrap();
+            build_live_alpha_scale_report("2026-04-29", "2026-05-09", &reports_root).unwrap();
 
         assert_eq!(report.paper.fill_count, 2);
         assert_eq!(report.paper.taker_fill_count, 1);
@@ -692,6 +706,36 @@ mod tests {
             .any(|reason| reason.contains("negative")));
 
         let _ = fs::remove_dir_all(reports_root);
+    }
+
+    #[test]
+    fn live_alpha_report_rejects_unsupported_period() {
+        let error = build_live_alpha_scale_report("2026-05-03", "2026-05-09", Path::new("reports"))
+            .expect_err("unsupported window must fail closed");
+
+        assert!(error
+            .to_string()
+            .contains("unsupported LA8 scale report period"));
+        assert!(error.to_string().contains("2026-04-29 to 2026-05-09"));
+    }
+
+    #[test]
+    fn live_alpha_report_reads_shadow_taker_fee_field() {
+        let mut live = LiveScaleSummary::default();
+
+        apply_shadow_taker_report(
+            &mut live,
+            &json!({
+                "evaluation_count": 3,
+                "would_take_count": 1,
+                "live_allowed_count": 0,
+                "estimated_taker_fee": 0.42
+            }),
+        );
+
+        assert_eq!(live.shadow_taker_evaluation_count, 3);
+        assert_eq!(live.shadow_taker_would_take_count, 1);
+        assert_eq!(live.estimated_fees_paid, 0.42);
     }
 
     #[test]

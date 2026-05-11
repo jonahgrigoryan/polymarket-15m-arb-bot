@@ -54,16 +54,16 @@ Not allowed and not done:
 Implemented a narrow offline command:
 
 ```text
-cargo run --offline -- live-alpha-scale-report --from 2026-05-03 --to 2026-05-09
+cargo run --offline -- live-alpha-scale-report --from 2026-04-29 --to 2026-05-09
 ```
 
-This command reads local report artifacts only. It does not use credentials, submit orders, cancel orders, reset caps, or open any live path.
+This command reads local report artifacts only. It does not use credentials, submit orders, cancel orders, reset caps, or open any live path. The reporting path supports only this fixed LA8 evidence window and fails closed for unsupported date ranges.
 
 Observed command result:
 
 ```text
 live_alpha_scale_report_status=ok
-live_alpha_scale_report_from=2026-05-03
+live_alpha_scale_report_from=2026-04-29
 live_alpha_scale_report_to=2026-05-09
 live_alpha_scale_report_decision=NO-GO: lifecycle unsafe
 live_alpha_scale_report_evidence_count=11
@@ -190,7 +190,7 @@ git merge-base --is-ancestor fd355223d6fc8938b82b219de8f8d27127160227 HEAD
 git switch -c live-alpha/la8-scale-decision
 cargo fmt --check
 cargo test --offline live_alpha_report
-cargo run --offline -- live-alpha-scale-report --from 2026-05-03 --to 2026-05-09
+cargo run --offline -- live-alpha-scale-report --from 2026-04-29 --to 2026-05-09
 ```
 
 Final verification pass:
@@ -198,7 +198,7 @@ Final verification pass:
 ```text
 cargo fmt --check
 cargo test --offline live_alpha_report
-cargo run --offline -- live-alpha-scale-report --from 2026-05-03 --to 2026-05-09
+cargo run --offline -- live-alpha-scale-report --from 2026-04-29 --to 2026-05-09
 cargo test --offline
 cargo clippy --offline -- -D warnings
 git diff --check
@@ -211,7 +211,7 @@ Follow-up focused checks after the recommendation policy fix:
 
 ```text
 cargo test --offline live_alpha_report
-cargo run --offline -- live-alpha-scale-report --from 2026-05-03 --to 2026-05-09
+cargo run --offline -- live-alpha-scale-report --from 2026-04-29 --to 2026-05-09
 ```
 
 Result: passed. The command still returned `live_alpha_scale_report_decision=NO-GO: lifecycle unsafe` for current evidence.
