@@ -9,6 +9,7 @@ pub mod live_alpha_config;
 pub mod live_alpha_gate;
 pub mod live_alpha_metrics;
 pub mod live_alpha_preflight;
+pub mod live_alpha_report;
 pub mod live_balance_tracker;
 pub mod live_beta_canary;
 pub mod live_beta_cancel;
@@ -54,6 +55,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_alpha_gate::MODULE,
         live_alpha_metrics::MODULE,
         live_alpha_preflight::MODULE,
+        live_alpha_report::MODULE,
         live_account_baseline::MODULE,
         live_fill_canary::MODULE,
         live_balance_tracker::MODULE,

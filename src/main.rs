@@ -33,6 +33,7 @@ use polymarket_15m_arb_bot::{
     live_alpha_preflight::{
         self, LiveAlphaCurrentPreflight, LiveAlphaPreflightMode, LiveAlphaPreflightReport,
     },
+    live_alpha_report::build_live_alpha_scale_report,
     live_balance_tracker::LiveBalanceSnapshot,
     live_beta_canary::{
         self, CanaryApprovalContext, CanaryApprovalGuard, CanaryGateStatus, CanaryMode,
@@ -483,6 +484,19 @@ enum Commands {
         )]
         order_cap_state: PathBuf,
     },
+    /// Aggregate existing Live Alpha evidence into a scale decision report.
+    LiveAlphaScaleReport {
+        #[arg(long, help = "Start date for the decision period, YYYY-MM-DD")]
+        from: String,
+        #[arg(long, help = "End date for the decision period, YYYY-MM-DD")]
+        to: String,
+        #[arg(
+            long,
+            default_value = "reports",
+            help = "Root directory containing local report artifacts"
+        )]
+        reports_root: PathBuf,
+    },
 }
 
 impl Commands {
@@ -499,6 +513,7 @@ impl Commands {
             Commands::LiveAlphaQuoteManager { .. } => "live-alpha-quote-manager",
             Commands::LiveAlphaAccountBaseline { .. } => "live-alpha-account-baseline",
             Commands::LiveAlphaTakerCanary { .. } => "live-alpha-taker-canary",
+            Commands::LiveAlphaScaleReport { .. } => "live-alpha-scale-report",
         }
     }
 
@@ -515,6 +530,7 @@ impl Commands {
             Commands::LiveAlphaQuoteManager { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaAccountBaseline { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaTakerCanary { .. } => RuntimeMode::Validate,
+            Commands::LiveAlphaScaleReport { .. } => RuntimeMode::Validate,
         }
     }
 }
@@ -994,6 +1010,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?;
             }
+            Commands::LiveAlphaScaleReport {
+                from,
+                to,
+                reports_root,
+            } => {
+                run_live_alpha_scale_report_command(&from, &to, &reports_root)?;
+            }
         }
 
         Ok(())
@@ -1030,6 +1053,34 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     command_result?;
+    Ok(())
+}
+
+fn run_live_alpha_scale_report_command(
+    from: &str,
+    to: &str,
+    reports_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = build_live_alpha_scale_report(from, to, reports_root)?;
+    println!("live_alpha_scale_report_status=ok");
+    println!("live_alpha_scale_report_from={}", report.period.from);
+    println!("live_alpha_scale_report_to={}", report.period.to);
+    println!(
+        "live_alpha_scale_report_decision={}",
+        report.recommendation.decision
+    );
+    println!(
+        "live_alpha_scale_report_evidence_count={}",
+        report.evidence_paths.len()
+    );
+    println!(
+        "live_alpha_scale_report_missing_evidence_count={}",
+        report.missing_evidence_paths.len()
+    );
+    println!(
+        "live_alpha_scale_report_json={}",
+        serde_json::to_string_pretty(&report)?
+    );
     Ok(())
 }
 
