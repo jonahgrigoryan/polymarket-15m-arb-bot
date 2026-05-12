@@ -8239,8 +8239,10 @@ async fn capture_live_trading_preflight(
     )?;
     let l2_secret_handles_present = l2_secret_report.all_present();
     let account_configured = lb4_account_preflight(config).is_ok();
+    let approved_read_only_context =
+        live_trading_approval_context_matches(config, &deployment_host, &geoblock);
     let authenticated_readback_allowed = config.live_trading.enabled
-        && geoblock.passed_status()
+        && approved_read_only_context
         && l2_secret_handles_present
         && account_configured
         && config.live_beta.legal_access_approved;
@@ -8268,6 +8270,11 @@ async fn capture_live_trading_preflight(
         positions,
     )?;
     account_baseline.validate()?;
+    let read_only_freshness = if approved_read_only_context {
+        live_trading_read_only_freshness(config).await
+    } else {
+        ReadOnlyFreshnessStatus::not_checked()
+    };
 
     let output_dir = output_root.join(baseline_id);
     let account_baseline_path = output_dir.join("account_baseline.redacted.json");
@@ -8289,7 +8296,7 @@ async fn capture_live_trading_preflight(
         account_baseline_path: &account_baseline_path.display().to_string(),
         account_position_count,
         l2_secret_handles_present,
-        read_only_freshness: ReadOnlyFreshnessStatus::not_checked(),
+        read_only_freshness,
         no_live_actions: NoLiveActions::default(),
     })?;
     artifact.validate()?;
@@ -8301,6 +8308,144 @@ async fn capture_live_trading_preflight(
         account_baseline,
         output_dir,
     })
+}
+
+fn live_trading_approval_context_matches(
+    config: &AppConfig,
+    deployment_host: &str,
+    geoblock: &LiveTradingGeoblockReadback,
+) -> bool {
+    if !config.live_trading.enabled {
+        return false;
+    }
+    if config.live_trading.approved_host.trim().is_empty()
+        || deployment_host != config.live_trading.approved_host
+    {
+        return false;
+    }
+    if !geoblock.passed_status() {
+        return false;
+    }
+    if config.live_trading.approved_country.trim().is_empty()
+        || geoblock.country.as_deref() != Some(config.live_trading.approved_country.as_str())
+    {
+        return false;
+    }
+    if config.live_trading.approved_region.trim().is_empty()
+        || geoblock.region.as_deref() != Some(config.live_trading.approved_region.as_str())
+    {
+        return false;
+    }
+    true
+}
+
+async fn live_trading_read_only_freshness(config: &AppConfig) -> ReadOnlyFreshnessStatus {
+    let mut status = ReadOnlyFreshnessStatus::not_checked();
+    let markets = match live_trading_current_markets(config).await {
+        Ok(markets) => {
+            status.market_discovery = "passed".to_string();
+            markets
+        }
+        Err(_) => {
+            status.market_discovery = "failed".to_string();
+            return status;
+        }
+    };
+
+    status.book = status_from_freshness_result(live_trading_books_fresh(config, &markets).await);
+    status.reference =
+        status_from_freshness_result(live_trading_references_fresh(config, &markets).await);
+    status.predictive =
+        status_from_freshness_result(live_trading_predictive_fresh(config, &markets).await);
+    status
+}
+
+fn status_from_freshness_result(result: Result<bool, Box<dyn std::error::Error>>) -> String {
+    match result {
+        Ok(true) => "passed".to_string(),
+        Ok(false) | Err(_) => "failed".to_string(),
+    }
+}
+
+async fn live_trading_current_markets(
+    config: &AppConfig,
+) -> Result<Vec<Market>, Box<dyn std::error::Error>> {
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    select_paper_markets(&discovery_run.markets, unix_time_ms())
+}
+
+async fn live_trading_books_fresh(
+    config: &AppConfig,
+    markets: &[Market],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    for market in markets {
+        for outcome in &market.outcomes {
+            let Some(book) = fetch_live_alpha_book(config, &outcome.token_id).await? else {
+                return Ok(false);
+            };
+            if book.bids.is_empty() || book.asks.is_empty() {
+                return Ok(false);
+            }
+            let Some(book_age_ms) = book
+                .source_ts
+                .and_then(|source_ts| age_ms(now_ms, source_ts))
+            else {
+                return Ok(false);
+            };
+            if book_age_ms > config.risk.stale_book_ms {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+async fn live_trading_references_fresh(
+    config: &AppConfig,
+    markets: &[Market],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    for market in markets {
+        let evidence = live_alpha_reference_evidence(config, market.asset).await?;
+        if evidence.price.is_none() {
+            return Ok(false);
+        }
+        let Some(reference_age_ms) = evidence.age_at(now_ms) else {
+            return Ok(false);
+        };
+        if reference_age_ms > config.risk.stale_reference_ms {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn live_trading_predictive_fresh(
+    config: &AppConfig,
+    markets: &[Market],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    for market in markets {
+        let evidence = live_alpha_predictive_evidence(config, market.asset).await?;
+        if evidence.price.is_none() {
+            return Ok(false);
+        }
+        let Some(predictive_age_ms) = evidence.age_at(now_ms) else {
+            return Ok(false);
+        };
+        if predictive_age_ms > config.feeds.stale_after_ms {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 async fn live_trading_geoblock_readback(config: &AppConfig) -> LiveTradingGeoblockReadback {
@@ -12435,6 +12580,55 @@ mod tests {
             other => panic!("expected paper command, got {other:?}"),
         }
         assert!(!safety::LIVE_ORDER_PLACEMENT_ENABLED);
+    }
+
+    #[test]
+    fn live_trading_readback_context_requires_approved_host_match() {
+        let config = approved_live_trading_config();
+        let geoblock =
+            LiveTradingGeoblockReadback::passed(Some("BR".to_string()), Some("SP".to_string()));
+
+        assert!(!live_trading_approval_context_matches(
+            &config,
+            "unapproved-host",
+            &geoblock
+        ));
+    }
+
+    #[test]
+    fn live_trading_readback_context_requires_approved_jurisdiction_match() {
+        let config = approved_live_trading_config();
+        let geoblock =
+            LiveTradingGeoblockReadback::passed(Some("BR".to_string()), Some("RJ".to_string()));
+
+        assert!(!live_trading_approval_context_matches(
+            &config,
+            "approved-host",
+            &geoblock
+        ));
+    }
+
+    #[test]
+    fn live_trading_readback_context_passes_only_for_exact_approval_context() {
+        let config = approved_live_trading_config();
+        let geoblock =
+            LiveTradingGeoblockReadback::passed(Some("BR".to_string()), Some("SP".to_string()));
+
+        assert!(live_trading_approval_context_matches(
+            &config,
+            "approved-host",
+            &geoblock
+        ));
+    }
+
+    fn approved_live_trading_config() -> AppConfig {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_trading.enabled = true;
+        config.live_trading.approved_host = "approved-host".to_string();
+        config.live_trading.approved_country = "BR".to_string();
+        config.live_trading.approved_region = "SP".to_string();
+        config
     }
 
     #[test]

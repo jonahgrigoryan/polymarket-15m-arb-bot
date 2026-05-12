@@ -6,7 +6,7 @@ Scope: LT1 read-only final-live supervision only.
 
 ## Decision
 
-LT1 is implementation-complete locally and ready for commit after final verification.
+LT1 is implementation-complete with PR #44 review fixes applied and ready for final review.
 
 The implementation adds a final-live read-only command:
 
@@ -55,6 +55,9 @@ Relevant assumptions used for LT1:
 - Reused existing read-only account baseline and CLOB readback primitives.
 - Added local fail-closed artifact generation for default config.
 - Updated `STATUS.md` to point to LT1 and the commit/PR hold before LT2.
+- PR #44 review fixes:
+  - authenticated L2 readback now requires final-live config enabled plus exact approved host and geoblock jurisdiction match before credentials are used,
+  - approved-context LT1 runs now populate actual read-only market discovery, book, reference, and predictive freshness statuses before evaluating the final-live gate.
 
 ## Local LT1 Artifact
 
@@ -67,11 +70,11 @@ cargo run --offline -- --config config/default.toml live-trading-preflight --rea
 Result:
 
 - Status: `blocked`
-- Run ID: `18aef17982931638-edf6-0`
+- Run ID: `18aef574989ac198-13875-0`
 - Preflight artifact: `artifacts/live_trading/LT1-LOCAL-DRY-RUN/final_live_preflight.redacted.json`
-- Preflight hash: `sha256:262150134a1dcf27ec6fb4491df06f5a6d9e29c80d951c4d8fe1c9e32e66da49`
+- Preflight hash: `sha256:5fa6de13beb5aeafce7a42450b82fd3410a87f763d9c4fa09997a376149bae65`
 - Account baseline artifact: `artifacts/live_trading/LT1-LOCAL-DRY-RUN/account_baseline.redacted.json`
-- Account baseline hash: `sha256:8cfdec2b16a006452c2fd5acfb1c71b224a931acd25afbb73c03229a247f2ad3`
+- Account baseline hash: `sha256:6ffa70622b6154f9dd78e03264e0bc921c00b65306878bd9f214257be095fadd`
 - Geoblock result: `not_checked` because `config/default.toml` keeps final live trading disabled.
 - Open order count: `0`
 - Trade count: `0`
@@ -117,7 +120,7 @@ Reason: no approved final-live config with `[live_trading].enabled=true`, approv
 | Check | Status | Notes |
 | --- | --- | --- |
 | `cargo run --offline -- --config config/default.toml validate --local-only` | PASS | Run ID `18aef17d7a5d9908-f188-0`; `validation_status=ok`; live order placement remains false. |
-| `cargo test --offline live_trading_preflight` | PASS | 3 module tests and 1 CLI parse test passed. |
+| `cargo test --offline live_trading --lib --bin polymarket-15m-arb-bot` | PASS | 3 preflight module tests and 4 main binary LT1 tests passed, including the approved-host/jurisdiction readback context regression tests. |
 | `cargo test --offline live_account_baseline` | PASS | 12 tests passed. |
 | `cargo test --offline live_alpha_preflight` | PASS | 6 tests passed. |
 | `cargo run --offline -- --config config/default.toml live-trading-preflight --read-only --baseline-id LT1-LOCAL-DRY-RUN` | PASS | Produced blocked redacted LT1 artifacts with no live actions. |

@@ -1,8 +1,8 @@
 {
   "baseline_id": "LT1-LOCAL-DRY-RUN",
-  "run_id": "18aef17982931638-edf6-0",
-  "captured_at_ms": 1778624407042,
-  "captured_at_rfc3339": "2026-05-12T22:20:07Z",
+  "run_id": "18aef574989ac198-13875-0",
+  "captured_at_ms": 1778628783983,
+  "captured_at_rfc3339": "2026-05-12T23:33:03Z",
   "mode": "read_only",
   "final_live_config_enabled": false,
   "deployment_host": "Jonahs-MacBook-Pro.local",
@@ -19,7 +19,7 @@
     "error_redacted": false
   },
   "account_readback_status": "blocked",
-  "account_baseline_hash": "sha256:8cfdec2b16a006452c2fd5acfb1c71b224a931acd25afbb73c03229a247f2ad3",
+  "account_baseline_hash": "sha256:6ffa70622b6154f9dd78e03264e0bc921c00b65306878bd9f214257be095fadd",
   "account_baseline_path": "artifacts/live_trading/LT1-LOCAL-DRY-RUN/account_baseline.redacted.json",
   "account_open_order_count": 0,
   "account_trade_count": 0,
@@ -55,5 +55,5 @@
     "predictive_freshness_not_passed",
     "reference_freshness_not_passed"
   ],
-  "artifact_hash": "sha256:262150134a1dcf27ec6fb4491df06f5a6d9e29c80d951c4d8fe1c9e32e66da49"
+  "artifact_hash": "sha256:5fa6de13beb5aeafce7a42450b82fd3410a87f763d9c4fa09997a376149bae65"
 }
