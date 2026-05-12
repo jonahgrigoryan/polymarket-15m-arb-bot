@@ -139,6 +139,7 @@ pub fn build_live_alpha_scale_report(
     let mut missing_evidence_paths = Vec::new();
     let mut paper = PaperScaleSummary::default();
     let mut live = LiveScaleSummary::default();
+    let mut la7_metric_counts = La7DecisionMetricCounts::default();
 
     let paper_report_path = reports_root
         .join("sessions")
@@ -194,7 +195,7 @@ pub fn build_live_alpha_scale_report(
     {
         evidence_paths.push(path_string(&live_report_path));
         let report = read_json(&live_report_path)?;
-        apply_la7_live_report(&mut live, &report);
+        apply_la7_live_report(&mut live, &mut la7_metric_counts, &report);
     }
 
     for shadow_report_path in find_session_artifacts(reports_root, "shadow_taker_report.json")? {
@@ -508,7 +509,19 @@ fn record_maker_cancel(
     summary.maker_final_canceled_count += 1;
 }
 
-fn apply_la7_live_report(summary: &mut LiveScaleSummary, report: &Value) {
+#[derive(Debug, Default)]
+struct La7DecisionMetricCounts {
+    slippage_bps: u64,
+    adverse_selection_buffer_bps: u64,
+    edge_at_submit_bps: u64,
+    edge_after_costs_bps: u64,
+}
+
+fn apply_la7_live_report(
+    summary: &mut LiveScaleSummary,
+    metric_counts: &mut La7DecisionMetricCounts,
+    report: &Value,
+) {
     if report
         .get("submission")
         .and_then(Value::as_object)
@@ -527,22 +540,22 @@ fn apply_la7_live_report(summary: &mut LiveScaleSummary, report: &Value) {
         accumulate_average(
             &mut summary.average_slippage_bps,
             json_f64(decision, &["slippage_bps"]),
-            1,
+            &mut metric_counts.slippage_bps,
         );
         accumulate_average(
             &mut summary.average_adverse_selection_buffer_bps,
             json_f64(decision, &["adverse_selection_buffer_bps"]),
-            1,
+            &mut metric_counts.adverse_selection_buffer_bps,
         );
         accumulate_average(
             &mut summary.average_edge_at_submit_bps,
             json_f64(decision, &["gross_edge_bps"]),
-            1,
+            &mut metric_counts.edge_at_submit_bps,
         );
         accumulate_average(
             &mut summary.average_edge_after_costs_bps,
             json_f64(decision, &["estimated_ev_after_costs_bps"]),
-            1,
+            &mut metric_counts.edge_after_costs_bps,
         );
     }
     if json_str(report, &["status"])
@@ -682,14 +695,15 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-fn accumulate_average(target: &mut Option<f64>, value: Option<f64>, existing_count: u64) {
+fn accumulate_average(target: &mut Option<f64>, value: Option<f64>, sample_count: &mut u64) {
     let Some(value) = value else {
         return;
     };
     *target = Some(match *target {
-        Some(current) => (current * existing_count as f64 + value) / (existing_count as f64 + 1.0),
+        Some(current) => (current * *sample_count as f64 + value) / (*sample_count as f64 + 1.0),
         None => value,
     });
+    *sample_count += 1;
 }
 
 #[cfg(test)]
@@ -907,6 +921,53 @@ mod tests {
     }
 
     #[test]
+    fn live_alpha_report_averages_la7_decision_metrics_over_all_reports() {
+        let mut live = LiveScaleSummary::default();
+        let mut metric_counts = La7DecisionMetricCounts::default();
+
+        for report in [
+            json!({
+                "pre_submit_report": {
+                    "decision": {
+                        "slippage_bps": 10.0,
+                        "adverse_selection_buffer_bps": 100.0,
+                        "gross_edge_bps": 1000.0,
+                        "estimated_ev_after_costs_bps": 500.0
+                    }
+                }
+            }),
+            json!({
+                "pre_submit_report": {
+                    "decision": {
+                        "slippage_bps": 20.0,
+                        "adverse_selection_buffer_bps": 200.0,
+                        "gross_edge_bps": 2000.0
+                    }
+                }
+            }),
+            json!({
+                "pre_submit_report": {
+                    "decision": {
+                        "slippage_bps": 30.0,
+                        "adverse_selection_buffer_bps": 300.0,
+                        "gross_edge_bps": 3000.0,
+                        "estimated_ev_after_costs_bps": 1500.0
+                    }
+                }
+            }),
+        ] {
+            apply_la7_live_report(&mut live, &mut metric_counts, &report);
+        }
+
+        assert_float_eq(live.average_slippage_bps, 20.0);
+        assert_float_eq(live.average_adverse_selection_buffer_bps, 200.0);
+        assert_float_eq(live.average_edge_at_submit_bps, 2000.0);
+        assert_float_eq(live.average_edge_after_costs_bps, 1000.0);
+        assert_eq!(metric_counts.slippage_bps, 3);
+        assert_eq!(metric_counts.edge_after_costs_bps, 2);
+    }
+
+    #[test]
     fn live_alpha_report_holds_when_maker_live_fill_sample_is_absent() {
         let paper = PaperScaleSummary {
             total_pnl: 1.0,
@@ -970,5 +1031,13 @@ mod tests {
 
     fn write_json(path: &Path, value: &Value) {
         fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
+    fn assert_float_eq(actual: Option<f64>, expected: f64) {
+        let actual = actual.expect("average present");
+        assert!(
+            (actual - expected).abs() <= 1e-9,
+            "expected {expected}, got {actual}"
+        );
     }
 }
