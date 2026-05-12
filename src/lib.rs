@@ -27,6 +27,7 @@ pub mod live_reconciliation;
 pub mod live_risk_engine;
 pub mod live_startup_recovery;
 pub mod live_taker_gate;
+pub mod live_trading_preflight;
 pub mod live_user_events;
 pub mod market_discovery;
 pub mod metrics;
@@ -74,6 +75,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_risk_engine::MODULE,
         live_startup_recovery::MODULE,
         live_taker_gate::MODULE,
+        live_trading_preflight::MODULE,
         live_user_events::MODULE,
         market_discovery::MODULE,
         metrics::MODULE,

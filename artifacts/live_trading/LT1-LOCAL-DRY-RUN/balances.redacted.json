@@ -1,0 +1,23 @@
+{
+  "collateral": {
+    "allowance_units": 25000000,
+    "asset_type": "COLLATERAL",
+    "balance_units": 25000000,
+    "token_id": null
+  },
+  "readback_report": {
+    "available_pusd_units": 25000000,
+    "block_reasons": [
+      "deployment_geoblock_not_recorded",
+      "legal_access_not_recorded"
+    ],
+    "heartbeat": "not_started_no_open_orders",
+    "live_network_enabled": false,
+    "open_order_count": 0,
+    "required_collateral_allowance_units": 1000000,
+    "reserved_pusd_units": 0,
+    "status": "blocked",
+    "trade_count": 0,
+    "venue_state": "trading_enabled"
+  }
+}

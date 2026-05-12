@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub live_beta: LiveBetaConfig,
     #[serde(default)]
     pub live_alpha: LiveAlphaConfig,
+    #[serde(default)]
+    pub live_trading: LiveTradingConfig,
     pub assets: AssetsConfig,
     pub polymarket: PolymarketConfig,
     pub feeds: FeedsConfig,
@@ -420,6 +422,18 @@ pub struct LiveBetaReadbackAccountConfig {
     pub signature_type: String,
     #[serde(default)]
     pub required_collateral_allowance_units: u64,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LiveTradingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub approved_host: String,
+    #[serde(default)]
+    pub approved_country: String,
+    #[serde(default)]
+    pub approved_region: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

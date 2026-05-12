@@ -1,0 +1,43 @@
+{
+  "baseline_id": "LT1-LOCAL-DRY-RUN",
+  "run_id": "18aef17982931638-edf6-0",
+  "captured_at_ms": 1778624407042,
+  "captured_at_rfc3339": "2026-05-12T22:20:07Z",
+  "wallet_address": "0x1111111111111111111111111111111111111111",
+  "funder_address": "0x1111111111111111111111111111111111111111",
+  "signature_type": "eoa",
+  "readback_report": {
+    "status": "blocked",
+    "block_reasons": [
+      "deployment_geoblock_not_recorded",
+      "legal_access_not_recorded"
+    ],
+    "open_order_count": 0,
+    "trade_count": 0,
+    "reserved_pusd_units": 0,
+    "required_collateral_allowance_units": 1000000,
+    "available_pusd_units": 25000000,
+    "venue_state": "trading_enabled",
+    "heartbeat": "not_started_no_open_orders",
+    "live_network_enabled": false
+  },
+  "collateral": {
+    "asset_type": "COLLATERAL",
+    "token_id": null,
+    "balance_units": 25000000,
+    "allowance_units": 25000000
+  },
+  "open_orders": [],
+  "trades": [],
+  "positions": {
+    "evidence_complete": false,
+    "positions": []
+  },
+  "no_secrets_guarantee": {
+    "contains_auth_headers": false,
+    "contains_l2_api_credentials": false,
+    "contains_signed_payloads": false,
+    "contains_private_keys": false
+  },
+  "baseline_hash": "sha256:8cfdec2b16a006452c2fd5acfb1c71b224a931acd25afbb73c03229a247f2ad3"
+}
