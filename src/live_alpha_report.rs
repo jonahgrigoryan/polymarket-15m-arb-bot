@@ -231,7 +231,7 @@ pub fn build_live_alpha_scale_report(
             "Live Alpha used bounded live canaries and maker quote probes, while paper evidence came from separate M9 RTDS sessions."
                 .to_string(),
     };
-    let recommendation = recommend(&paper, &live, &missing_evidence_paths);
+    let recommendation = recommend(&paper, &live, &missing_evidence_paths, false);
 
     Ok(LiveAlphaScaleReport {
         schema_version: SCALE_REPORT_SCHEMA_VERSION.to_string(),
@@ -262,6 +262,7 @@ fn recommend(
     paper: &PaperScaleSummary,
     live: &LiveScaleSummary,
     missing_evidence_paths: &[String],
+    paper_live_comparable: bool,
 ) -> ScaleRecommendation {
     let mut reasons = Vec::new();
     let paper_pnl = paper.post_settlement_total_pnl.unwrap_or(paper.total_pnl);
@@ -312,6 +313,8 @@ fn recommend(
         && live.taker_fill_count == 0
     {
         "HOLD: taker shadow only"
+    } else if !paper_live_comparable {
+        "HOLD: paper/live evidence not comparable"
     } else {
         reasons.push("evidence supports drafting a separate scale approval scope".to_string());
         "GO: propose next PRD for broader scaling"
@@ -980,7 +983,7 @@ mod tests {
             ..LiveScaleSummary::default()
         };
 
-        let recommendation = recommend(&paper, &live, &[]);
+        let recommendation = recommend(&paper, &live, &[], false);
 
         assert_eq!(
             recommendation.decision,
@@ -1006,7 +1009,7 @@ mod tests {
             ..LiveScaleSummary::default()
         };
 
-        let recommendation = recommend(&paper, &live, &[]);
+        let recommendation = recommend(&paper, &live, &[], true);
 
         assert_eq!(
             recommendation.decision,
