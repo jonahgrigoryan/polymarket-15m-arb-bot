@@ -11296,49 +11296,36 @@ fn current_host_label() -> String {
             }
         }
     }
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown-host".to_string())
+    try_kernel_reported_hostname().unwrap_or_else(|| "unknown-host".to_string())
 }
 
 /// Host identity for live-trading approved-host checks (LT1 preflight, LT3 signing dry-run).
-/// Uses kernel-reported hostnames (`hostname`, `uname -n`) and does not read `HOSTNAME`/`HOST`,
-/// which can be overridden in the process environment and would weaken approved-host binding.
+/// Uses the kernel-reported hostname directly and does not read `HOSTNAME`/`HOST` or PATH-resolved
+/// executables, which can be overridden and would weaken approved-host binding.
 fn live_trading_deployment_host_identity() -> String {
     try_kernel_reported_hostname().unwrap_or_else(|| "unknown-host".to_string())
 }
 
+#[cfg(unix)]
 fn try_kernel_reported_hostname() -> Option<String> {
-    let from_hostname = std::process::Command::new("hostname")
-        .output()
+    let mut buffer = [0u8; 256];
+    let result = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if result != 0 {
+        return None;
+    }
+    let len = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    std::str::from_utf8(&buffer[..len])
         .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    if from_hostname.is_some() {
-        return from_hostname;
-    }
-    #[cfg(unix)]
-    {
-        std::process::Command::new("uname")
-            .arg("-n")
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    }
-    #[cfg(not(unix))]
-    {
-        None
-    }
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(not(unix))]
+fn try_kernel_reported_hostname() -> Option<String> {
+    None
 }
 
 fn append_la3_journal_event(
@@ -13157,6 +13144,51 @@ mod tests {
     fn live_trading_deployment_host_identity_is_non_empty_in_test_env() {
         let id = live_trading_deployment_host_identity();
         assert!(!id.trim().is_empty(), "expected kernel-reported hostname");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_trading_deployment_host_identity_ignores_path_spoofed_hostname() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let spoofed_host = "lt3-path-spoof-approved-host";
+        let temp_dir = env::temp_dir().join(format!(
+            "lt3-host-spoof-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp spoof dir");
+        for binary in ["hostname", "uname"] {
+            let path = temp_dir.join(binary);
+            std::fs::write(&path, format!("#!/bin/sh\nprintf '{spoofed_host}'\n"))
+                .expect("write fake host binary");
+            let mut permissions = std::fs::metadata(&path)
+                .expect("fake binary metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).expect("chmod fake host binary");
+        }
+
+        let previous_path = env::var_os("PATH");
+        let mut paths = vec![temp_dir.clone()];
+        if let Some(path) = previous_path.clone() {
+            paths.extend(env::split_paths(&path));
+        }
+        let spoofed_path = env::join_paths(paths).expect("join spoofed PATH");
+        env::set_var("PATH", spoofed_path);
+        let host_id = live_trading_deployment_host_identity();
+        if let Some(path) = previous_path {
+            env::set_var("PATH", path);
+        } else {
+            env::remove_var("PATH");
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert_ne!(host_id, spoofed_host);
+        assert!(
+            !host_id.trim().is_empty(),
+            "expected kernel-reported hostname"
+        );
     }
 
     #[test]

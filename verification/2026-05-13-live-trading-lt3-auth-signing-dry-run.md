@@ -93,6 +93,8 @@ No approved-host live-network readback was run from this local branch context be
 
 Approved-host readback audit note: LT3 schema `lt3.live_trading_signing_dry_run.v2` separates `order_submit_auth_headers_generated` from `readback_auth_headers_generated`. A post-approval readback may set `readback_auth_headers_generated=true` because read-only authenticated CLOB GETs require L2 headers; this does not imply order submission, raw signature generation, or order-submit auth header generation.
 
+Approved-host identity note: LT3 approved-host checks use `libc::gethostname` for kernel-reported host identity and do not read `HOSTNAME`/`HOST` or invoke PATH-resolved `hostname`/`uname` binaries before unblocking authenticated readback.
+
 ## Secret Handling
 
 - Secret backend: `env`
@@ -128,10 +130,11 @@ Approved-host readback audit note: LT3 schema `lt3.live_trading_signing_dry_run.
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked` and `approved_authenticated_readback_not_passed`. |
 | `cargo test --offline secret_handling` | PASS | 5 tests passed. |
 | `cargo test --offline live_trading_signing` | PASS | 8 module tests and 8 CLI/id/readback-gate tests passed, including final-live legal gate, invalid account-binding pre-readback blockers, and split order-submit vs readback auth-header audit fields. |
+| `cargo test --offline live_trading_deployment_host_identity` | PASS | 2 main tests passed, including a PATH-spoof regression with fake `hostname`/`uname` binaries. |
 | `cargo test --offline live_trading_env_overrides_bind_local_account_without_committing_defaults` | PASS | Confirms env overrides bind final-live account config and explicit final-live legal/access approval without committing local values. |
 | `cargo test --offline live_trading_readback_prerequisites_use_final_live_legal_gate` | PASS | Confirms LT3 authenticated readback prerequisites source legal/access from `live_trading.legal_access_approved` instead of a hard-coded pass. |
 | `cargo test --offline balance_allowance_signature_type_params_match_official_v2_client` | PASS | Confirms legacy `SignatureType::from_config("poly_1271")` is rejected while final-live readback can still use balance-allowance query param `3`. |
-| `cargo test --offline --quiet` | PASS | 451 lib tests, 108 bin tests, and 0 doc tests passed after the legal/access and pre-readback account-binding fixes. |
+| `cargo test --offline --quiet` | PASS | 451 lib tests, 109 bin tests, and 0 doc tests passed after the legal/access, host-identity, and pre-readback account-binding fixes. |
 | `cargo clippy --offline -- -D warnings` | PASS | Passed through `scripts/verify-pr.sh` after this note was added. |
 | `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. |
 
@@ -141,6 +144,7 @@ Approved-host readback audit note: LT3 schema `lt3.live_trading_signing_dry_run.
 - `rg` scan over the LT3 artifact and new signing/config surfaces found only safe handle names and header field names.
 - `src/live_trading_signing.rs` unit tests assert the module contains no request client construction, submit dispatch token, cancel dispatch token, or raw secret placeholders.
 - The artifact keeps `order_submit_auth_headers_generated=false` as a no-submit invariant while recording whether read-only authenticated readback generated L2 headers.
+- Approved-host identity uses a syscall-backed hostname source rather than PATH-resolved executables; the spoofed-PATH regression test proves fake `hostname`/`uname` binaries do not affect the gate.
 - Approved-host readback now still fails closed unless `live_trading.legal_access_approved=true`, and invalid wallet/funder strings are rejected before authenticated L2 GETs.
 - No live order submit, cancel submit, heartbeat POST, cap sentinel write, taker expansion, production sizing, multi-wallet deployment, asset expansion, cancel-all behavior, or authenticated write client was added.
 
