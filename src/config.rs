@@ -63,6 +63,23 @@ impl AppConfig {
         apply_string_override("P15M_CLICKHOUSE_URL", &mut self.storage.clickhouse_url);
         apply_string_override("P15M_POSTGRES_URL", &mut self.storage.postgres_url);
         apply_string_override("P15M_METRICS_BIND_ADDR", &mut self.metrics.bind_addr);
+        apply_bool_override("LIVE_TRADING_ENABLED", &mut self.live_trading.enabled);
+        apply_bool_override("P15M_LIVE_TRADING_ENABLED", &mut self.live_trading.enabled);
+        apply_string_override("WALLET_ADDRESS", &mut self.live_trading.wallet_address);
+        apply_string_override(
+            "P15M_LIVE_TRADING_WALLET_ADDRESS",
+            &mut self.live_trading.wallet_address,
+        );
+        apply_string_override("FUNDER_ADDRESS", &mut self.live_trading.funder_address);
+        apply_string_override(
+            "P15M_LIVE_TRADING_FUNDER_ADDRESS",
+            &mut self.live_trading.funder_address,
+        );
+        apply_string_override("SIGNATURE_TYPE", &mut self.live_trading.signature_type);
+        apply_string_override(
+            "P15M_LIVE_TRADING_SIGNATURE_TYPE",
+            &mut self.live_trading.signature_type,
+        );
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -74,6 +91,8 @@ impl AppConfig {
         if let Err(live_alpha_errors) = self.live_alpha.validate() {
             errors.extend(live_alpha_errors);
         }
+        require_live_trading_secret_handles_config(&mut errors, &self.live_trading.secret_handles);
+        require_live_trading_account_config(&mut errors, &self.live_trading);
 
         require_exact_assets(&mut errors, &self.assets.symbols);
 
@@ -434,6 +453,83 @@ pub struct LiveTradingConfig {
     pub approved_country: String,
     #[serde(default)]
     pub approved_region: String,
+    #[serde(default)]
+    pub wallet_address: String,
+    #[serde(default)]
+    pub funder_address: String,
+    #[serde(default)]
+    pub signature_type: String,
+    #[serde(default)]
+    pub secret_handles: LiveTradingSecretHandlesConfig,
+}
+
+impl LiveTradingConfig {
+    pub fn secret_inventory(&self) -> SecretInventory {
+        SecretInventory::new(
+            self.secret_handles.backend.clone(),
+            vec![
+                SecretHandle::new("clob_l2_access", self.secret_handles.clob_l2_access.clone()),
+                SecretHandle::new(
+                    "clob_l2_credential",
+                    self.secret_handles.clob_l2_credential.clone(),
+                ),
+                SecretHandle::new(
+                    "clob_l2_passphrase",
+                    self.secret_handles.clob_l2_passphrase.clone(),
+                ),
+                SecretHandle::new(
+                    "signer_private_key",
+                    self.secret_handles.signer_private_key.clone(),
+                ),
+            ],
+        )
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LiveTradingSecretHandlesConfig {
+    #[serde(default = "default_live_trading_secret_backend")]
+    pub backend: String,
+    #[serde(default = "default_live_trading_clob_l2_access_handle")]
+    pub clob_l2_access: String,
+    #[serde(default = "default_live_trading_clob_l2_credential_handle")]
+    pub clob_l2_credential: String,
+    #[serde(default = "default_live_trading_clob_l2_passphrase_handle")]
+    pub clob_l2_passphrase: String,
+    #[serde(default = "default_live_trading_signer_private_key_handle")]
+    pub signer_private_key: String,
+}
+
+impl Default for LiveTradingSecretHandlesConfig {
+    fn default() -> Self {
+        Self {
+            backend: default_live_trading_secret_backend(),
+            clob_l2_access: default_live_trading_clob_l2_access_handle(),
+            clob_l2_credential: default_live_trading_clob_l2_credential_handle(),
+            clob_l2_passphrase: default_live_trading_clob_l2_passphrase_handle(),
+            signer_private_key: default_live_trading_signer_private_key_handle(),
+        }
+    }
+}
+
+fn default_live_trading_secret_backend() -> String {
+    ENV_SECRET_BACKEND.to_string()
+}
+
+fn default_live_trading_clob_l2_access_handle() -> String {
+    "P15M_LIVE_TRADING_CLOB_L2_ACCESS".to_string()
+}
+
+fn default_live_trading_clob_l2_credential_handle() -> String {
+    "P15M_LIVE_TRADING_CLOB_L2_CREDENTIAL".to_string()
+}
+
+fn default_live_trading_clob_l2_passphrase_handle() -> String {
+    "P15M_LIVE_TRADING_CLOB_L2_PASSPHRASE".to_string()
+}
+
+fn default_live_trading_signer_private_key_handle() -> String {
+    "P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -609,6 +705,16 @@ fn apply_string_override(env_key: &str, target: &mut String) {
     }
 }
 
+fn apply_bool_override(env_key: &str, target: &mut bool) {
+    if let Ok(value) = env::var(env_key) {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => *target = true,
+            "0" | "false" | "no" => *target = false,
+            _ => {}
+        }
+    }
+}
+
 fn require_supported_mode(errors: &mut Vec<String>, mode: &str) {
     match mode {
         "validate" | "paper" | "replay" => {}
@@ -779,6 +885,107 @@ fn require_live_beta_secret_handles_config(
     }
 }
 
+fn require_live_trading_secret_handles_config(
+    errors: &mut Vec<String>,
+    config: &LiveTradingSecretHandlesConfig,
+) {
+    if config.backend != ENV_SECRET_BACKEND {
+        errors.push("live_trading.secret_handles.backend must be env".to_string());
+    }
+    require_env_handle_name(
+        errors,
+        "live_trading.secret_handles.clob_l2_access",
+        &config.clob_l2_access,
+    );
+    require_env_handle_name(
+        errors,
+        "live_trading.secret_handles.clob_l2_credential",
+        &config.clob_l2_credential,
+    );
+    require_env_handle_name(
+        errors,
+        "live_trading.secret_handles.clob_l2_passphrase",
+        &config.clob_l2_passphrase,
+    );
+    require_env_handle_name(
+        errors,
+        "live_trading.secret_handles.signer_private_key",
+        &config.signer_private_key,
+    );
+    let mut seen = BTreeSet::new();
+    for (name, value) in [
+        (
+            "live_trading.secret_handles.clob_l2_access",
+            &config.clob_l2_access,
+        ),
+        (
+            "live_trading.secret_handles.clob_l2_credential",
+            &config.clob_l2_credential,
+        ),
+        (
+            "live_trading.secret_handles.clob_l2_passphrase",
+            &config.clob_l2_passphrase,
+        ),
+        (
+            "live_trading.secret_handles.signer_private_key",
+            &config.signer_private_key,
+        ),
+    ] {
+        if !seen.insert(value) {
+            errors.push(format!(
+                "{name} must not duplicate another live trading secret handle"
+            ));
+        }
+    }
+}
+
+fn require_live_trading_account_config(errors: &mut Vec<String>, config: &LiveTradingConfig) {
+    if !config.signature_type.trim().is_empty()
+        && !is_supported_live_trading_signature_type(&config.signature_type)
+    {
+        errors.push(
+            "live_trading.signature_type must be eoa, poly_proxy, gnosis_safe, poly_1271, or 0-3"
+                .to_string(),
+        );
+    }
+    if config.enabled {
+        require_non_empty(
+            errors,
+            "live_trading.wallet_address",
+            &config.wallet_address,
+        );
+        require_non_empty(
+            errors,
+            "live_trading.funder_address",
+            &config.funder_address,
+        );
+        require_non_empty(
+            errors,
+            "live_trading.signature_type",
+            &config.signature_type,
+        );
+    }
+}
+
+fn is_supported_live_trading_signature_type(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "eoa"
+            | "1"
+            | "poly_proxy"
+            | "poly-proxy"
+            | "polyproxy"
+            | "2"
+            | "gnosis_safe"
+            | "gnosis-safe"
+            | "gnosissafe"
+            | "3"
+            | "poly_1271"
+            | "poly-1271"
+            | "poly1271"
+    )
+}
+
 fn require_env_handle_name(errors: &mut Vec<String>, name: &str, value: &str) {
     if value.trim().is_empty()
         || !value.starts_with("P15M_")
@@ -853,6 +1060,24 @@ mod tests {
             config.reference_feed.polymarket_rtds_url,
             "wss://ws-live-data.polymarket.com"
         );
+        assert!(!config.live_trading.enabled);
+        assert_eq!(config.live_trading.secret_handles.backend, "env");
+        assert_eq!(
+            config.live_trading.secret_handles.clob_l2_access,
+            "P15M_LIVE_TRADING_CLOB_L2_ACCESS"
+        );
+        assert_eq!(
+            config.live_trading.secret_handles.clob_l2_credential,
+            "P15M_LIVE_TRADING_CLOB_L2_CREDENTIAL"
+        );
+        assert_eq!(
+            config.live_trading.secret_handles.clob_l2_passphrase,
+            "P15M_LIVE_TRADING_CLOB_L2_PASSPHRASE"
+        );
+        assert_eq!(
+            config.live_trading.secret_handles.signer_private_key,
+            "P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY"
+        );
     }
 
     #[test]
@@ -916,6 +1141,20 @@ mod tests {
         assert_eq!(config.live_alpha.mode.as_str(), "disabled");
         assert!(!config.live_alpha.maker.enabled);
         assert!(!config.live_alpha.taker.enabled);
+        config.validate().expect("legacy config validates");
+    }
+
+    #[test]
+    fn missing_live_trading_section_defaults_to_inert_handles() {
+        let legacy_config = without_toml_table(VALID_CONFIG, "live_trading");
+
+        let config: AppConfig = toml::from_str(&legacy_config).expect("legacy config parses");
+
+        assert!(!config.live_trading.enabled);
+        assert_eq!(
+            config.live_trading.secret_handles.signer_private_key,
+            "P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY"
+        );
         config.validate().expect("legacy config validates");
     }
 
@@ -984,6 +1223,99 @@ mod tests {
 
         assert!(error.contains("live_beta.secret_handles.clob_l2_credential"));
         assert!(!error.contains("P15M_LIVE_BETA_CLOB_L2_ACCESS"));
+    }
+
+    #[test]
+    fn live_trading_secret_handles_reject_value_like_config_without_echoing_value() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.live_trading.secret_handles.signer_private_key = "private-key-value".to_string();
+
+        let error = config
+            .validate()
+            .expect_err("value-like final-live handle fails validation")
+            .to_string();
+
+        assert!(error.contains("live_trading.secret_handles.signer_private_key"));
+        assert!(!error.contains("private-key-value"));
+    }
+
+    #[test]
+    fn live_trading_secret_handles_reject_duplicate_handles_without_echoing_handle() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.live_trading.secret_handles.signer_private_key =
+            config.live_trading.secret_handles.clob_l2_access.clone();
+
+        let error = config
+            .validate()
+            .expect_err("duplicate final-live handle fails validation")
+            .to_string();
+
+        assert!(error.contains("live_trading.secret_handles.signer_private_key"));
+        assert!(!error.contains("P15M_LIVE_TRADING_CLOB_L2_ACCESS"));
+    }
+
+    #[test]
+    fn live_trading_signature_type_supports_deposit_wallet_flow() {
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        config.live_trading.signature_type = "poly_1271".to_string();
+
+        config
+            .validate()
+            .expect("final-live deposit wallet signature type validates");
+    }
+
+    #[test]
+    fn live_trading_env_overrides_bind_local_account_without_committing_defaults() {
+        let previous_enabled = env::var("P15M_LIVE_TRADING_ENABLED").ok();
+        let previous_wallet = env::var("WALLET_ADDRESS").ok();
+        let previous_funder = env::var("FUNDER_ADDRESS").ok();
+        let previous_signature_type = env::var("SIGNATURE_TYPE").ok();
+
+        env::set_var("P15M_LIVE_TRADING_ENABLED", "true");
+        env::set_var(
+            "WALLET_ADDRESS",
+            "0x1111111111111111111111111111111111111111",
+        );
+        env::set_var(
+            "FUNDER_ADDRESS",
+            "0x2222222222222222222222222222222222222222",
+        );
+        env::set_var("SIGNATURE_TYPE", "poly_proxy");
+
+        let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
+        assert!(!config.live_trading.enabled);
+        assert!(config.live_trading.wallet_address.is_empty());
+        assert!(config.live_trading.funder_address.is_empty());
+        assert!(config.live_trading.signature_type.is_empty());
+
+        config.apply_env_overrides();
+        config
+            .validate()
+            .expect("env-bound final-live config validates");
+
+        assert!(config.live_trading.enabled);
+        assert_eq!(
+            config.live_trading.wallet_address,
+            "0x1111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            config.live_trading.funder_address,
+            "0x2222222222222222222222222222222222222222"
+        );
+        assert_eq!(config.live_trading.signature_type, "poly_proxy");
+
+        restore_env("P15M_LIVE_TRADING_ENABLED", previous_enabled);
+        restore_env("WALLET_ADDRESS", previous_wallet);
+        restore_env("FUNDER_ADDRESS", previous_funder);
+        restore_env("SIGNATURE_TYPE", previous_signature_type);
+    }
+
+    fn restore_env(key: &str, value: Option<String>) {
+        if let Some(value) = value {
+            env::set_var(key, value);
+        } else {
+            env::remove_var(key);
+        }
     }
 
     #[test]

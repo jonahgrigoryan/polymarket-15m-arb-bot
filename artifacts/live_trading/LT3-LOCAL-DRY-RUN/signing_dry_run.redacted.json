@@ -1,0 +1,104 @@
+{
+  "artifact_hash": "sha256:b1a95c5c4636f8801fdc5494bbbfcb2a35667143791e2b936635af3ca4bc5ed3",
+  "body": {
+    "schema_version": "lt3.live_trading_signing_dry_run.v1",
+    "approval_id": "LT3-LOCAL-DRY-RUN",
+    "run_id": "18af1cdddbe49c90-27a5-0",
+    "captured_at_ms": 1778672117037,
+    "captured_at_rfc3339": "2026-05-13T11:35:17Z",
+    "status": "passed",
+    "block_reasons": [],
+    "final_live_config_enabled": true,
+    "clob_host": "https://clob.polymarket.com",
+    "chain_id": 137,
+    "secret_backend": "env",
+    "secret_handles": [
+      {
+        "label": "clob_l2_access",
+        "handle": "P15M_LIVE_TRADING_CLOB_L2_ACCESS",
+        "present": true
+      },
+      {
+        "label": "clob_l2_credential",
+        "handle": "P15M_LIVE_TRADING_CLOB_L2_CREDENTIAL",
+        "present": true
+      },
+      {
+        "label": "clob_l2_passphrase",
+        "handle": "P15M_LIVE_TRADING_CLOB_L2_PASSPHRASE",
+        "present": true
+      },
+      {
+        "label": "signer_private_key",
+        "handle": "P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY",
+        "present": true
+      }
+    ],
+    "wallet_binding": {
+      "wallet_address": "0x280ca8b14386Fe4203670538CCdE636C295d74E9",
+      "funder_address": "0xB06867f742290D25B7430fD35D7A8cE7bc3a1159",
+      "wallet_address_valid": true,
+      "funder_address_valid": true,
+      "signature_type_config": "1",
+      "signature_type_name": "poly_proxy",
+      "signature_type_code": 1,
+      "eoa_funder_must_match_wallet": false,
+      "funder_matches_wallet": false
+    },
+    "signing_payload_shape": {
+      "purpose": "lt3_shape_hash_only_no_signature_no_submit",
+      "non_submittable_fixture": true,
+      "order_type": "GTD",
+      "post_only": true,
+      "defer_exec": false,
+      "l1_private_key_handle_label": "signer_private_key",
+      "l2_credential_handle_labels": [
+        "clob_l2_access",
+        "clob_l2_credential",
+        "clob_l2_passphrase"
+      ],
+      "required_l2_header_fields": [
+        "POLY_ADDRESS",
+        "POLY_SIGNATURE",
+        "POLY_TIMESTAMP",
+        "POLY_API_KEY",
+        "POLY_PASSPHRASE"
+      ],
+      "required_order_fields": [
+        "order.maker",
+        "order.signer",
+        "order.tokenId",
+        "order.makerAmount",
+        "order.takerAmount",
+        "order.side",
+        "order.expiration",
+        "order.timestamp",
+        "order.metadata",
+        "order.builder",
+        "order.signature",
+        "order.salt",
+        "order.signatureType",
+        "owner",
+        "orderType",
+        "deferExec"
+      ],
+      "redacted_or_absent_fields": [
+        "order.signature",
+        "owner",
+        "POLY_SIGNATURE",
+        "POLY_API_KEY",
+        "POLY_PASSPHRASE"
+      ],
+      "owner": "<redacted:owner-not-loaded>",
+      "signature": "<redacted:not-generated>",
+      "signature_type_code": 1
+    },
+    "sanitized_signing_payload_hash": "sha256:b1248bb921d2fa352ca775a8f69b715667702a263ece9eacbd6ec823790f278c",
+    "not_submitted": true,
+    "network_post_enabled": false,
+    "network_cancel_enabled": false,
+    "raw_signature_generated": false,
+    "auth_headers_generated": false,
+    "authenticated_readback_status": "not_run_no_approved_host_readback_in_lt3_local_dry_run"
+  }
+}

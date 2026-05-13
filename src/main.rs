@@ -95,6 +95,11 @@ use polymarket_15m_arb_bot::{
         LiveTradingPreflightArtifact, LiveTradingPreflightInput, NoLiveActions,
         ReadOnlyFreshnessStatus,
     },
+    live_trading_signing::{
+        build_live_trading_signing_dry_run, live_trading_signing_dry_run_json,
+        live_trading_signing_payload_shape_json, LiveTradingSigningDryRunArtifact,
+        LiveTradingSigningDryRunInput,
+    },
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
     },
@@ -477,6 +482,17 @@ enum Commands {
         )]
         output_root: PathBuf,
     },
+    /// Build the LT3 final live-trading auth/signing dry-run artifact without any live write.
+    LiveTradingSigningDryRun {
+        #[arg(long, help = "LT3 approval ID for this signing dry-run artifact")]
+        approval_id: String,
+        #[arg(
+            long,
+            default_value = "artifacts/live_trading",
+            help = "Root directory for final live-trading redacted artifacts"
+        )]
+        output_root: PathBuf,
+    },
     /// Dry-run or execute the separately approved one-order LA7 taker canary.
     LiveAlphaTakerCanary {
         #[arg(long, help = "Required dry-run mode; never submits, signs, or cancels")]
@@ -534,6 +550,7 @@ impl Commands {
             Commands::LiveAlphaQuoteManager { .. } => "live-alpha-quote-manager",
             Commands::LiveAlphaAccountBaseline { .. } => "live-alpha-account-baseline",
             Commands::LiveTradingPreflight { .. } => "live-trading-preflight",
+            Commands::LiveTradingSigningDryRun { .. } => "live-trading-signing-dry-run",
             Commands::LiveAlphaTakerCanary { .. } => "live-alpha-taker-canary",
             Commands::LiveAlphaScaleReport { .. } => "live-alpha-scale-report",
         }
@@ -552,6 +569,7 @@ impl Commands {
             Commands::LiveAlphaQuoteManager { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaAccountBaseline { .. } => RuntimeMode::Validate,
             Commands::LiveTradingPreflight { .. } => RuntimeMode::Validate,
+            Commands::LiveTradingSigningDryRun { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaTakerCanary { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaScaleReport { .. } => RuntimeMode::Validate,
         }
@@ -1024,6 +1042,17 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &output_root,
                 )
                 .await?;
+            }
+            Commands::LiveTradingSigningDryRun {
+                approval_id,
+                output_root,
+            } => {
+                run_live_trading_signing_dry_run_command(
+                    &config,
+                    &run_id,
+                    approval_id,
+                    &output_root,
+                )?;
             }
             Commands::LiveAlphaTakerCanary {
                 dry_run,
@@ -8201,6 +8230,12 @@ struct LiveTradingPreflightCommandResult {
     output_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct LiveTradingSigningDryRunCommandResult {
+    artifact: LiveTradingSigningDryRunArtifact,
+    output_dir: PathBuf,
+}
+
 async fn run_live_trading_preflight_command(
     config: &AppConfig,
     run_id: &str,
@@ -8216,6 +8251,66 @@ async fn run_live_trading_preflight_command(
     let result = capture_live_trading_preflight(config, run_id, &baseline_id, output_root).await?;
     print_live_trading_preflight_result(&result);
     Ok(())
+}
+
+fn run_live_trading_signing_dry_run_command(
+    config: &AppConfig,
+    run_id: &str,
+    approval_id: String,
+    output_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_live_trading_approval_id(&approval_id)?;
+
+    let result = capture_live_trading_signing_dry_run(config, run_id, &approval_id, output_root)?;
+    print_live_trading_signing_dry_run_result(&result);
+    Ok(())
+}
+
+fn capture_live_trading_signing_dry_run(
+    config: &AppConfig,
+    run_id: &str,
+    approval_id: &str,
+    output_root: &Path,
+) -> Result<LiveTradingSigningDryRunCommandResult, Box<dyn std::error::Error>> {
+    validate_live_trading_approval_id(approval_id)?;
+    let captured_at_ms = unix_time_ms();
+    let captured_at_rfc3339 = OffsetDateTime::from_unix_timestamp(captured_at_ms / 1000)
+        .map_err(|error| format!("LT3 signing timestamp invalid: {error}"))?
+        .format(&Rfc3339)
+        .map_err(|error| format!("LT3 signing timestamp format failed: {error}"))?;
+    let secret_inventory = config.live_trading.secret_inventory();
+    let secret_report =
+        secret_handling::validate_secret_presence(&secret_inventory, &EnvSecretPresenceProvider)?;
+    let authenticated_readback_status = if config.live_trading.enabled {
+        "not_run_no_approved_host_readback_in_lt3_local_dry_run"
+    } else {
+        "not_run_local_dry_run"
+    };
+
+    let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
+        approval_id,
+        run_id,
+        captured_at_ms,
+        captured_at_rfc3339: &captured_at_rfc3339,
+        clob_host: &config.polymarket.clob_rest_url,
+        chain_id: 137,
+        final_live_config_enabled: config.live_trading.enabled,
+        wallet_address: &config.live_trading.wallet_address,
+        funder_address: &config.live_trading.funder_address,
+        signature_type: &config.live_trading.signature_type,
+        secret_inventory: &secret_inventory,
+        secret_report: &secret_report,
+        authenticated_readback_status,
+    })?;
+    artifact.validate()?;
+
+    let output_dir = output_root.join(approval_id);
+    write_live_trading_signing_dry_run_artifacts(&artifact, &output_dir)?;
+
+    Ok(LiveTradingSigningDryRunCommandResult {
+        artifact,
+        output_dir,
+    })
 }
 
 async fn capture_live_trading_preflight(
@@ -8307,6 +8402,28 @@ async fn capture_live_trading_preflight(
         account_baseline,
         output_dir,
     })
+}
+
+fn validate_live_trading_approval_id(approval_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if approval_id.is_empty() {
+        return Err("live-trading-signing-dry-run requires a non-empty --approval-id".into());
+    }
+    if approval_id != approval_id.trim() {
+        return Err(
+            "live-trading-signing-dry-run approval id must not contain leading or trailing whitespace"
+                .into(),
+        );
+    }
+    if !approval_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(
+            "live-trading-signing-dry-run approval id may contain only ASCII letters, numbers, '-' and '_'"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_live_trading_baseline_id(baseline_id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -8556,6 +8673,22 @@ fn write_live_trading_preflight_artifacts(
     Ok(())
 }
 
+fn write_live_trading_signing_dry_run_artifacts(
+    artifact: &LiveTradingSigningDryRunArtifact,
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(output_dir)?;
+    fs::write(
+        output_dir.join("signing_dry_run.redacted.json"),
+        live_trading_signing_dry_run_json(artifact)?,
+    )?;
+    fs::write(
+        output_dir.join("signing_payload_shape.redacted.json"),
+        live_trading_signing_payload_shape_json(artifact)?,
+    )?;
+    Ok(())
+}
+
 fn print_live_trading_preflight_result(result: &LiveTradingPreflightCommandResult) {
     println!(
         "live_trading_preflight_baseline_id={}",
@@ -8615,6 +8748,95 @@ fn print_live_trading_preflight_result(result: &LiveTradingPreflightCommandResul
     );
     println!(
         "live_trading_preflight_no_live_actions=submitted_orders:false,signed_orders_for_submission:false,submitted_cancels:false,heartbeat_posts:false,cap_writes:false"
+    );
+}
+
+fn print_live_trading_signing_dry_run_result(result: &LiveTradingSigningDryRunCommandResult) {
+    println!(
+        "live_trading_signing_dry_run_approval_id={}",
+        result.artifact.body.approval_id
+    );
+    println!(
+        "live_trading_signing_dry_run_run_id={}",
+        result.artifact.body.run_id
+    );
+    println!(
+        "live_trading_signing_dry_run_status={}",
+        result.artifact.body.status
+    );
+    println!(
+        "live_trading_signing_dry_run_block_reasons={}",
+        result.artifact.body.block_reasons.join(",")
+    );
+    println!(
+        "live_trading_signing_dry_run_not_submitted={}",
+        result.artifact.body.not_submitted
+    );
+    println!(
+        "live_trading_signing_dry_run_network_post_enabled={}",
+        result.artifact.body.network_post_enabled
+    );
+    println!(
+        "live_trading_signing_dry_run_network_cancel_enabled={}",
+        result.artifact.body.network_cancel_enabled
+    );
+    println!(
+        "live_trading_signing_dry_run_raw_signature_generated={}",
+        result.artifact.body.raw_signature_generated
+    );
+    println!(
+        "live_trading_signing_dry_run_auth_headers_generated={}",
+        result.artifact.body.auth_headers_generated
+    );
+    println!(
+        "live_trading_signing_dry_run_secret_backend={}",
+        result.artifact.body.secret_backend
+    );
+    println!(
+        "live_trading_signing_dry_run_secret_handle_count={}",
+        result.artifact.body.secret_handles.len()
+    );
+    println!(
+        "live_trading_signing_dry_run_secret_handles_present={}",
+        result
+            .artifact
+            .body
+            .secret_handles
+            .iter()
+            .all(|handle| handle.present)
+    );
+    println!(
+        "live_trading_signing_dry_run_signature_type={}",
+        result
+            .artifact
+            .body
+            .wallet_binding
+            .signature_type_name
+            .as_deref()
+            .unwrap_or("missing_or_invalid")
+    );
+    println!(
+        "live_trading_signing_dry_run_sanitized_signing_payload_hash={}",
+        result.artifact.body.sanitized_signing_payload_hash
+    );
+    println!(
+        "live_trading_signing_dry_run_artifact_hash={}",
+        result.artifact.artifact_hash
+    );
+    println!(
+        "live_trading_signing_dry_run_readback_status={}",
+        result.artifact.body.authenticated_readback_status
+    );
+    println!(
+        "live_trading_signing_dry_run_output_dir={}",
+        result.output_dir.display()
+    );
+    println!(
+        "live_trading_signing_dry_run_artifact_path={}",
+        result
+            .output_dir
+            .join("signing_dry_run.redacted.json")
+            .display()
     );
 }
 
@@ -12669,6 +12891,32 @@ mod tests {
             .expect("identifier-style baseline ID passes");
     }
 
+    #[test]
+    fn live_trading_signing_approval_id_rejects_path_components() {
+        for approval_id in [
+            "",
+            "../LT3",
+            "LT3/SIGNING",
+            r"LT3\SIGNING",
+            " LT3",
+            "LT3 SIGNING",
+        ] {
+            let error = validate_live_trading_approval_id(approval_id)
+                .expect_err("invalid approval ID must fail");
+            assert!(
+                error.to_string().contains("approval id")
+                    || error.to_string().contains("--approval-id"),
+                "unexpected error for {approval_id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_trading_signing_approval_id_accepts_identifier_characters() {
+        validate_live_trading_approval_id("LT3-LOCAL_DRY-RUN-001")
+            .expect("identifier-style approval ID passes");
+    }
+
     fn approved_live_trading_config() -> AppConfig {
         let mut config: AppConfig =
             toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
@@ -12805,6 +13053,30 @@ mod tests {
                 assert_eq!(output_root, PathBuf::from("artifacts/live_trading"));
             }
             other => panic!("expected live-trading-preflight command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_trading_signing_dry_run_command_parses_required_surface() {
+        let cli = Cli::try_parse_from([
+            "polymarket-15m-arb-bot",
+            "--config",
+            "config/default.toml",
+            "live-trading-signing-dry-run",
+            "--approval-id",
+            "LT3-LOCAL-DRY-RUN",
+        ])
+        .expect("LT3 signing dry-run parses");
+
+        match cli.command {
+            Commands::LiveTradingSigningDryRun {
+                approval_id,
+                output_root,
+            } => {
+                assert_eq!(approval_id, "LT3-LOCAL-DRY-RUN");
+                assert_eq!(output_root, PathBuf::from("artifacts/live_trading"));
+            }
+            other => panic!("expected live-trading-signing-dry-run command, got {other:?}"),
         }
     }
 

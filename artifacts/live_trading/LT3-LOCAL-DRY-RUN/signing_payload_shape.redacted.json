@@ -1,0 +1,48 @@
+{
+  "purpose": "lt3_shape_hash_only_no_signature_no_submit",
+  "non_submittable_fixture": true,
+  "order_type": "GTD",
+  "post_only": true,
+  "defer_exec": false,
+  "l1_private_key_handle_label": "signer_private_key",
+  "l2_credential_handle_labels": [
+    "clob_l2_access",
+    "clob_l2_credential",
+    "clob_l2_passphrase"
+  ],
+  "required_l2_header_fields": [
+    "POLY_ADDRESS",
+    "POLY_SIGNATURE",
+    "POLY_TIMESTAMP",
+    "POLY_API_KEY",
+    "POLY_PASSPHRASE"
+  ],
+  "required_order_fields": [
+    "order.maker",
+    "order.signer",
+    "order.tokenId",
+    "order.makerAmount",
+    "order.takerAmount",
+    "order.side",
+    "order.expiration",
+    "order.timestamp",
+    "order.metadata",
+    "order.builder",
+    "order.signature",
+    "order.salt",
+    "order.signatureType",
+    "owner",
+    "orderType",
+    "deferExec"
+  ],
+  "redacted_or_absent_fields": [
+    "order.signature",
+    "owner",
+    "POLY_SIGNATURE",
+    "POLY_API_KEY",
+    "POLY_PASSPHRASE"
+  ],
+  "owner": "<redacted:owner-not-loaded>",
+  "signature": "<redacted:not-generated>",
+  "signature_type_code": 1
+}

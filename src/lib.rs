@@ -32,6 +32,7 @@ pub mod live_trading_gate;
 pub mod live_trading_journal;
 pub mod live_trading_preflight;
 pub mod live_trading_reconciliation;
+pub mod live_trading_signing;
 pub mod live_user_events;
 pub mod market_discovery;
 pub mod metrics;
@@ -84,6 +85,7 @@ pub fn module_names() -> Vec<&'static str> {
         live_trading_journal::MODULE,
         live_trading_preflight::MODULE,
         live_trading_reconciliation::MODULE,
+        live_trading_signing::MODULE,
         live_user_events::MODULE,
         market_discovery::MODULE,
         metrics::MODULE,
