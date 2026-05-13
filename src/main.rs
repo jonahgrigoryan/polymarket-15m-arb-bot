@@ -8283,13 +8283,8 @@ async fn capture_live_trading_signing_dry_run(
     let secret_inventory = config.live_trading.secret_inventory();
     let secret_report =
         secret_handling::validate_secret_presence(&secret_inventory, &EnvSecretPresenceProvider)?;
-    let authenticated_readback_status = if secret_report.all_present() {
-        live_trading_signing_authenticated_readback_status(config).await?
-    } else if config.live_trading.enabled {
-        "not_run_secret_handles_missing".to_string()
-    } else {
-        "not_run_local_dry_run".to_string()
-    };
+    let authenticated_readback_status =
+        live_trading_signing_authenticated_readback_status(config, &secret_report).await?;
 
     let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
         approval_id,
@@ -8319,9 +8314,13 @@ async fn capture_live_trading_signing_dry_run(
 
 async fn live_trading_signing_authenticated_readback_status(
     config: &AppConfig,
+    secret_report: &secret_handling::SecretPresenceReport,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if !config.live_trading.enabled {
         return Ok("not_run_local_dry_run".to_string());
+    }
+    if !secret_report.all_present() {
+        return Ok("not_run_secret_handles_missing".to_string());
     }
 
     let deployment_host = current_host_label();

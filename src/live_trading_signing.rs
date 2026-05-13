@@ -50,10 +50,14 @@ impl LiveTradingSigningDryRunArtifact {
         if self.artifact_hash != expected {
             return Err(LiveTradingSigningError::HashMismatch);
         }
-        if !self.body.not_submitted || self.body.network_post_enabled {
+        if !self.body.not_submitted
+            || self.body.network_post_enabled
+            || self.body.network_cancel_enabled
+            || self.body.raw_signature_generated
+            || self.body.auth_headers_generated
+        {
             return Err(LiveTradingSigningError::Validation(vec![
-                "LT3 signing dry-run must remain not_submitted=true and network_post_enabled=false"
-                    .to_string(),
+                "LT3 signing dry-run must remain offline-only: not_submitted=true, network_post_enabled=false, network_cancel_enabled=false, raw_signature_generated=false, auth_headers_generated=false".to_string(),
             ]));
         }
         Ok(())
@@ -432,6 +436,24 @@ impl Error for LiveTradingSigningError {}
 mod tests {
     use super::*;
     use crate::secret_handling::{SecretHandle, SecretInventory, SecretPresenceCheck};
+
+    #[test]
+    fn live_trading_signing_validate_rejects_unsafe_offline_only_flags() {
+        let mut artifact = build_valid_artifact();
+        artifact.body.network_cancel_enabled = true;
+        artifact = LiveTradingSigningDryRunArtifact::new(artifact.body).expect("rehash");
+        let err = artifact
+            .validate()
+            .expect_err("unsafe flag must fail validate");
+        match err {
+            LiveTradingSigningError::Validation(messages) => {
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.contains("network_cancel_enabled")));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 
     #[test]
     fn live_trading_signing_dry_run_blocks_default_disabled_missing_state() {
