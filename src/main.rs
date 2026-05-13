@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use polymarket_15m_arb_bot::{
     compliance::{ComplianceClient, ComplianceError, GeoblockResponse},
-    config::{AppConfig, LiveBetaSecretHandlesConfig},
+    config::{AppConfig, LiveBetaSecretHandlesConfig, LiveTradingSecretHandlesConfig},
     domain::{
         Asset, FeeParameters, Market, MarketLifecycleState, OrderBookLevel, OrderBookSnapshot,
         OutcomeToken, PaperOrderStatus, ReferencePrice, RiskHaltReason, Side,
@@ -1052,7 +1052,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &run_id,
                     approval_id,
                     &output_root,
-                )?;
+                )
+                .await?;
             }
             Commands::LiveAlphaTakerCanary {
                 dry_run,
@@ -8253,7 +8254,7 @@ async fn run_live_trading_preflight_command(
     Ok(())
 }
 
-fn run_live_trading_signing_dry_run_command(
+async fn run_live_trading_signing_dry_run_command(
     config: &AppConfig,
     run_id: &str,
     approval_id: String,
@@ -8261,12 +8262,13 @@ fn run_live_trading_signing_dry_run_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_live_trading_approval_id(&approval_id)?;
 
-    let result = capture_live_trading_signing_dry_run(config, run_id, &approval_id, output_root)?;
+    let result =
+        capture_live_trading_signing_dry_run(config, run_id, &approval_id, output_root).await?;
     print_live_trading_signing_dry_run_result(&result);
     Ok(())
 }
 
-fn capture_live_trading_signing_dry_run(
+async fn capture_live_trading_signing_dry_run(
     config: &AppConfig,
     run_id: &str,
     approval_id: &str,
@@ -8281,10 +8283,12 @@ fn capture_live_trading_signing_dry_run(
     let secret_inventory = config.live_trading.secret_inventory();
     let secret_report =
         secret_handling::validate_secret_presence(&secret_inventory, &EnvSecretPresenceProvider)?;
-    let authenticated_readback_status = if config.live_trading.enabled {
-        "not_run_no_approved_host_readback_in_lt3_local_dry_run"
+    let authenticated_readback_status = if secret_report.all_present() {
+        live_trading_signing_authenticated_readback_status(config).await?
+    } else if config.live_trading.enabled {
+        "not_run_secret_handles_missing".to_string()
     } else {
-        "not_run_local_dry_run"
+        "not_run_local_dry_run".to_string()
     };
 
     let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
@@ -8300,7 +8304,7 @@ fn capture_live_trading_signing_dry_run(
         signature_type: &config.live_trading.signature_type,
         secret_inventory: &secret_inventory,
         secret_report: &secret_report,
-        authenticated_readback_status,
+        authenticated_readback_status: &authenticated_readback_status,
     })?;
     artifact.validate()?;
 
@@ -8311,6 +8315,60 @@ fn capture_live_trading_signing_dry_run(
         artifact,
         output_dir,
     })
+}
+
+async fn live_trading_signing_authenticated_readback_status(
+    config: &AppConfig,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if !config.live_trading.enabled {
+        return Ok("not_run_local_dry_run".to_string());
+    }
+
+    let deployment_host = current_host_label();
+    if !live_trading_signing_approved_host_scope_configured(config, &deployment_host) {
+        return Ok("not_run_no_approved_host_readback_in_lt3_local_dry_run".to_string());
+    }
+
+    let geoblock = live_trading_geoblock_readback(config).await;
+    if !live_trading_approval_context_matches(config, &deployment_host, &geoblock) {
+        return Ok("not_run_no_approved_host_readback_in_lt3_local_dry_run".to_string());
+    }
+    if live_trading_account_preflight(config).is_err() {
+        return Ok("not_run_account_binding_invalid".to_string());
+    }
+
+    match live_trading_authenticated_readback_evidence_with_geoblock(
+        config,
+        geoblock.passed_status(),
+    )
+    .await
+    {
+        Ok((_account, evidence)) => Ok(live_trading_signing_readback_status_from_report(
+            &evidence.report,
+        )),
+        Err(_) => Ok("error".to_string()),
+    }
+}
+
+fn live_trading_signing_approved_host_scope_configured(
+    config: &AppConfig,
+    deployment_host: &str,
+) -> bool {
+    config.live_trading.enabled
+        && !config.live_trading.approved_host.trim().is_empty()
+        && deployment_host == config.live_trading.approved_host
+        && !config.live_trading.approved_country.trim().is_empty()
+        && !config.live_trading.approved_region.trim().is_empty()
+}
+
+fn live_trading_signing_readback_status_from_report(report: &ReadbackPreflightReport) -> String {
+    if report.passed() && report.live_network_enabled {
+        "passed".to_string()
+    } else if report.block_reasons.is_empty() {
+        "blocked:live_network_not_enabled".to_string()
+    } else {
+        format!("blocked:{}", report.block_reasons.join(","))
+    }
 }
 
 async fn capture_live_trading_preflight(
@@ -11149,6 +11207,34 @@ async fn live_alpha_authenticated_readback_evidence_with_geoblock(
     Ok((account, evidence))
 }
 
+async fn live_trading_authenticated_readback_evidence_with_geoblock(
+    config: &AppConfig,
+    deployment_geoblock_passed: bool,
+) -> Result<(AccountPreflight, AuthenticatedReadbackPreflightEvidence), Box<dyn std::error::Error>>
+{
+    let credentials = live_trading_l2_credentials_from_env(&config.live_trading.secret_handles)?;
+    let account = live_trading_account_preflight(config)?;
+    let required_collateral_allowance_units = config
+        .live_beta
+        .readback_account
+        .required_collateral_allowance_units
+        .max(1);
+    let evidence =
+        live_beta_readback::authenticated_readback_preflight_evidence(AuthenticatedReadbackInput {
+            prerequisites: ReadbackPrerequisites {
+                lb3_hold_released: true,
+                legal_access_approved: true,
+                deployment_geoblock_passed,
+            },
+            account: account.clone(),
+            credentials,
+            required_collateral_allowance_units,
+            request_timeout_ms: config.polymarket.request_timeout_ms,
+        })
+        .await?;
+    Ok((account, evidence))
+}
+
 fn current_host_label() -> String {
     for key in ["HOSTNAME", "HOST"] {
         if let Ok(value) = env::var(key) {
@@ -11925,6 +12011,25 @@ fn lb4_account_preflight(
     })
 }
 
+fn live_trading_account_preflight(
+    config: &AppConfig,
+) -> Result<AccountPreflight, Box<dyn std::error::Error>> {
+    let account = &config.live_trading;
+    let Some(signature_type) = SignatureType::from_config(&account.signature_type) else {
+        return Err(
+            "LT3 readback account signature_type must be eoa, poly_proxy, gnosis_safe, or poly_1271"
+                .into(),
+        );
+    };
+    Ok(AccountPreflight {
+        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+        chain_id: 137,
+        wallet_address: account.wallet_address.clone(),
+        funder_address: account.funder_address.clone(),
+        signature_type,
+    })
+}
+
 fn normalize_lb4_clob_host(url: &str) -> String {
     let trimmed = url.trim();
     let Ok(parsed) = url::Url::parse(trimmed) else {
@@ -11951,6 +12056,19 @@ fn lb4_l2_credentials_from_env(
             .map_err(|_| "LB4 clob_l2_credential handle is not present")?,
         api_passphrase: env::var(&handles.clob_l2_passphrase)
             .map_err(|_| "LB4 clob_l2_passphrase handle is not present")?,
+    })
+}
+
+fn live_trading_l2_credentials_from_env(
+    handles: &LiveTradingSecretHandlesConfig,
+) -> Result<L2ReadbackCredentials, Box<dyn std::error::Error>> {
+    Ok(L2ReadbackCredentials {
+        api_key: env::var(&handles.clob_l2_access)
+            .map_err(|_| "LT3 clob_l2_access handle is not present")?,
+        api_secret: env::var(&handles.clob_l2_credential)
+            .map_err(|_| "LT3 clob_l2_credential handle is not present")?,
+        api_passphrase: env::var(&handles.clob_l2_passphrase)
+            .map_err(|_| "LT3 clob_l2_passphrase handle is not present")?,
     })
 }
 
@@ -12862,6 +12980,70 @@ mod tests {
             "approved-host",
             &geoblock
         ));
+    }
+
+    #[test]
+    fn live_trading_signing_approved_host_scope_requires_exact_host_and_region_config() {
+        let mut config = approved_live_trading_config();
+
+        assert!(live_trading_signing_approved_host_scope_configured(
+            &config,
+            "approved-host"
+        ));
+
+        assert!(!live_trading_signing_approved_host_scope_configured(
+            &config,
+            "unapproved-host"
+        ));
+
+        config.live_trading.approved_region.clear();
+        assert!(!live_trading_signing_approved_host_scope_configured(
+            &config,
+            "approved-host"
+        ));
+    }
+
+    #[test]
+    fn live_trading_signing_readback_status_requires_passed_live_network_report() {
+        let mut report = live_beta_readback::sample_readback_preflight(ReadbackPrerequisites {
+            lb3_hold_released: true,
+            legal_access_approved: true,
+            deployment_geoblock_passed: true,
+        })
+        .expect("sample report builds");
+
+        assert_eq!(
+            live_trading_signing_readback_status_from_report(&report),
+            "blocked:live_network_not_enabled"
+        );
+
+        report.live_network_enabled = true;
+        assert_eq!(
+            live_trading_signing_readback_status_from_report(&report),
+            "passed"
+        );
+
+        report.block_reasons.push("unexpected_open_orders");
+        assert_eq!(
+            live_trading_signing_readback_status_from_report(&report),
+            "blocked:unexpected_open_orders"
+        );
+    }
+
+    #[test]
+    fn live_trading_signing_account_preflight_uses_final_live_account_binding() {
+        let mut config = approved_live_trading_config();
+        config.live_trading.wallet_address =
+            "0x1111111111111111111111111111111111111111".to_string();
+        config.live_trading.funder_address =
+            "0x2222222222222222222222222222222222222222".to_string();
+        config.live_trading.signature_type = "poly_1271".to_string();
+
+        let account = live_trading_account_preflight(&config).expect("account preflight passes");
+
+        assert_eq!(account.wallet_address, config.live_trading.wallet_address);
+        assert_eq!(account.funder_address, config.live_trading.funder_address);
+        assert_eq!(account.signature_type, SignatureType::Poly1271);
     }
 
     #[test]

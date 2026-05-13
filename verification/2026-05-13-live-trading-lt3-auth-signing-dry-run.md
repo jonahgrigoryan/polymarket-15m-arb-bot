@@ -11,6 +11,7 @@ Rechecked on 2026-05-13:
 - Polymarket Authentication: https://docs.polymarket.com/api-reference/authentication
   - CLOB auth is still split between L1 private-key signing and L2 API-key/HMAC headers.
   - Trading endpoints require `POLY_*` L2 headers.
+  - L2 authentication is used for balance/allowance checks and user open-order reads.
   - Orders still require a signed order payload even when L2 headers are present.
   - Signature types now include `0` EOA, `1` POLY_PROXY, `2` GNOSIS_SAFE, and `3` POLY_1271 deposit wallet.
 - Polymarket Create Order: https://docs.polymarket.com/trading/orders/create
@@ -36,6 +37,7 @@ Rechecked on 2026-05-13:
   - `signature_type`
 - Added CLI:
   - `live-trading-signing-dry-run --approval-id <LT3-id>`
+- Added approved-host authenticated readback wiring for enabled final-live configs. The command checks exact approved host/country/region scope before using final-live L2 handle values for read-only account readback. The artifact can pass with `final_live_config_enabled=true` only when that readback returns `authenticated_readback_status=passed`.
 - Added redacted artifacts:
   - `artifacts/live_trading/LT3-LOCAL-DRY-RUN/signing_dry_run.redacted.json`
   - `artifacts/live_trading/LT3-LOCAL-DRY-RUN/signing_payload_shape.redacted.json`
@@ -61,7 +63,7 @@ Result:
 - `auth_headers_generated=false`
 - `authenticated_readback_status=not_run_local_dry_run`
 - Sanitized signing payload hash: `sha256:b1248bb921d2fa352ca775a8f69b715667702a263ece9eacbd6ec823790f278c`
-- Artifact hash: `sha256:46a61e1e642c97fff8bf5026b279e67fb6ad5732f83bba3faf463daf0ce0ca73`
+- Artifact hash: `sha256:fe50862f8f883502d0acf5b489b5c763fb5d1cdbe82806acd59b34bb2f2722a9`
 
 Interpretation: with the local `.env` sourced and live trading explicitly disabled for the local `LT3-LOCAL-*` dry-run, the LT3 signing/auth dry-run gate passes while the tracked `config/default.toml` remains fail-closed. The dry-run still proves no submission, cancel, raw signature generation, or auth header generation.
 
@@ -84,6 +86,8 @@ Result:
 - `authenticated_readback_status=not_run_no_approved_host_readback_in_lt3_local_dry_run`
 
 Interpretation: an enabled final-live config can no longer emit a passing LT3 signing dry-run artifact unless approved-host authenticated readback has passed.
+
+No approved-host live-network readback was run from this local branch context because the tracked default config has no approved host/country/region. The code path is wired for the post-approval command in `LIVE_TRADING_IMPLEMENTATION_PLAN.md` and remains fail-closed outside exact approved scope.
 
 ## Secret Handling
 
@@ -117,8 +121,9 @@ Interpretation: an enabled final-live config can no longer emit a passing LT3 si
 | `set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 local artifact generated with `status=passed`, `final_live_config_enabled=false`, `secret_handles_present=true`, `not_submitted=true`, and `network_post_enabled=false`. |
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked` and `approved_authenticated_readback_not_passed`. |
 | `cargo test --offline secret_handling` | PASS | 5 tests passed. |
-| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 7 module tests and 3 CLI/id tests passed. |
-| `cargo test --offline --quiet` | PASS | 450 lib tests, 101 bin tests, and 0 doc tests passed after this note was added. |
+| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 7 module tests and 6 CLI/id/readback-gate tests passed. |
+| `cargo test --offline balance_allowance_signature_type_params_match_official_v2_client` | PASS | Confirms readback signature-type query params include `POLY_1271` as `3`. |
+| `cargo test --offline --quiet` | PASS | 450 lib tests, 104 bin tests, and 0 doc tests passed after the approved-readback review fix. |
 | `cargo clippy --offline -- -D warnings` | PASS | Passed through `scripts/verify-pr.sh` after this note was added. |
 | `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. |
 
@@ -131,4 +136,4 @@ Interpretation: an enabled final-live config can no longer emit a passing LT3 si
 
 ## Exit Gate
 
-LT3 is locally implemented and verified for code review. The signing/auth local dry-run gate passes with sourced local final-live handles and env-supplied wallet/funder/signature-type binding while tracked defaults remain fail-closed. Enabled final-live configs now fail closed unless approved-host authenticated readback has passed. Stop here; do not start LT4 maker shadow work from this branch without security/signing review and operator approval.
+LT3 is locally implemented and verified for code review. The signing/auth local dry-run gate passes with sourced local final-live handles and env-supplied wallet/funder/signature-type binding while tracked defaults remain fail-closed. Enabled final-live configs now fail closed unless exact approved-host scope allows authenticated readback and that readback passes. Stop here; do not start LT4 maker shadow work from this branch without security/signing review and operator approval.

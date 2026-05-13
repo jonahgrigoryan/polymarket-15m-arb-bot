@@ -40,6 +40,7 @@ pub enum SignatureType {
     Eoa,
     PolyProxy,
     GnosisSafe,
+    Poly1271,
 }
 
 impl SignatureType {
@@ -48,6 +49,7 @@ impl SignatureType {
             "0" | "eoa" => Some(Self::Eoa),
             "1" | "poly_proxy" | "poly-proxy" | "polyproxy" => Some(Self::PolyProxy),
             "2" | "gnosis_safe" | "gnosis-safe" | "gnosissafe" => Some(Self::GnosisSafe),
+            "3" | "poly_1271" | "poly-1271" | "poly1271" => Some(Self::Poly1271),
             _ => None,
         }
     }
@@ -57,6 +59,7 @@ impl SignatureType {
             Self::Eoa => "eoa",
             Self::PolyProxy => "poly_proxy",
             Self::GnosisSafe => "gnosis_safe",
+            Self::Poly1271 => "poly_1271",
         }
     }
 
@@ -65,6 +68,7 @@ impl SignatureType {
             Self::Eoa => "0",
             Self::PolyProxy => "1",
             Self::GnosisSafe => "2",
+            Self::Poly1271 => "3",
         }
     }
 }
@@ -1456,6 +1460,7 @@ mod tests {
         assert_eq!(SignatureType::Eoa.as_balance_allowance_param(), "0");
         assert_eq!(SignatureType::PolyProxy.as_balance_allowance_param(), "1");
         assert_eq!(SignatureType::GnosisSafe.as_balance_allowance_param(), "2");
+        assert_eq!(SignatureType::Poly1271.as_balance_allowance_param(), "3");
     }
 
     #[test]

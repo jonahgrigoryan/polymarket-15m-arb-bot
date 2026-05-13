@@ -1,11 +1,11 @@
 {
-  "artifact_hash": "sha256:46a61e1e642c97fff8bf5026b279e67fb6ad5732f83bba3faf463daf0ce0ca73",
+  "artifact_hash": "sha256:fe50862f8f883502d0acf5b489b5c763fb5d1cdbe82806acd59b34bb2f2722a9",
   "body": {
     "schema_version": "lt3.live_trading_signing_dry_run.v1",
     "approval_id": "LT3-LOCAL-DRY-RUN",
-    "run_id": "18af1de21935fc10-44db-0",
-    "captured_at_ms": 1778673234757,
-    "captured_at_rfc3339": "2026-05-13T11:53:54Z",
+    "run_id": "18af1f187f122ce8-6b28-0",
+    "captured_at_ms": 1778674567906,
+    "captured_at_rfc3339": "2026-05-13T12:16:07Z",
     "status": "passed",
     "block_reasons": [],
     "final_live_config_enabled": false,
