@@ -8211,9 +8211,7 @@ async fn run_live_trading_preflight_command(
     if !read_only {
         return Err("live-trading-preflight requires --read-only".into());
     }
-    if baseline_id.trim().is_empty() {
-        return Err("live-trading-preflight requires a non-empty --baseline-id".into());
-    }
+    validate_live_trading_baseline_id(&baseline_id)?;
 
     let result = capture_live_trading_preflight(config, run_id, &baseline_id, output_root).await?;
     print_live_trading_preflight_result(&result);
@@ -8226,6 +8224,7 @@ async fn capture_live_trading_preflight(
     baseline_id: &str,
     output_root: &Path,
 ) -> Result<LiveTradingPreflightCommandResult, Box<dyn std::error::Error>> {
+    validate_live_trading_baseline_id(baseline_id)?;
     let captured_at_ms = unix_time_ms();
     let captured_at_rfc3339 = OffsetDateTime::from_unix_timestamp(captured_at_ms / 1000)
         .map_err(|error| format!("LT1 preflight timestamp invalid: {error}"))?
@@ -8308,6 +8307,28 @@ async fn capture_live_trading_preflight(
         account_baseline,
         output_dir,
     })
+}
+
+fn validate_live_trading_baseline_id(baseline_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if baseline_id.is_empty() {
+        return Err("live-trading-preflight requires a non-empty --baseline-id".into());
+    }
+    if baseline_id != baseline_id.trim() {
+        return Err(
+            "live-trading-preflight baseline id must not contain leading or trailing whitespace"
+                .into(),
+        );
+    }
+    if !baseline_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(
+            "live-trading-preflight baseline id may contain only ASCII letters, numbers, '-' and '_'"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn live_trading_approval_context_matches(
@@ -12619,6 +12640,33 @@ mod tests {
             "approved-host",
             &geoblock
         ));
+    }
+
+    #[test]
+    fn live_trading_baseline_id_rejects_path_components() {
+        for baseline_id in [
+            "",
+            "../LT1",
+            "LT1/READONLY",
+            r"LT1\READONLY",
+            "LT1..READONLY",
+            " LT1",
+            "LT1 READONLY",
+        ] {
+            let error = validate_live_trading_baseline_id(baseline_id)
+                .expect_err("invalid baseline ID must fail");
+            assert!(
+                error.to_string().contains("baseline id")
+                    || error.to_string().contains("--baseline-id"),
+                "unexpected error for {baseline_id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_trading_baseline_id_accepts_identifier_characters() {
+        validate_live_trading_baseline_id("LT1-LOCAL_DRY-RUN-001")
+            .expect("identifier-style baseline ID passes");
     }
 
     fn approved_live_trading_config() -> AppConfig {

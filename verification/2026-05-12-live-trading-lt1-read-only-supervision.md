@@ -57,7 +57,8 @@ Relevant assumptions used for LT1:
 - Updated `STATUS.md` to point to LT1 and the commit/PR hold before LT2.
 - PR #44 review fixes:
   - authenticated L2 readback now requires final-live config enabled plus exact approved host and geoblock jurisdiction match before credentials are used,
-  - approved-context LT1 runs now populate actual read-only market discovery, book, reference, and predictive freshness statuses before evaluating the final-live gate.
+  - approved-context LT1 runs now populate actual read-only market discovery, book, reference, and predictive freshness statuses before evaluating the final-live gate,
+  - `--baseline-id` is validated as an identifier before it is used as an artifact path component, rejecting `..`, path separators, whitespace, and other non-identifier characters.
 
 ## Local LT1 Artifact
 
@@ -120,7 +121,7 @@ Reason: no approved final-live config with `[live_trading].enabled=true`, approv
 | Check | Status | Notes |
 | --- | --- | --- |
 | `cargo run --offline -- --config config/default.toml validate --local-only` | PASS | Run ID `18aef17d7a5d9908-f188-0`; `validation_status=ok`; live order placement remains false. |
-| `cargo test --offline live_trading --lib --bin polymarket-15m-arb-bot` | PASS | 3 preflight module tests and 4 main binary LT1 tests passed, including the approved-host/jurisdiction readback context regression tests. |
+| `cargo test --offline live_trading --lib --bin polymarket-15m-arb-bot` | PASS | 3 preflight module tests and 6 main binary LT1 tests passed, including approved-host/jurisdiction readback context and baseline-id path-component regression tests. |
 | `cargo test --offline live_account_baseline` | PASS | 12 tests passed. |
 | `cargo test --offline live_alpha_preflight` | PASS | 6 tests passed. |
 | `cargo run --offline -- --config config/default.toml live-trading-preflight --read-only --baseline-id LT1-LOCAL-DRY-RUN` | PASS | Produced blocked redacted LT1 artifacts with no live actions. |
