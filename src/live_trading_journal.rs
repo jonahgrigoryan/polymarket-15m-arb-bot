@@ -168,6 +168,14 @@ impl FreshnessObservation {
     pub fn is_fresh(&self) -> bool {
         self.status == "fresh" && self.age_ms <= self.max_age_ms
     }
+
+    pub fn is_fresh_at(&self, checked_at_ms: i64) -> bool {
+        self.is_fresh()
+            && self.max_age_ms >= 0
+            && checked_at_ms
+                .checked_sub(self.observed_at_ms)
+                .is_some_and(|age_ms| age_ms >= 0 && age_ms <= self.max_age_ms)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -250,6 +258,8 @@ pub fn reduce_live_trading_journal_events(
                 state
                     .intended_maker_orders
                     .insert(order.intent_id.clone(), order.clone());
+                state.reconciliation_passed = false;
+                state.reconciliation_halted = false;
             }
             LiveTradingJournalEventKind::CancelIntended(cancel) => {
                 state
@@ -384,6 +394,35 @@ mod tests {
             error,
             LiveTradingJournalError::SchemaVersionMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn live_trading_journal_reducer_resets_reconciliation_for_new_intent() {
+        let mut second_order = sample_order();
+        second_order.intent_id = "intent-2".to_string();
+
+        let events = vec![
+            event(
+                "event-1",
+                LiveTradingJournalEventKind::MakerOrderIntended(sample_order()),
+            ),
+            event(
+                "event-2",
+                LiveTradingJournalEventKind::ReconciliationPassed(ReconciliationMarker {
+                    reconciliation_id: "recon-1".to_string(),
+                }),
+            ),
+            event(
+                "event-3",
+                LiveTradingJournalEventKind::MakerOrderIntended(second_order),
+            ),
+        ];
+
+        let state = reduce_live_trading_journal_events(&events).expect("journal reduces");
+
+        assert!(!state.reconciliation_passed);
+        assert!(!state.reconciliation_halted);
+        assert!(!state.previous_order_reconciled_or_incident_reviewed());
     }
 
     pub(crate) fn sample_order() -> IntendedMakerOrder {

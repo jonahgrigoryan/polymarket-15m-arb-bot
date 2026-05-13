@@ -32,6 +32,7 @@ pub struct LiveTradingReconciliationInput {
 #[serde(rename_all = "snake_case")]
 pub enum LiveTradingReconciliationMismatch {
     UnknownVenueOrder,
+    AcceptedOrderDrift,
     UnknownTrade,
     MissingAcceptedOrder,
     UnexpectedFill,
@@ -47,6 +48,7 @@ impl LiveTradingReconciliationMismatch {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::UnknownVenueOrder => "unknown_venue_order",
+            Self::AcceptedOrderDrift => "accepted_order_drift",
             Self::UnknownTrade => "unknown_trade",
             Self::MissingAcceptedOrder => "missing_accepted_order",
             Self::UnexpectedFill => "unexpected_fill",
@@ -88,9 +90,15 @@ pub fn reconcile_live_trading_state(
     let mut mismatches = BTreeSet::new();
     let local_order_ids = input.local.accepted_order_ids();
 
-    for order_id in input.readback.orders.keys() {
-        if !local_order_ids.contains(order_id) {
-            mismatches.insert(LiveTradingReconciliationMismatch::UnknownVenueOrder);
+    for (order_id, readback_order) in &input.readback.orders {
+        match input.local.accepted_orders.get(order_id) {
+            Some(local_order) if local_order == readback_order => {}
+            Some(_) => {
+                mismatches.insert(LiveTradingReconciliationMismatch::AcceptedOrderDrift);
+            }
+            None => {
+                mismatches.insert(LiveTradingReconciliationMismatch::UnknownVenueOrder);
+            }
         }
     }
     for order_id in &local_order_ids {
@@ -132,6 +140,7 @@ pub fn reconcile_live_trading_state(
             .heartbeat
             .as_ref()
             .or(input.local.latest_heartbeat.as_ref()),
+        input.checked_at_ms,
     ) {
         mismatches.insert(LiveTradingReconciliationMismatch::StaleHeartbeat);
     }
@@ -141,6 +150,7 @@ pub fn reconcile_live_trading_state(
             .geoblock
             .as_ref()
             .or(input.local.latest_geoblock.as_ref()),
+        input.checked_at_ms,
     ) {
         mismatches.insert(LiveTradingReconciliationMismatch::StaleGeoblock);
     }
@@ -161,8 +171,8 @@ pub fn reconcile_live_trading_state(
     }
 }
 
-fn fresh(observation: Option<&FreshnessObservation>) -> bool {
-    observation.is_some_and(FreshnessObservation::is_fresh)
+fn fresh(observation: Option<&FreshnessObservation>, checked_at_ms: i64) -> bool {
+    observation.is_some_and(|observation| observation.is_fresh_at(checked_at_ms))
 }
 
 #[cfg(test)]
@@ -251,6 +261,50 @@ mod tests {
         ] {
             assert!(report.mismatches.contains(&expected), "{expected:?}");
         }
+    }
+
+    #[test]
+    fn live_trading_reconciliation_halts_on_accepted_order_drift() {
+        let local = matching_local_state();
+        let mut readback = matching_readback_fixture(&local);
+        readback
+            .orders
+            .get_mut("order-1")
+            .expect("fixture order exists")
+            .status = "ORDER_STATUS_CANCELED".to_string();
+
+        let report = reconcile_live_trading_state(LiveTradingReconciliationInput {
+            run_id: "lt2-recon-order-drift".to_string(),
+            checked_at_ms: 2,
+            local,
+            readback,
+        });
+
+        assert_eq!(report.status, "halt_required");
+        assert!(report
+            .mismatches
+            .contains(&LiveTradingReconciliationMismatch::AcceptedOrderDrift));
+    }
+
+    #[test]
+    fn live_trading_reconciliation_recomputes_freshness_at_check_time() {
+        let local = matching_local_state();
+        let readback = matching_readback_fixture(&local);
+
+        let report = reconcile_live_trading_state(LiveTradingReconciliationInput {
+            run_id: "lt2-recon-stale-at-check".to_string(),
+            checked_at_ms: 30_000,
+            local,
+            readback,
+        });
+
+        assert_eq!(report.status, "halt_required");
+        assert!(report
+            .mismatches
+            .contains(&LiveTradingReconciliationMismatch::StaleHeartbeat));
+        assert!(report
+            .mismatches
+            .contains(&LiveTradingReconciliationMismatch::StaleGeoblock));
     }
 
     pub(crate) fn matching_local_state() -> LiveTradingJournalState {
