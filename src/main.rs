@@ -8323,7 +8323,7 @@ async fn live_trading_signing_authenticated_readback_status(
         return Ok("not_run_secret_handles_missing".to_string());
     }
 
-    let deployment_host = current_host_label();
+    let deployment_host = live_trading_deployment_host_identity();
     if !live_trading_signing_approved_host_scope_configured(config, &deployment_host) {
         return Ok("not_run_no_approved_host_readback_in_lt3_local_dry_run".to_string());
     }
@@ -8382,7 +8382,7 @@ async fn capture_live_trading_preflight(
         .map_err(|error| format!("LT1 preflight timestamp invalid: {error}"))?
         .format(&Rfc3339)
         .map_err(|error| format!("LT1 preflight timestamp format failed: {error}"))?;
-    let deployment_host = current_host_label();
+    let deployment_host = live_trading_deployment_host_identity();
     let geoblock = live_trading_geoblock_readback(config).await;
     let l2_secret_report = secret_handling::validate_secret_presence(
         &config.live_beta.secret_inventory(),
@@ -11252,6 +11252,41 @@ fn current_host_label() -> String {
         .unwrap_or_else(|| "unknown-host".to_string())
 }
 
+/// Host identity for live-trading approved-host checks (LT1 preflight, LT3 signing dry-run).
+/// Uses kernel-reported hostnames (`hostname`, `uname -n`) and does not read `HOSTNAME`/`HOST`,
+/// which can be overridden in the process environment and would weaken approved-host binding.
+fn live_trading_deployment_host_identity() -> String {
+    try_kernel_reported_hostname().unwrap_or_else(|| "unknown-host".to_string())
+}
+
+fn try_kernel_reported_hostname() -> Option<String> {
+    let from_hostname = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if from_hostname.is_some() {
+        return from_hostname;
+    }
+    #[cfg(unix)]
+    {
+        return std::process::Command::new("uname")
+            .arg("-n")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 fn append_la3_journal_event(
     journal: &LiveOrderJournal,
     run_id: &str,
@@ -12979,6 +13014,12 @@ mod tests {
             "approved-host",
             &geoblock
         ));
+    }
+
+    #[test]
+    fn live_trading_deployment_host_identity_is_non_empty_in_test_env() {
+        let id = live_trading_deployment_host_identity();
+        assert!(!id.trim().is_empty(), "expected kernel-reported hostname");
     }
 
     #[test]
