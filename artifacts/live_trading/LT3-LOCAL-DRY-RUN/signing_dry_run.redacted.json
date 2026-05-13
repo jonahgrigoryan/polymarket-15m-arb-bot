@@ -1,14 +1,14 @@
 {
-  "artifact_hash": "sha256:b1a95c5c4636f8801fdc5494bbbfcb2a35667143791e2b936635af3ca4bc5ed3",
+  "artifact_hash": "sha256:46a61e1e642c97fff8bf5026b279e67fb6ad5732f83bba3faf463daf0ce0ca73",
   "body": {
     "schema_version": "lt3.live_trading_signing_dry_run.v1",
     "approval_id": "LT3-LOCAL-DRY-RUN",
-    "run_id": "18af1cdddbe49c90-27a5-0",
-    "captured_at_ms": 1778672117037,
-    "captured_at_rfc3339": "2026-05-13T11:35:17Z",
+    "run_id": "18af1de21935fc10-44db-0",
+    "captured_at_ms": 1778673234757,
+    "captured_at_rfc3339": "2026-05-13T11:53:54Z",
     "status": "passed",
     "block_reasons": [],
-    "final_live_config_enabled": true,
+    "final_live_config_enabled": false,
     "clob_host": "https://clob.polymarket.com",
     "chain_id": 137,
     "secret_backend": "env",
@@ -99,6 +99,6 @@
     "network_cancel_enabled": false,
     "raw_signature_generated": false,
     "auth_headers_generated": false,
-    "authenticated_readback_status": "not_run_no_approved_host_readback_in_lt3_local_dry_run"
+    "authenticated_readback_status": "not_run_local_dry_run"
   }
 }

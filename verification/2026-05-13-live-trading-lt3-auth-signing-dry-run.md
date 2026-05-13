@@ -45,7 +45,7 @@ Rechecked on 2026-05-13:
 Command:
 
 ```text
-set -a; source .env; P15M_LIVE_TRADING_ENABLED=true; set +a; cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN
+set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN
 ```
 
 Result:
@@ -53,6 +53,7 @@ Result:
 - Command status: PASS
 - Artifact status: `passed`
 - Block reasons: none
+- `final_live_config_enabled=false`
 - `not_submitted=true`
 - `network_post_enabled=false`
 - `network_cancel_enabled=false`
@@ -60,9 +61,29 @@ Result:
 - `auth_headers_generated=false`
 - `authenticated_readback_status=not_run_local_dry_run`
 - Sanitized signing payload hash: `sha256:b1248bb921d2fa352ca775a8f69b715667702a263ece9eacbd6ec823790f278c`
-- Artifact hash: `sha256:b1a95c5c4636f8801fdc5494bbbfcb2a35667143791e2b936635af3ca4bc5ed3`
+- Artifact hash: `sha256:46a61e1e642c97fff8bf5026b279e67fb6ad5732f83bba3faf463daf0ce0ca73`
 
-Interpretation: with the local `.env` sourced and `P15M_LIVE_TRADING_ENABLED=true` set for the command, the LT3 signing/auth dry-run gate passes while the tracked `config/default.toml` remains fail-closed. The dry-run still proves no submission, cancel, raw signature generation, or auth header generation.
+Interpretation: with the local `.env` sourced and live trading explicitly disabled for the local `LT3-LOCAL-*` dry-run, the LT3 signing/auth dry-run gate passes while the tracked `config/default.toml` remains fail-closed. The dry-run still proves no submission, cancel, raw signature generation, or auth header generation.
+
+## Enabled-Config Readback Block Check
+
+Command:
+
+```text
+set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check
+```
+
+Result:
+
+- Command status: PASS
+- Artifact status: `blocked`
+- Block reasons: `approved_authenticated_readback_not_passed`
+- `final_live_config_enabled=true`
+- `not_submitted=true`
+- `network_post_enabled=false`
+- `authenticated_readback_status=not_run_no_approved_host_readback_in_lt3_local_dry_run`
+
+Interpretation: an enabled final-live config can no longer emit a passing LT3 signing dry-run artifact unless approved-host authenticated readback has passed.
 
 ## Secret Handling
 
@@ -93,10 +114,11 @@ Interpretation: with the local `.env` sourced and `P15M_LIVE_TRADING_ENABLED=tru
 | --- | --- | --- |
 | `cargo run --offline -- --config config/default.toml validate --local-only` | PASS | Local-only validation passed with `live_order_placement_enabled=false`. |
 | `set -a; source .env >/dev/null 2>&1; set +a; cargo run --offline -- --config config/default.toml validate --local-only --validate-secret-handles` | PASS | Existing presence-strict Live Beta handle check passed with local env loaded; values were not printed. |
-| `set -a; source .env; P15M_LIVE_TRADING_ENABLED=true; set +a; cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 artifact generated with `status=passed`, `secret_handles_present=true`, `not_submitted=true`, and `network_post_enabled=false`. |
+| `set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 local artifact generated with `status=passed`, `final_live_config_enabled=false`, `secret_handles_present=true`, `not_submitted=true`, and `network_post_enabled=false`. |
+| `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked` and `approved_authenticated_readback_not_passed`. |
 | `cargo test --offline secret_handling` | PASS | 5 tests passed. |
-| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 5 module tests and 3 CLI/id tests passed. |
-| `cargo test --offline --quiet` | PASS | 448 lib tests, 101 bin tests, and 0 doc tests passed after this note was added. |
+| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 7 module tests and 3 CLI/id tests passed. |
+| `cargo test --offline --quiet` | PASS | 450 lib tests, 101 bin tests, and 0 doc tests passed after this note was added. |
 | `cargo clippy --offline -- -D warnings` | PASS | Passed through `scripts/verify-pr.sh` after this note was added. |
 | `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. |
 
@@ -109,4 +131,4 @@ Interpretation: with the local `.env` sourced and `P15M_LIVE_TRADING_ENABLED=tru
 
 ## Exit Gate
 
-LT3 is locally implemented and verified for code review/commit. The signing/auth dry-run gate passes with sourced local final-live handles, explicit local `P15M_LIVE_TRADING_ENABLED=true`, and env-supplied wallet/funder/signature-type binding while tracked defaults remain fail-closed. Stop here; do not start LT4 maker shadow work from this branch without security/signing review and operator approval.
+LT3 is locally implemented and verified for code review. The signing/auth local dry-run gate passes with sourced local final-live handles and env-supplied wallet/funder/signature-type binding while tracked defaults remain fail-closed. Enabled final-live configs now fail closed unless approved-host authenticated readback has passed. Stop here; do not start LT4 maker shadow work from this branch without security/signing review and operator approval.

@@ -11,6 +11,7 @@ pub const MODULE: &str = "live_trading_signing";
 const SCHEMA_VERSION: &str = "lt3.live_trading_signing_dry_run.v1";
 const REDACTED_OWNER: &str = "<redacted:owner-not-loaded>";
 const REDACTED_SIGNATURE: &str = "<redacted:not-generated>";
+const AUTHENTICATED_READBACK_PASSED: &str = "passed";
 
 #[derive(Debug, Clone)]
 pub struct LiveTradingSigningDryRunInput<'a> {
@@ -234,12 +235,18 @@ fn block_reasons(
     signature_type: Option<LiveTradingSignatureType>,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
+    let local_dry_run = is_local_dry_run_approval_id(input.approval_id);
 
-    if !input.final_live_config_enabled {
+    if !input.final_live_config_enabled && !local_dry_run {
         reasons.push("final_live_config_disabled".to_string());
     }
     if !input.approval_id.starts_with("LT3-") {
         reasons.push("approval_id_not_lt3".to_string());
+    }
+    if (input.final_live_config_enabled || !local_dry_run)
+        && input.authenticated_readback_status.trim() != AUTHENTICATED_READBACK_PASSED
+    {
+        reasons.push("approved_authenticated_readback_not_passed".to_string());
     }
     if !input.secret_report.all_present() {
         reasons.push("secret_handles_missing".to_string());
@@ -264,6 +271,10 @@ fn block_reasons(
     }
 
     reasons
+}
+
+fn is_local_dry_run_approval_id(approval_id: &str) -> bool {
+    approval_id.starts_with("LT3-LOCAL-")
 }
 
 fn wallet_binding_summary(
@@ -445,10 +456,6 @@ mod tests {
         assert!(artifact
             .body
             .block_reasons
-            .contains(&"final_live_config_disabled".to_string()));
-        assert!(artifact
-            .body
-            .block_reasons
             .contains(&"secret_handles_missing".to_string()));
         assert!(artifact
             .body
@@ -461,21 +468,21 @@ mod tests {
     }
 
     #[test]
-    fn live_trading_signing_dry_run_passes_with_handles_and_binding_without_submission() {
+    fn live_trading_signing_dry_run_passes_local_with_handles_and_binding_without_submission() {
         let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
-            approval_id: "LT3-APPROVED-SIGNING-001",
+            approval_id: "LT3-LOCAL-DRY-RUN",
             run_id: "lt3-test",
             captured_at_ms: 1,
             captured_at_rfc3339: "2026-05-13T00:00:00Z",
             clob_host: "https://clob.polymarket.com",
             chain_id: 137,
-            final_live_config_enabled: true,
+            final_live_config_enabled: false,
             wallet_address: "0x1111111111111111111111111111111111111111",
             funder_address: "0x2222222222222222222222222222222222222222",
             signature_type: "poly_1271",
             secret_inventory: &sample_inventory(),
             secret_report: &sample_report(true),
-            authenticated_readback_status: "not_requested",
+            authenticated_readback_status: "not_run_local_dry_run",
         })
         .expect("passing artifact builds");
 
@@ -490,6 +497,61 @@ mod tests {
             .body
             .sanitized_signing_payload_hash
             .starts_with("sha256:"));
+    }
+
+    #[test]
+    fn live_trading_signing_dry_run_blocks_enabled_config_without_approved_readback() {
+        let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
+            approval_id: "LT3-LOCAL-DRY-RUN",
+            run_id: "lt3-test",
+            captured_at_ms: 1,
+            captured_at_rfc3339: "2026-05-13T00:00:00Z",
+            clob_host: "https://clob.polymarket.com",
+            chain_id: 137,
+            final_live_config_enabled: true,
+            wallet_address: "0x1111111111111111111111111111111111111111",
+            funder_address: "0x2222222222222222222222222222222222222222",
+            signature_type: "poly_proxy",
+            secret_inventory: &sample_inventory(),
+            secret_report: &sample_report(true),
+            authenticated_readback_status: "not_run_no_approved_host_readback_in_lt3_local_dry_run",
+        })
+        .expect("blocked artifact still builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        assert!(artifact
+            .body
+            .block_reasons
+            .contains(&"approved_authenticated_readback_not_passed".to_string()));
+        assert!(artifact.body.not_submitted);
+        assert!(!artifact.body.network_post_enabled);
+    }
+
+    #[test]
+    fn live_trading_signing_dry_run_passes_post_approval_only_with_approved_readback() {
+        let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
+            approval_id: "LT3-APPROVED-SIGNING-001",
+            run_id: "lt3-test",
+            captured_at_ms: 1,
+            captured_at_rfc3339: "2026-05-13T00:00:00Z",
+            clob_host: "https://clob.polymarket.com",
+            chain_id: 137,
+            final_live_config_enabled: true,
+            wallet_address: "0x1111111111111111111111111111111111111111",
+            funder_address: "0x2222222222222222222222222222222222222222",
+            signature_type: "poly_proxy",
+            secret_inventory: &sample_inventory(),
+            secret_report: &sample_report(true),
+            authenticated_readback_status: AUTHENTICATED_READBACK_PASSED,
+        })
+        .expect("passing artifact builds");
+
+        assert_eq!(artifact.body.status, "passed");
+        assert!(artifact.body.block_reasons.is_empty());
+        assert_eq!(
+            artifact.body.authenticated_readback_status,
+            AUTHENTICATED_READBACK_PASSED
+        );
     }
 
     #[test]
@@ -616,7 +678,7 @@ mod tests {
             signature_type: "eoa",
             secret_inventory: &inventory,
             secret_report: &report,
-            authenticated_readback_status: "not_requested",
+            authenticated_readback_status: AUTHENTICATED_READBACK_PASSED,
         })
         .expect("valid artifact builds")
     }
