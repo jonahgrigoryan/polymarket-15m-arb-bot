@@ -40,7 +40,6 @@ pub enum SignatureType {
     Eoa,
     PolyProxy,
     GnosisSafe,
-    Poly1271,
 }
 
 impl SignatureType {
@@ -49,7 +48,6 @@ impl SignatureType {
             "0" | "eoa" => Some(Self::Eoa),
             "1" | "poly_proxy" | "poly-proxy" | "polyproxy" => Some(Self::PolyProxy),
             "2" | "gnosis_safe" | "gnosis-safe" | "gnosissafe" => Some(Self::GnosisSafe),
-            "3" | "poly_1271" | "poly-1271" | "poly1271" => Some(Self::Poly1271),
             _ => None,
         }
     }
@@ -59,7 +57,6 @@ impl SignatureType {
             Self::Eoa => "eoa",
             Self::PolyProxy => "poly_proxy",
             Self::GnosisSafe => "gnosis_safe",
-            Self::Poly1271 => "poly_1271",
         }
     }
 
@@ -68,7 +65,6 @@ impl SignatureType {
             Self::Eoa => "0",
             Self::PolyProxy => "1",
             Self::GnosisSafe => "2",
-            Self::Poly1271 => "3",
         }
     }
 }
@@ -493,7 +489,21 @@ pub async fn authenticated_readback_preflight(
 pub async fn authenticated_readback_preflight_evidence(
     input: AuthenticatedReadbackInput,
 ) -> LiveBetaReadbackResult<AuthenticatedReadbackPreflightEvidence> {
+    let balance_allowance_signature_type =
+        input.account.signature_type.as_balance_allowance_param();
+    authenticated_readback_preflight_evidence_with_balance_allowance_signature_type(
+        input,
+        balance_allowance_signature_type,
+    )
+    .await
+}
+
+pub async fn authenticated_readback_preflight_evidence_with_balance_allowance_signature_type(
+    input: AuthenticatedReadbackInput,
+    balance_allowance_signature_type: &str,
+) -> LiveBetaReadbackResult<AuthenticatedReadbackPreflightEvidence> {
     validate_authenticated_readback_input(&input)?;
+    validate_balance_allowance_signature_type(balance_allowance_signature_type)?;
 
     let client = ReadOnlyClobReadbackClient::new(
         input.account.clob_host.clone(),
@@ -503,7 +513,7 @@ pub async fn authenticated_readback_preflight_evidence(
         input.request_timeout_ms,
     )?;
     let collateral = client
-        .get_balance_allowance(input.account.signature_type)
+        .get_balance_allowance(balance_allowance_signature_type)
         .await?;
     let open_orders = client.get_user_orders().await?;
     let trades = client.get_trades().await?;
@@ -531,6 +541,15 @@ pub async fn authenticated_readback_preflight_evidence(
         open_orders,
         trades,
     })
+}
+
+fn validate_balance_allowance_signature_type(value: &str) -> LiveBetaReadbackResult<()> {
+    match value {
+        "0" | "1" | "2" | "3" => Ok(()),
+        _ => Err(LiveBetaReadbackError::Validation(
+            "balance-allowance signature_type must be 0, 1, 2, or 3".to_string(),
+        )),
+    }
 }
 
 pub fn readback_path_catalog() -> Vec<&'static str> {
@@ -578,17 +597,14 @@ impl ReadOnlyClobReadbackClient {
 
     async fn get_balance_allowance(
         &self,
-        signature_type: SignatureType,
+        signature_type_param: &str,
     ) -> LiveBetaReadbackResult<BalanceAllowanceReadback> {
         let body = self
             .get_text(
                 BALANCE_ALLOWANCE_PATH,
                 &[
                     ("asset_type", AssetType::Collateral.as_str().to_string()),
-                    (
-                        "signature_type",
-                        signature_type.as_balance_allowance_param().to_string(),
-                    ),
+                    ("signature_type", signature_type_param.to_string()),
                 ],
             )
             .await?;
@@ -1460,7 +1476,8 @@ mod tests {
         assert_eq!(SignatureType::Eoa.as_balance_allowance_param(), "0");
         assert_eq!(SignatureType::PolyProxy.as_balance_allowance_param(), "1");
         assert_eq!(SignatureType::GnosisSafe.as_balance_allowance_param(), "2");
-        assert_eq!(SignatureType::Poly1271.as_balance_allowance_param(), "3");
+        assert_eq!(SignatureType::from_config("poly_1271"), None);
+        assert!(validate_balance_allowance_signature_type("3").is_ok());
     }
 
     #[test]

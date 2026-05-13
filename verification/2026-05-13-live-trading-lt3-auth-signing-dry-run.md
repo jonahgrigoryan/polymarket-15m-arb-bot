@@ -110,6 +110,7 @@ No approved-host live-network readback was run from this local branch context be
 - Default config signature type: empty/fail-closed.
 - Local `.env` override wallet/funder/signature-type binding: present and consumed by the LT3 dry-run.
 - Supported final-live signature types: `eoa`, `poly_proxy`, `gnosis_safe`, `poly_1271`, or numeric `0` through `3`.
+- `poly_1271` support is scoped to final-live LT3 readback only; the shared legacy Live Beta/Live Alpha `SignatureType::from_config` parser does not accept `poly_1271`, so existing submit helpers cannot receive it through the LB4 account path.
 - Tests cover a pass-capable LT3 binding with explicit handles present and `poly_1271`, while still proving `not_submitted=true` and `network_post_enabled=false`.
 
 ## Verification Commands
@@ -121,9 +122,9 @@ No approved-host live-network readback was run from this local branch context be
 | `set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 local artifact generated with `status=passed`, `final_live_config_enabled=false`, `secret_handles_present=true`, `not_submitted=true`, and `network_post_enabled=false`. |
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked` and `approved_authenticated_readback_not_passed`. |
 | `cargo test --offline secret_handling` | PASS | 5 tests passed. |
-| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 7 module tests and 6 CLI/id/readback-gate tests passed. |
-| `cargo test --offline balance_allowance_signature_type_params_match_official_v2_client` | PASS | Confirms readback signature-type query params include `POLY_1271` as `3`. |
-| `cargo test --offline --quiet` | PASS | 450 lib tests, 104 bin tests, and 0 doc tests passed after the approved-readback review fix. |
+| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 8 module tests and 6 CLI/id/readback-gate tests passed. |
+| `cargo test --offline balance_allowance_signature_type_params_match_official_v2_client` | PASS | Confirms legacy `SignatureType::from_config("poly_1271")` is rejected while final-live readback can still use balance-allowance query param `3`. |
+| `cargo test --offline --quiet` | PASS | 451 lib tests, 105 bin tests, and 0 doc tests passed after the POLY_1271 scope fix. |
 | `cargo clippy --offline -- -D warnings` | PASS | Passed through `scripts/verify-pr.sh` after this note was added. |
 | `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. |
 

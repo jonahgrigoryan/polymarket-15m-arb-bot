@@ -11212,26 +11212,29 @@ async fn live_trading_authenticated_readback_evidence_with_geoblock(
 ) -> Result<(AccountPreflight, AuthenticatedReadbackPreflightEvidence), Box<dyn std::error::Error>>
 {
     let credentials = live_trading_l2_credentials_from_env(&config.live_trading.secret_handles)?;
-    let account = live_trading_account_preflight(config)?;
+    let live_trading_account = live_trading_account_preflight(config)?;
     let required_collateral_allowance_units = config
         .live_beta
         .readback_account
         .required_collateral_allowance_units
         .max(1);
     let evidence =
-        live_beta_readback::authenticated_readback_preflight_evidence(AuthenticatedReadbackInput {
+        live_beta_readback::authenticated_readback_preflight_evidence_with_balance_allowance_signature_type(AuthenticatedReadbackInput {
             prerequisites: ReadbackPrerequisites {
                 lb3_hold_released: true,
                 legal_access_approved: true,
                 deployment_geoblock_passed,
             },
-            account: account.clone(),
+            account: live_trading_account.account.clone(),
             credentials,
             required_collateral_allowance_units,
             request_timeout_ms: config.polymarket.request_timeout_ms,
-        })
+        },
+        live_trading_account
+            .signature_type
+            .as_balance_allowance_param())
         .await?;
-    Ok((account, evidence))
+    Ok((live_trading_account.account, evidence))
 }
 
 fn current_host_label() -> String {
@@ -11272,14 +11275,14 @@ fn try_kernel_reported_hostname() -> Option<String> {
     }
     #[cfg(unix)]
     {
-        return std::process::Command::new("uname")
+        std::process::Command::new("uname")
             .arg("-n")
             .output()
             .ok()
             .filter(|output| output.status.success())
             .and_then(|output| String::from_utf8(output.stdout).ok())
             .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty())
     }
     #[cfg(not(unix))]
     {
@@ -12045,21 +12048,69 @@ fn lb4_account_preflight(
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveTradingReadbackSignatureType {
+    Eoa,
+    PolyProxy,
+    GnosisSafe,
+    Poly1271,
+}
+
+impl LiveTradingReadbackSignatureType {
+    fn from_config(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "0" | "eoa" => Some(Self::Eoa),
+            "1" | "poly_proxy" | "poly-proxy" | "polyproxy" => Some(Self::PolyProxy),
+            "2" | "gnosis_safe" | "gnosis-safe" | "gnosissafe" => Some(Self::GnosisSafe),
+            "3" | "poly_1271" | "poly-1271" | "poly1271" => Some(Self::Poly1271),
+            _ => None,
+        }
+    }
+
+    fn as_legacy_evaluator_signature_type(self) -> SignatureType {
+        match self {
+            Self::Eoa => SignatureType::Eoa,
+            Self::PolyProxy | Self::Poly1271 => SignatureType::PolyProxy,
+            Self::GnosisSafe => SignatureType::GnosisSafe,
+        }
+    }
+
+    fn as_balance_allowance_param(self) -> &'static str {
+        match self {
+            Self::Eoa => "0",
+            Self::PolyProxy => "1",
+            Self::GnosisSafe => "2",
+            Self::Poly1271 => "3",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveTradingAccountPreflight {
+    account: AccountPreflight,
+    signature_type: LiveTradingReadbackSignatureType,
+}
+
 fn live_trading_account_preflight(
     config: &AppConfig,
-) -> Result<AccountPreflight, Box<dyn std::error::Error>> {
+) -> Result<LiveTradingAccountPreflight, Box<dyn std::error::Error>> {
     let account = &config.live_trading;
-    let Some(signature_type) = SignatureType::from_config(&account.signature_type) else {
+    let Some(signature_type) =
+        LiveTradingReadbackSignatureType::from_config(&account.signature_type)
+    else {
         return Err(
             "LT3 readback account signature_type must be eoa, poly_proxy, gnosis_safe, or poly_1271"
                 .into(),
         );
     };
-    Ok(AccountPreflight {
-        clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
-        chain_id: 137,
-        wallet_address: account.wallet_address.clone(),
-        funder_address: account.funder_address.clone(),
+    Ok(LiveTradingAccountPreflight {
+        account: AccountPreflight {
+            clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
+            chain_id: 137,
+            wallet_address: account.wallet_address.clone(),
+            funder_address: account.funder_address.clone(),
+            signature_type: signature_type.as_legacy_evaluator_signature_type(),
+        },
         signature_type,
     })
 }
@@ -13081,9 +13132,21 @@ mod tests {
 
         let account = live_trading_account_preflight(&config).expect("account preflight passes");
 
-        assert_eq!(account.wallet_address, config.live_trading.wallet_address);
-        assert_eq!(account.funder_address, config.live_trading.funder_address);
-        assert_eq!(account.signature_type, SignatureType::Poly1271);
+        assert_eq!(
+            account.account.wallet_address,
+            config.live_trading.wallet_address
+        );
+        assert_eq!(
+            account.account.funder_address,
+            config.live_trading.funder_address
+        );
+        assert_eq!(account.account.signature_type, SignatureType::PolyProxy);
+        assert_eq!(
+            account.signature_type,
+            LiveTradingReadbackSignatureType::Poly1271
+        );
+        assert_eq!(account.signature_type.as_balance_allowance_param(), "3");
+        assert_eq!(SignatureType::from_config("poly_1271"), None);
     }
 
     #[test]

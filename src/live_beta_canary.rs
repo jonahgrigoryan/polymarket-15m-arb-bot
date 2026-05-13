@@ -770,7 +770,6 @@ fn sdk_signature_type(
         SignatureType::GnosisSafe => {
             polymarket_client_sdk_v2::clob::types::SignatureType::GnosisSafe
         }
-        SignatureType::Poly1271 => polymarket_client_sdk_v2::clob::types::SignatureType::Poly1271,
     }
 }
 

@@ -142,11 +142,6 @@ pub fn validate_maker_submit_input_without_network(
     input: &LiveMakerSubmitInput,
 ) -> LiveMakerResult<()> {
     validate_maker_plan(&input.plan)?;
-    if input.signature_type == SignatureType::Poly1271 {
-        return Err(LiveMakerError::Validation(vec![
-            "poly_1271 signature type is not approved for LA5 maker SDK paths (submit, cancel, order readback, heartbeat)".to_string(),
-        ]));
-    }
     let private_key = env_required_value(&input.signer_handle, "maker_private_key")?;
     let l2_key = env_required_value(&input.l2_access_handle, "clob_l2_access")?;
     let _l2_secret = env_required_value(&input.l2_secret_handle, "clob_l2_credential")?;
@@ -524,7 +519,6 @@ fn sdk_signature_type(
         SignatureType::GnosisSafe => {
             polymarket_client_sdk_v2::clob::types::SignatureType::GnosisSafe
         }
-        SignatureType::Poly1271 => polymarket_client_sdk_v2::clob::types::SignatureType::Poly1271,
     }
 }
 
@@ -652,46 +646,6 @@ mod tests {
             "0x1111111111111111111111111111111111111111111111111111111111111111"
         ));
         assert!(!is_order_id("order-1"));
-    }
-
-    #[test]
-    fn la5_maker_validation_rejects_poly1271_before_env_or_network_checks() {
-        let input = LiveMakerSubmitInput {
-            clob_host: "https://clob.polymarket.com".to_string(),
-            signer_handle: "UNSET_SIGNER".to_string(),
-            l2_access_handle: "UNSET_L2_ACCESS".to_string(),
-            l2_secret_handle: "UNSET_L2_SECRET".to_string(),
-            l2_passphrase_handle: "UNSET_L2_PASS".to_string(),
-            wallet_address: "0x1111111111111111111111111111111111111111".to_string(),
-            funder_address: "0x2222222222222222222222222222222222222222".to_string(),
-            signature_type: SignatureType::Poly1271,
-            plan: LiveMakerOrderPlan {
-                intent_id: "intent-1".to_string(),
-                token_id: "1".to_string(),
-                outcome: "Up".to_string(),
-                side: Side::Buy,
-                price: 0.2,
-                size: 1.0,
-                notional: 0.2,
-                post_only: true,
-                order_type: "GTD".to_string(),
-                effective_quote_ttl_seconds: 30,
-                gtd_expiration_unix: 1_777_000_000 + GTD_SECURITY_BUFFER_SECONDS + 30,
-                cancel_after_unix: 1_777_000_000 + 30,
-                reason_codes: Vec::new(),
-            },
-        };
-        let err =
-            validate_maker_submit_input_without_network(&input).expect_err("poly1271 blocked");
-        match err {
-            LiveMakerError::Validation(messages) => assert!(
-                messages
-                    .iter()
-                    .any(|m| m.contains("poly_1271") && m.contains("LA5")),
-                "{messages:?}"
-            ),
-            other => panic!("unexpected {other:?}"),
-        }
     }
 
     fn maker_config() -> LiveAlphaMakerConfig {
