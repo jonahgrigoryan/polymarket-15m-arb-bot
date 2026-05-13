@@ -8,7 +8,7 @@ use crate::secret_handling::{self, SecretInventory, SecretPresenceReport};
 
 pub const MODULE: &str = "live_trading_signing";
 
-const SCHEMA_VERSION: &str = "lt3.live_trading_signing_dry_run.v1";
+const SCHEMA_VERSION: &str = "lt3.live_trading_signing_dry_run.v2";
 const REDACTED_OWNER: &str = "<redacted:owner-not-loaded>";
 const REDACTED_SIGNATURE: &str = "<redacted:not-generated>";
 const AUTHENTICATED_READBACK_PASSED: &str = "passed";
@@ -28,6 +28,7 @@ pub struct LiveTradingSigningDryRunInput<'a> {
     pub secret_inventory: &'a SecretInventory,
     pub secret_report: &'a SecretPresenceReport,
     pub authenticated_readback_status: &'a str,
+    pub readback_auth_headers_generated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -54,10 +55,10 @@ impl LiveTradingSigningDryRunArtifact {
             || self.body.network_post_enabled
             || self.body.network_cancel_enabled
             || self.body.raw_signature_generated
-            || self.body.auth_headers_generated
+            || self.body.order_submit_auth_headers_generated
         {
             return Err(LiveTradingSigningError::Validation(vec![
-                "LT3 signing dry-run must remain offline-only: not_submitted=true, network_post_enabled=false, network_cancel_enabled=false, raw_signature_generated=false, auth_headers_generated=false".to_string(),
+                "LT3 signing dry-run must remain no-submit: not_submitted=true, network_post_enabled=false, network_cancel_enabled=false, raw_signature_generated=false, order_submit_auth_headers_generated=false".to_string(),
             ]));
         }
         Ok(())
@@ -85,7 +86,8 @@ pub struct LiveTradingSigningDryRunBody {
     pub network_post_enabled: bool,
     pub network_cancel_enabled: bool,
     pub raw_signature_generated: bool,
-    pub auth_headers_generated: bool,
+    pub order_submit_auth_headers_generated: bool,
+    pub readback_auth_headers_generated: bool,
     pub authenticated_readback_status: String,
 }
 
@@ -215,7 +217,8 @@ pub fn build_live_trading_signing_dry_run(
         network_post_enabled: false,
         network_cancel_enabled: false,
         raw_signature_generated: false,
-        auth_headers_generated: false,
+        order_submit_auth_headers_generated: false,
+        readback_auth_headers_generated: input.readback_auth_headers_generated,
         authenticated_readback_status: input.authenticated_readback_status.to_string(),
     })
 }
@@ -453,6 +456,21 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+
+        let mut artifact = build_valid_artifact();
+        artifact.body.order_submit_auth_headers_generated = true;
+        artifact = LiveTradingSigningDryRunArtifact::new(artifact.body).expect("rehash");
+        let err = artifact
+            .validate()
+            .expect_err("order-submit auth headers must fail validate");
+        match err {
+            LiveTradingSigningError::Validation(messages) => {
+                assert!(messages
+                    .iter()
+                    .any(|msg| msg.contains("order_submit_auth_headers_generated")));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
@@ -471,6 +489,7 @@ mod tests {
             secret_inventory: &sample_inventory(),
             secret_report: &sample_report(false),
             authenticated_readback_status: "not_run_local_dry_run",
+            readback_auth_headers_generated: false,
         })
         .expect("blocked artifact still builds");
 
@@ -505,6 +524,7 @@ mod tests {
             secret_inventory: &sample_inventory(),
             secret_report: &sample_report(true),
             authenticated_readback_status: "not_run_local_dry_run",
+            readback_auth_headers_generated: false,
         })
         .expect("passing artifact builds");
 
@@ -514,7 +534,8 @@ mod tests {
         assert!(artifact.body.not_submitted);
         assert!(!artifact.body.network_post_enabled);
         assert!(!artifact.body.raw_signature_generated);
-        assert!(!artifact.body.auth_headers_generated);
+        assert!(!artifact.body.order_submit_auth_headers_generated);
+        assert!(!artifact.body.readback_auth_headers_generated);
         assert!(artifact
             .body
             .sanitized_signing_payload_hash
@@ -537,6 +558,7 @@ mod tests {
             secret_inventory: &sample_inventory(),
             secret_report: &sample_report(true),
             authenticated_readback_status: "not_run_no_approved_host_readback_in_lt3_local_dry_run",
+            readback_auth_headers_generated: false,
         })
         .expect("blocked artifact still builds");
 
@@ -565,6 +587,7 @@ mod tests {
             secret_inventory: &sample_inventory(),
             secret_report: &sample_report(true),
             authenticated_readback_status: AUTHENTICATED_READBACK_PASSED,
+            readback_auth_headers_generated: true,
         })
         .expect("passing artifact builds");
 
@@ -574,6 +597,11 @@ mod tests {
             artifact.body.authenticated_readback_status,
             AUTHENTICATED_READBACK_PASSED
         );
+        assert!(!artifact.body.order_submit_auth_headers_generated);
+        assert!(artifact.body.readback_auth_headers_generated);
+        artifact
+            .validate()
+            .expect("readback auth headers are allowed in approved readback evidence");
     }
 
     #[test]
@@ -593,6 +621,7 @@ mod tests {
                 secret_inventory: &sample_inventory(),
                 secret_report: &sample_report(true),
                 authenticated_readback_status: "not_requested",
+                readback_auth_headers_generated: false,
             })
             .expect("artifact builds");
 
@@ -622,6 +651,7 @@ mod tests {
             secret_inventory: &inventory,
             secret_report: &sample_report(false),
             authenticated_readback_status: "not_run_local_dry_run",
+            readback_auth_headers_generated: false,
         })
         .expect_err("invalid handle fails");
 
@@ -645,6 +675,7 @@ mod tests {
             secret_inventory: &duplicate,
             secret_report: &sample_report(true),
             authenticated_readback_status: "not_requested",
+            readback_auth_headers_generated: false,
         })
         .expect_err("duplicate handle fails");
 
@@ -701,6 +732,7 @@ mod tests {
             secret_inventory: &inventory,
             secret_report: &report,
             authenticated_readback_status: AUTHENTICATED_READBACK_PASSED,
+            readback_auth_headers_generated: true,
         })
         .expect("valid artifact builds")
     }

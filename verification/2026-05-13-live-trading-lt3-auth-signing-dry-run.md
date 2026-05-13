@@ -61,12 +61,13 @@ Result:
 - `network_post_enabled=false`
 - `network_cancel_enabled=false`
 - `raw_signature_generated=false`
-- `auth_headers_generated=false`
+- `order_submit_auth_headers_generated=false`
+- `readback_auth_headers_generated=false`
 - `authenticated_readback_status=not_run_local_dry_run`
 - Sanitized signing payload hash: `sha256:b1248bb921d2fa352ca775a8f69b715667702a263ece9eacbd6ec823790f278c`
-- Artifact hash: `sha256:fe50862f8f883502d0acf5b489b5c763fb5d1cdbe82806acd59b34bb2f2722a9`
+- Artifact hash: `sha256:2b020782bd6b93ed919c37dfe258a64bee4d6ceff4828e938a012c815ef946ab`
 
-Interpretation: with the local `.env` sourced and live trading explicitly disabled for the local `LT3-LOCAL-*` dry-run, the LT3 signing/auth dry-run gate passes while the tracked `config/default.toml` remains fail-closed. The dry-run still proves no submission, cancel, raw signature generation, or auth header generation.
+Interpretation: with the local `.env` sourced and live trading explicitly disabled for the local `LT3-LOCAL-*` dry-run, the LT3 signing/auth dry-run gate passes while the tracked `config/default.toml` remains fail-closed. The dry-run still proves no submission, cancel, raw signature generation, order-submit auth header generation, or readback auth header generation in local no-readback mode.
 
 ## Enabled-Config Readback Block Check
 
@@ -89,6 +90,8 @@ Result:
 Interpretation: an enabled final-live config can no longer emit a passing LT3 signing dry-run artifact unless approved-host authenticated readback has passed.
 
 No approved-host live-network readback was run from this local branch context because the tracked default config has no approved host/country/region and `live_trading.legal_access_approved` defaults to `false`. The code path is wired for the post-approval command in `LIVE_TRADING_IMPLEMENTATION_PLAN.md` and remains fail-closed outside exact approved scope plus explicit final-live legal/access approval.
+
+Approved-host readback audit note: LT3 schema `lt3.live_trading_signing_dry_run.v2` separates `order_submit_auth_headers_generated` from `readback_auth_headers_generated`. A post-approval readback may set `readback_auth_headers_generated=true` because read-only authenticated CLOB GETs require L2 headers; this does not imply order submission, raw signature generation, or order-submit auth header generation.
 
 ## Secret Handling
 
@@ -121,10 +124,10 @@ No approved-host live-network readback was run from this local branch context be
 | --- | --- | --- |
 | `cargo run --offline -- --config config/default.toml validate --local-only` | PASS | Local-only validation passed with `live_order_placement_enabled=false`. |
 | `set -a; source .env >/dev/null 2>&1; set +a; cargo run --offline -- --config config/default.toml validate --local-only --validate-secret-handles` | PASS | Existing presence-strict Live Beta handle check passed with local env loaded; values were not printed. |
-| `set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 local artifact generated with `status=passed`, `final_live_config_enabled=false`, `secret_handles_present=true`, `not_submitted=true`, and `network_post_enabled=false`. |
+| `set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 local artifact generated with `status=passed`, `final_live_config_enabled=false`, `secret_handles_present=true`, `not_submitted=true`, `network_post_enabled=false`, `order_submit_auth_headers_generated=false`, and `readback_auth_headers_generated=false`. |
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked` and `approved_authenticated_readback_not_passed`. |
 | `cargo test --offline secret_handling` | PASS | 5 tests passed. |
-| `cargo test --offline live_trading_signing` | PASS | 8 module tests and 8 CLI/id/readback-gate tests passed, including final-live legal gate and invalid account-binding pre-readback blockers. |
+| `cargo test --offline live_trading_signing` | PASS | 8 module tests and 8 CLI/id/readback-gate tests passed, including final-live legal gate, invalid account-binding pre-readback blockers, and split order-submit vs readback auth-header audit fields. |
 | `cargo test --offline live_trading_env_overrides_bind_local_account_without_committing_defaults` | PASS | Confirms env overrides bind final-live account config and explicit final-live legal/access approval without committing local values. |
 | `cargo test --offline live_trading_readback_prerequisites_use_final_live_legal_gate` | PASS | Confirms LT3 authenticated readback prerequisites source legal/access from `live_trading.legal_access_approved` instead of a hard-coded pass. |
 | `cargo test --offline balance_allowance_signature_type_params_match_official_v2_client` | PASS | Confirms legacy `SignatureType::from_config("poly_1271")` is rejected while final-live readback can still use balance-allowance query param `3`. |
@@ -134,9 +137,10 @@ No approved-host live-network readback was run from this local branch context be
 
 ## Safety Scan
 
-- No raw private keys, API secrets, passphrases, raw signatures, or auth headers are emitted by the LT3 artifact.
+- No raw private keys, API secrets, passphrases, raw signatures, or auth header values are emitted by the LT3 artifact.
 - `rg` scan over the LT3 artifact and new signing/config surfaces found only safe handle names and header field names.
 - `src/live_trading_signing.rs` unit tests assert the module contains no request client construction, submit dispatch token, cancel dispatch token, or raw secret placeholders.
+- The artifact keeps `order_submit_auth_headers_generated=false` as a no-submit invariant while recording whether read-only authenticated readback generated L2 headers.
 - Approved-host readback now still fails closed unless `live_trading.legal_access_approved=true`, and invalid wallet/funder strings are rejected before authenticated L2 GETs.
 - No live order submit, cancel submit, heartbeat POST, cap sentinel write, taker expansion, production sizing, multi-wallet deployment, asset expansion, cancel-all behavior, or authenticated write client was added.
 

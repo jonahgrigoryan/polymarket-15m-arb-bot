@@ -1,11 +1,11 @@
 {
-  "artifact_hash": "sha256:fe50862f8f883502d0acf5b489b5c763fb5d1cdbe82806acd59b34bb2f2722a9",
+  "artifact_hash": "sha256:2b020782bd6b93ed919c37dfe258a64bee4d6ceff4828e938a012c815ef946ab",
   "body": {
-    "schema_version": "lt3.live_trading_signing_dry_run.v1",
+    "schema_version": "lt3.live_trading_signing_dry_run.v2",
     "approval_id": "LT3-LOCAL-DRY-RUN",
-    "run_id": "18af1f187f122ce8-6b28-0",
-    "captured_at_ms": 1778674567906,
-    "captured_at_rfc3339": "2026-05-13T12:16:07Z",
+    "run_id": "18af22d5fcf21fe0-f0f5-0",
+    "captured_at_ms": 1778678680301,
+    "captured_at_rfc3339": "2026-05-13T13:24:40Z",
     "status": "passed",
     "block_reasons": [],
     "final_live_config_enabled": false,
@@ -98,7 +98,8 @@
     "network_post_enabled": false,
     "network_cancel_enabled": false,
     "raw_signature_generated": false,
-    "auth_headers_generated": false,
+    "order_submit_auth_headers_generated": false,
+    "readback_auth_headers_generated": false,
     "authenticated_readback_status": "not_run_local_dry_run"
   }
 }

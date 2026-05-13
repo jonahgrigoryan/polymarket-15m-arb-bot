@@ -8283,7 +8283,7 @@ async fn capture_live_trading_signing_dry_run(
     let secret_inventory = config.live_trading.secret_inventory();
     let secret_report =
         secret_handling::validate_secret_presence(&secret_inventory, &EnvSecretPresenceProvider)?;
-    let authenticated_readback_status =
+    let authenticated_readback =
         live_trading_signing_authenticated_readback_status(config, &secret_report).await?;
 
     let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
@@ -8299,7 +8299,8 @@ async fn capture_live_trading_signing_dry_run(
         signature_type: &config.live_trading.signature_type,
         secret_inventory: &secret_inventory,
         secret_report: &secret_report,
-        authenticated_readback_status: &authenticated_readback_status,
+        authenticated_readback_status: &authenticated_readback.status,
+        readback_auth_headers_generated: authenticated_readback.readback_auth_headers_generated,
     })?;
     artifact.validate()?;
 
@@ -8312,31 +8313,65 @@ async fn capture_live_trading_signing_dry_run(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveTradingSigningAuthenticatedReadbackStatus {
+    status: String,
+    readback_auth_headers_generated: bool,
+}
+
+impl LiveTradingSigningAuthenticatedReadbackStatus {
+    fn not_run(status: &str) -> Self {
+        Self {
+            status: status.to_string(),
+            readback_auth_headers_generated: false,
+        }
+    }
+
+    fn attempted(status: &str) -> Self {
+        Self {
+            status: status.to_string(),
+            readback_auth_headers_generated: true,
+        }
+    }
+}
+
 async fn live_trading_signing_authenticated_readback_status(
     config: &AppConfig,
     secret_report: &secret_handling::SecretPresenceReport,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<LiveTradingSigningAuthenticatedReadbackStatus, Box<dyn std::error::Error>> {
     if !config.live_trading.enabled {
-        return Ok("not_run_local_dry_run".to_string());
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_local_dry_run",
+        ));
     }
     if !secret_report.all_present() {
-        return Ok("not_run_secret_handles_missing".to_string());
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_secret_handles_missing",
+        ));
     }
 
     let deployment_host = live_trading_deployment_host_identity();
     if !live_trading_signing_approved_host_scope_configured(config, &deployment_host) {
-        return Ok("not_run_no_approved_host_readback_in_lt3_local_dry_run".to_string());
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_no_approved_host_readback_in_lt3_local_dry_run",
+        ));
     }
     if !config.live_trading.legal_access_approved {
-        return Ok("not_run_legal_access_not_approved".to_string());
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_legal_access_not_approved",
+        ));
     }
 
     let geoblock = live_trading_geoblock_readback(config).await;
     if !live_trading_approval_context_matches(config, &deployment_host, &geoblock) {
-        return Ok("not_run_no_approved_host_readback_in_lt3_local_dry_run".to_string());
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_no_approved_host_readback_in_lt3_local_dry_run",
+        ));
     }
     if live_trading_account_preflight(config).is_err() {
-        return Ok("not_run_account_binding_invalid".to_string());
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_account_binding_invalid",
+        ));
     }
 
     match live_trading_authenticated_readback_evidence_with_geoblock(
@@ -8345,10 +8380,12 @@ async fn live_trading_signing_authenticated_readback_status(
     )
     .await
     {
-        Ok((_account, evidence)) => Ok(live_trading_signing_readback_status_from_report(
-            &evidence.report,
+        Ok((_account, evidence)) => Ok(LiveTradingSigningAuthenticatedReadbackStatus::attempted(
+            &live_trading_signing_readback_status_from_report(&evidence.report),
         )),
-        Err(_) => Ok("error".to_string()),
+        Err(_) => Ok(LiveTradingSigningAuthenticatedReadbackStatus::attempted(
+            "error",
+        )),
     }
 }
 
@@ -8845,8 +8882,12 @@ fn print_live_trading_signing_dry_run_result(result: &LiveTradingSigningDryRunCo
         result.artifact.body.raw_signature_generated
     );
     println!(
-        "live_trading_signing_dry_run_auth_headers_generated={}",
-        result.artifact.body.auth_headers_generated
+        "live_trading_signing_dry_run_order_submit_auth_headers_generated={}",
+        result.artifact.body.order_submit_auth_headers_generated
+    );
+    println!(
+        "live_trading_signing_dry_run_readback_auth_headers_generated={}",
+        result.artifact.body.readback_auth_headers_generated
     );
     println!(
         "live_trading_signing_dry_run_secret_backend={}",
@@ -13165,7 +13206,8 @@ mod tests {
             .await
             .expect("status check completes without readback");
 
-        assert_eq!(status, "not_run_legal_access_not_approved");
+        assert_eq!(status.status, "not_run_legal_access_not_approved");
+        assert!(!status.readback_auth_headers_generated);
     }
 
     #[test]
