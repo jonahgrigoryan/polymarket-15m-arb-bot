@@ -45,10 +45,10 @@ use polymarket_15m_arb_bot::{
         ExpectedCanaryOrder,
     },
     live_beta_readback::{
-        self, AccountPreflight, AuthenticatedReadbackInput, AuthenticatedReadbackPreflightEvidence,
-        BalanceAllowanceReadback, L2ReadbackCredentials, OpenOrderReadback,
-        ReadbackPreflightReport, ReadbackPrerequisites, SignatureType, TradeReadback,
-        TradeReadbackStatus,
+        self, AccountPreflight, AssetType, AuthenticatedReadbackInput,
+        AuthenticatedReadbackPreflightEvidence, BalanceAllowanceReadback, L2ReadbackCredentials,
+        OpenOrderReadback, ReadbackPreflightReport, ReadbackPrerequisites, SignatureType,
+        TradeReadback, TradeReadbackStatus,
     },
     live_beta_signing,
     live_executor::{
@@ -89,6 +89,11 @@ use polymarket_15m_arb_bot::{
         validate_taker_submit_input_without_network, LiveTakerCanaryApprovalFields,
         LiveTakerCanaryLiveApprovalFields, LiveTakerGateDecision, LiveTakerRuntimeState,
         LiveTakerSubmissionReport, LiveTakerSubmitInput, LA7_TAKER_CANARY_FOK_OR_FAK,
+    },
+    live_trading_preflight::{
+        evaluate_live_trading_preflight, live_trading_preflight_json, LiveTradingGeoblockReadback,
+        LiveTradingPreflightArtifact, LiveTradingPreflightInput, NoLiveActions,
+        ReadOnlyFreshnessStatus,
     },
     market_discovery::{
         emit_market_lifecycle_events, persist_discovered_markets, MarketDiscoveryClient,
@@ -456,6 +461,22 @@ enum Commands {
         )]
         output_root: PathBuf,
     },
+    /// Run final live-trading read-only preflight and write redacted LT1 artifacts.
+    LiveTradingPreflight {
+        #[arg(
+            long,
+            help = "Required read-only mode; never signs, submits, cancels, posts heartbeat, or writes caps"
+        )]
+        read_only: bool,
+        #[arg(long, help = "Baseline ID for this LT1 read-only preflight artifact")]
+        baseline_id: String,
+        #[arg(
+            long,
+            default_value = "artifacts/live_trading",
+            help = "Root directory for final live-trading redacted artifacts"
+        )]
+        output_root: PathBuf,
+    },
     /// Dry-run or execute the separately approved one-order LA7 taker canary.
     LiveAlphaTakerCanary {
         #[arg(long, help = "Required dry-run mode; never submits, signs, or cancels")]
@@ -512,6 +533,7 @@ impl Commands {
             Commands::LiveAlphaMakerMicro { .. } => "live-alpha-maker-micro",
             Commands::LiveAlphaQuoteManager { .. } => "live-alpha-quote-manager",
             Commands::LiveAlphaAccountBaseline { .. } => "live-alpha-account-baseline",
+            Commands::LiveTradingPreflight { .. } => "live-trading-preflight",
             Commands::LiveAlphaTakerCanary { .. } => "live-alpha-taker-canary",
             Commands::LiveAlphaScaleReport { .. } => "live-alpha-scale-report",
         }
@@ -529,6 +551,7 @@ impl Commands {
             Commands::LiveAlphaMakerMicro { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaQuoteManager { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaAccountBaseline { .. } => RuntimeMode::Validate,
+            Commands::LiveTradingPreflight { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaTakerCanary { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaScaleReport { .. } => RuntimeMode::Validate,
         }
@@ -980,6 +1003,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 output_root,
             } => {
                 run_live_alpha_account_baseline_command(
+                    &config,
+                    &run_id,
+                    read_only,
+                    baseline_id,
+                    &output_root,
+                )
+                .await?;
+            }
+            Commands::LiveTradingPreflight {
+                read_only,
+                baseline_id,
+                output_root,
+            } => {
+                run_live_trading_preflight_command(
                     &config,
                     &run_id,
                     read_only,
@@ -8157,6 +8194,430 @@ fn print_live_alpha_account_baseline_result(result: &LiveAlphaAccountBaselineCom
     );
 }
 
+#[derive(Debug, Clone)]
+struct LiveTradingPreflightCommandResult {
+    artifact: LiveTradingPreflightArtifact,
+    account_baseline: AccountBaselineArtifact,
+    output_dir: PathBuf,
+}
+
+async fn run_live_trading_preflight_command(
+    config: &AppConfig,
+    run_id: &str,
+    read_only: bool,
+    baseline_id: String,
+    output_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !read_only {
+        return Err("live-trading-preflight requires --read-only".into());
+    }
+    validate_live_trading_baseline_id(&baseline_id)?;
+
+    let result = capture_live_trading_preflight(config, run_id, &baseline_id, output_root).await?;
+    print_live_trading_preflight_result(&result);
+    Ok(())
+}
+
+async fn capture_live_trading_preflight(
+    config: &AppConfig,
+    run_id: &str,
+    baseline_id: &str,
+    output_root: &Path,
+) -> Result<LiveTradingPreflightCommandResult, Box<dyn std::error::Error>> {
+    validate_live_trading_baseline_id(baseline_id)?;
+    let captured_at_ms = unix_time_ms();
+    let captured_at_rfc3339 = OffsetDateTime::from_unix_timestamp(captured_at_ms / 1000)
+        .map_err(|error| format!("LT1 preflight timestamp invalid: {error}"))?
+        .format(&Rfc3339)
+        .map_err(|error| format!("LT1 preflight timestamp format failed: {error}"))?;
+    let deployment_host = current_host_label();
+    let geoblock = live_trading_geoblock_readback(config).await;
+    let l2_secret_report = secret_handling::validate_secret_presence(
+        &config.live_beta.secret_inventory(),
+        &EnvSecretPresenceProvider,
+    )?;
+    let l2_secret_handles_present = l2_secret_report.all_present();
+    let account_configured = lb4_account_preflight(config).is_ok();
+    let approved_read_only_context =
+        live_trading_approval_context_matches(config, &deployment_host, &geoblock);
+    let authenticated_readback_allowed = config.live_trading.enabled
+        && approved_read_only_context
+        && l2_secret_handles_present
+        && account_configured
+        && config.live_beta.legal_access_approved;
+
+    let (account, evidence) = if authenticated_readback_allowed {
+        live_alpha_authenticated_readback_evidence_with_geoblock(config, true).await?
+    } else {
+        sample_live_trading_readback_evidence(config, geoblock.passed_status())?
+    };
+    let positions = if authenticated_readback_allowed {
+        live_alpha_data_api_positions(config, &account.funder_address).await?
+    } else {
+        BaselinePositions {
+            evidence_complete: false,
+            positions: Vec::new(),
+        }
+    };
+    let account_baseline = build_account_baseline_artifact_with_positions(
+        baseline_id.to_string(),
+        run_id.to_string(),
+        captured_at_ms,
+        captured_at_rfc3339.clone(),
+        &account,
+        &evidence,
+        positions,
+    )?;
+    account_baseline.validate()?;
+    let read_only_freshness = if approved_read_only_context {
+        live_trading_read_only_freshness(config).await
+    } else {
+        ReadOnlyFreshnessStatus::not_checked()
+    };
+
+    let output_dir = output_root.join(baseline_id);
+    let account_baseline_path = output_dir.join("account_baseline.redacted.json");
+    let account_position_count = account_baseline.body.positions.positions.len();
+    let artifact = evaluate_live_trading_preflight(LiveTradingPreflightInput {
+        baseline_id,
+        run_id,
+        captured_at_ms,
+        captured_at_rfc3339: &captured_at_rfc3339,
+        read_only_mode: true,
+        final_live_config_enabled: config.live_trading.enabled,
+        deployment_host: &deployment_host,
+        approved_host: &config.live_trading.approved_host,
+        approved_country: &config.live_trading.approved_country,
+        approved_region: &config.live_trading.approved_region,
+        geoblock,
+        readback_report: &evidence.report,
+        account_baseline_hash: &account_baseline.baseline_hash,
+        account_baseline_path: &account_baseline_path.display().to_string(),
+        account_position_count,
+        l2_secret_handles_present,
+        read_only_freshness,
+        no_live_actions: NoLiveActions::default(),
+    })?;
+    artifact.validate()?;
+
+    write_live_trading_preflight_artifacts(&artifact, &account_baseline, &output_dir)?;
+
+    Ok(LiveTradingPreflightCommandResult {
+        artifact,
+        account_baseline,
+        output_dir,
+    })
+}
+
+fn validate_live_trading_baseline_id(baseline_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if baseline_id.is_empty() {
+        return Err("live-trading-preflight requires a non-empty --baseline-id".into());
+    }
+    if baseline_id != baseline_id.trim() {
+        return Err(
+            "live-trading-preflight baseline id must not contain leading or trailing whitespace"
+                .into(),
+        );
+    }
+    if !baseline_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(
+            "live-trading-preflight baseline id may contain only ASCII letters, numbers, '-' and '_'"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn live_trading_approval_context_matches(
+    config: &AppConfig,
+    deployment_host: &str,
+    geoblock: &LiveTradingGeoblockReadback,
+) -> bool {
+    if !config.live_trading.enabled {
+        return false;
+    }
+    if config.live_trading.approved_host.trim().is_empty()
+        || deployment_host != config.live_trading.approved_host
+    {
+        return false;
+    }
+    if !geoblock.passed_status() {
+        return false;
+    }
+    if config.live_trading.approved_country.trim().is_empty()
+        || geoblock.country.as_deref() != Some(config.live_trading.approved_country.as_str())
+    {
+        return false;
+    }
+    if config.live_trading.approved_region.trim().is_empty()
+        || geoblock.region.as_deref() != Some(config.live_trading.approved_region.as_str())
+    {
+        return false;
+    }
+    true
+}
+
+async fn live_trading_read_only_freshness(config: &AppConfig) -> ReadOnlyFreshnessStatus {
+    let mut status = ReadOnlyFreshnessStatus::not_checked();
+    let markets = match live_trading_current_markets(config).await {
+        Ok(markets) => {
+            status.market_discovery = "passed".to_string();
+            markets
+        }
+        Err(_) => {
+            status.market_discovery = "failed".to_string();
+            return status;
+        }
+    };
+
+    status.book = status_from_freshness_result(live_trading_books_fresh(config, &markets).await);
+    status.reference =
+        status_from_freshness_result(live_trading_references_fresh(config, &markets).await);
+    status.predictive =
+        status_from_freshness_result(live_trading_predictive_fresh(config, &markets).await);
+    status
+}
+
+fn status_from_freshness_result(result: Result<bool, Box<dyn std::error::Error>>) -> String {
+    match result {
+        Ok(true) => "passed".to_string(),
+        Ok(false) | Err(_) => "failed".to_string(),
+    }
+}
+
+async fn live_trading_current_markets(
+    config: &AppConfig,
+) -> Result<Vec<Market>, Box<dyn std::error::Error>> {
+    let discovery = MarketDiscoveryClient::new(
+        &config.polymarket.gamma_markets_url,
+        &config.polymarket.clob_rest_url,
+        config.polymarket.market_discovery_page_limit,
+        config.polymarket.market_discovery_max_pages,
+        config.polymarket.request_timeout_ms,
+    )?;
+    let discovery_run = discovery.discover_crypto_15m_markets().await?;
+    select_paper_markets(&discovery_run.markets, unix_time_ms())
+}
+
+async fn live_trading_books_fresh(
+    config: &AppConfig,
+    markets: &[Market],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    for market in markets {
+        for outcome in &market.outcomes {
+            let Some(book) = fetch_live_alpha_book(config, &outcome.token_id).await? else {
+                return Ok(false);
+            };
+            if book.bids.is_empty() || book.asks.is_empty() {
+                return Ok(false);
+            }
+            let Some(book_age_ms) = book
+                .source_ts
+                .and_then(|source_ts| age_ms(now_ms, source_ts))
+            else {
+                return Ok(false);
+            };
+            if book_age_ms > config.risk.stale_book_ms {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+async fn live_trading_references_fresh(
+    config: &AppConfig,
+    markets: &[Market],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    for market in markets {
+        let evidence = live_alpha_reference_evidence(config, market.asset).await?;
+        if evidence.price.is_none() {
+            return Ok(false);
+        }
+        let Some(reference_age_ms) = evidence.age_at(now_ms) else {
+            return Ok(false);
+        };
+        if reference_age_ms > config.risk.stale_reference_ms {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn live_trading_predictive_fresh(
+    config: &AppConfig,
+    markets: &[Market],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let now_ms = unix_time_ms();
+    for market in markets {
+        let evidence = live_alpha_predictive_evidence(config, market.asset).await?;
+        if evidence.price.is_none() {
+            return Ok(false);
+        }
+        let Some(predictive_age_ms) = evidence.age_at(now_ms) else {
+            return Ok(false);
+        };
+        if predictive_age_ms > config.feeds.stale_after_ms {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn live_trading_geoblock_readback(config: &AppConfig) -> LiveTradingGeoblockReadback {
+    if !config.live_trading.enabled {
+        return LiveTradingGeoblockReadback::not_checked();
+    }
+
+    match compliance_client(config) {
+        Ok(client) => match client.check_geoblock().await {
+            Ok(geoblock) if geoblock.blocked => {
+                LiveTradingGeoblockReadback::blocked(geoblock.country, geoblock.region)
+            }
+            Ok(geoblock) => LiveTradingGeoblockReadback::passed(geoblock.country, geoblock.region),
+            Err(_) => LiveTradingGeoblockReadback::error(),
+        },
+        Err(_) => LiveTradingGeoblockReadback::error(),
+    }
+}
+
+fn sample_live_trading_readback_evidence(
+    config: &AppConfig,
+    deployment_geoblock_passed: bool,
+) -> Result<(AccountPreflight, AuthenticatedReadbackPreflightEvidence), Box<dyn std::error::Error>>
+{
+    let prerequisites = ReadbackPrerequisites {
+        lb3_hold_released: config.live_beta.lb3_hold_released,
+        legal_access_approved: config.live_beta.legal_access_approved,
+        deployment_geoblock_passed,
+    };
+    let report = live_beta_readback::sample_readback_preflight(prerequisites)?;
+    let account = lb4_account_preflight(config).unwrap_or_else(|_| AccountPreflight {
+        clob_host: live_beta_readback::CLOB_HOST.to_string(),
+        chain_id: 137,
+        wallet_address: "0x1111111111111111111111111111111111111111".to_string(),
+        funder_address: "0x1111111111111111111111111111111111111111".to_string(),
+        signature_type: SignatureType::Eoa,
+    });
+    Ok((
+        account,
+        AuthenticatedReadbackPreflightEvidence {
+            report,
+            collateral: BalanceAllowanceReadback {
+                asset_type: AssetType::Collateral,
+                token_id: None,
+                balance_units: 25_000_000,
+                allowance_units: 25_000_000,
+            },
+            open_orders: Vec::new(),
+            trades: Vec::new(),
+        },
+    ))
+}
+
+fn write_live_trading_preflight_artifacts(
+    artifact: &LiveTradingPreflightArtifact,
+    account_baseline: &AccountBaselineArtifact,
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(output_dir)?;
+    fs::write(
+        output_dir.join("final_live_preflight.redacted.json"),
+        live_trading_preflight_json(artifact)?,
+    )?;
+    fs::write(
+        output_dir.join("account_baseline.redacted.json"),
+        account_baseline_json(account_baseline)?,
+    )?;
+    fs::write(
+        output_dir.join("orders.redacted.json"),
+        serde_json::to_string_pretty(&account_baseline.body.open_orders)?,
+    )?;
+    fs::write(
+        output_dir.join("trades.redacted.json"),
+        serde_json::to_string_pretty(&account_baseline.body.trades)?,
+    )?;
+    fs::write(
+        output_dir.join("balances.redacted.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "readback_report": &account_baseline.body.readback_report,
+            "collateral": &account_baseline.body.collateral,
+        }))?,
+    )?;
+    fs::write(
+        output_dir.join("positions.redacted.json"),
+        serde_json::to_string_pretty(&account_baseline.body.positions)?,
+    )?;
+    Ok(())
+}
+
+fn print_live_trading_preflight_result(result: &LiveTradingPreflightCommandResult) {
+    println!(
+        "live_trading_preflight_baseline_id={}",
+        result.artifact.body.baseline_id
+    );
+    println!(
+        "live_trading_preflight_run_id={}",
+        result.artifact.body.run_id
+    );
+    println!(
+        "live_trading_preflight_status={}",
+        result.artifact.body.status
+    );
+    println!(
+        "live_trading_preflight_block_reasons={}",
+        result.artifact.body.block_reasons.join(",")
+    );
+    println!(
+        "live_trading_preflight_geoblock_status={}",
+        result.artifact.body.geoblock.status
+    );
+    println!(
+        "live_trading_preflight_account_readback_status={}",
+        result.artifact.body.account_readback_status
+    );
+    println!(
+        "live_trading_preflight_open_order_count={}",
+        result.artifact.body.account_open_order_count
+    );
+    println!(
+        "live_trading_preflight_trade_count={}",
+        result.artifact.body.account_trade_count
+    );
+    println!(
+        "live_trading_preflight_position_count={}",
+        result.artifact.body.account_position_count
+    );
+    println!(
+        "live_trading_preflight_reserved_pusd_units={}",
+        result.artifact.body.reserved_pusd_units
+    );
+    println!(
+        "live_trading_preflight_available_pusd_units={}",
+        result.artifact.body.available_pusd_units
+    );
+    println!(
+        "live_trading_preflight_hash={}",
+        result.artifact.artifact_hash
+    );
+    println!(
+        "live_trading_preflight_account_baseline_hash={}",
+        result.account_baseline.baseline_hash
+    );
+    println!(
+        "live_trading_preflight_output_dir={}",
+        result.output_dir.display()
+    );
+    println!(
+        "live_trading_preflight_no_live_actions=submitted_orders:false,signed_orders_for_submission:false,submitted_cancels:false,heartbeat_posts:false,cap_writes:false"
+    );
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct LiveAlphaTakerCanaryNoLiveActions {
     submitted: bool,
@@ -12143,6 +12604,82 @@ mod tests {
     }
 
     #[test]
+    fn live_trading_readback_context_requires_approved_host_match() {
+        let config = approved_live_trading_config();
+        let geoblock =
+            LiveTradingGeoblockReadback::passed(Some("BR".to_string()), Some("SP".to_string()));
+
+        assert!(!live_trading_approval_context_matches(
+            &config,
+            "unapproved-host",
+            &geoblock
+        ));
+    }
+
+    #[test]
+    fn live_trading_readback_context_requires_approved_jurisdiction_match() {
+        let config = approved_live_trading_config();
+        let geoblock =
+            LiveTradingGeoblockReadback::passed(Some("BR".to_string()), Some("RJ".to_string()));
+
+        assert!(!live_trading_approval_context_matches(
+            &config,
+            "approved-host",
+            &geoblock
+        ));
+    }
+
+    #[test]
+    fn live_trading_readback_context_passes_only_for_exact_approval_context() {
+        let config = approved_live_trading_config();
+        let geoblock =
+            LiveTradingGeoblockReadback::passed(Some("BR".to_string()), Some("SP".to_string()));
+
+        assert!(live_trading_approval_context_matches(
+            &config,
+            "approved-host",
+            &geoblock
+        ));
+    }
+
+    #[test]
+    fn live_trading_baseline_id_rejects_path_components() {
+        for baseline_id in [
+            "",
+            "../LT1",
+            "LT1/READONLY",
+            r"LT1\READONLY",
+            "LT1..READONLY",
+            " LT1",
+            "LT1 READONLY",
+        ] {
+            let error = validate_live_trading_baseline_id(baseline_id)
+                .expect_err("invalid baseline ID must fail");
+            assert!(
+                error.to_string().contains("baseline id")
+                    || error.to_string().contains("--baseline-id"),
+                "unexpected error for {baseline_id:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_trading_baseline_id_accepts_identifier_characters() {
+        validate_live_trading_baseline_id("LT1-LOCAL_DRY-RUN-001")
+            .expect("identifier-style baseline ID passes");
+    }
+
+    fn approved_live_trading_config() -> AppConfig {
+        let mut config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+        config.live_trading.enabled = true;
+        config.live_trading.approved_host = "approved-host".to_string();
+        config.live_trading.approved_country = "BR".to_string();
+        config.live_trading.approved_region = "SP".to_string();
+        config
+    }
+
+    #[test]
     fn live_alpha_taker_canary_dry_run_command_parses_required_surface() {
         let cli = Cli::try_parse_from([
             "polymarket-15m-arb-bot",
@@ -12242,6 +12779,33 @@ mod tests {
 
         assert!(rendered.contains("--approval-id"));
         assert!(rendered.contains("--approval-artifact"));
+    }
+
+    #[test]
+    fn live_trading_preflight_read_only_command_parses_required_surface() {
+        let cli = Cli::try_parse_from([
+            "polymarket-15m-arb-bot",
+            "--config",
+            "config/default.toml",
+            "live-trading-preflight",
+            "--read-only",
+            "--baseline-id",
+            "LT1-LOCAL-DRY-RUN",
+        ])
+        .expect("LT1 read-only preflight parses");
+
+        match cli.command {
+            Commands::LiveTradingPreflight {
+                read_only,
+                baseline_id,
+                output_root,
+            } => {
+                assert!(read_only);
+                assert_eq!(baseline_id, "LT1-LOCAL-DRY-RUN");
+                assert_eq!(output_root, PathBuf::from("artifacts/live_trading"));
+            }
+            other => panic!("expected live-trading-preflight command, got {other:?}"),
+        }
     }
 
     #[tokio::test]

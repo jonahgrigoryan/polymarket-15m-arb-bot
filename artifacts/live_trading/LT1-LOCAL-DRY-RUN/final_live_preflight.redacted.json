@@ -1,0 +1,59 @@
+{
+  "baseline_id": "LT1-LOCAL-DRY-RUN",
+  "run_id": "18aef574989ac198-13875-0",
+  "captured_at_ms": 1778628783983,
+  "captured_at_rfc3339": "2026-05-12T23:33:03Z",
+  "mode": "read_only",
+  "final_live_config_enabled": false,
+  "deployment_host": "Jonahs-MacBook-Pro.local",
+  "approved_host": "",
+  "approved_jurisdiction": {
+    "country": "",
+    "region": ""
+  },
+  "geoblock": {
+    "status": "not_checked",
+    "country": null,
+    "region": null,
+    "source": "not_checked_final_live_config_disabled_or_unapproved",
+    "error_redacted": false
+  },
+  "account_readback_status": "blocked",
+  "account_baseline_hash": "sha256:6ffa70622b6154f9dd78e03264e0bc921c00b65306878bd9f214257be095fadd",
+  "account_baseline_path": "artifacts/live_trading/LT1-LOCAL-DRY-RUN/account_baseline.redacted.json",
+  "account_open_order_count": 0,
+  "account_trade_count": 0,
+  "account_position_count": 0,
+  "reserved_pusd_units": 0,
+  "available_pusd_units": 25000000,
+  "l2_secret_handles_present": false,
+  "read_only_freshness": {
+    "market_discovery": "not_checked",
+    "book": "not_checked",
+    "reference": "not_checked",
+    "predictive": "not_checked"
+  },
+  "no_live_actions": {
+    "submitted_orders": false,
+    "signed_orders_for_submission": false,
+    "submitted_cancels": false,
+    "heartbeat_posts": false,
+    "cap_writes": false
+  },
+  "status": "blocked",
+  "block_reasons": [
+    "account_readback_not_live_network",
+    "account_readback_not_passed",
+    "approved_country_not_configured",
+    "approved_host_not_configured",
+    "approved_region_not_configured",
+    "book_freshness_not_passed",
+    "final_live_config_disabled",
+    "geoblock_not_passed",
+    "l2_secret_handles_not_present",
+    "market_discovery_freshness_not_passed",
+    "predictive_freshness_not_passed",
+    "reference_freshness_not_passed"
+  ],
+  "artifact_hash": "sha256:5fa6de13beb5aeafce7a42450b82fd3410a87f763d9c4fa09997a376149bae65"
+}

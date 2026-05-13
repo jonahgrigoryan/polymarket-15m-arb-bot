@@ -82,6 +82,12 @@ min_ev_after_all_costs_bps = 0
 max_slippage_bps = 0
 max_orders_per_day = 0
 
+[live_trading]
+enabled = false
+approved_host = ""
+approved_country = ""
+approved_region = ""
+
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
 
