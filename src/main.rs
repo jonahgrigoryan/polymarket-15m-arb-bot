@@ -8327,6 +8327,9 @@ async fn live_trading_signing_authenticated_readback_status(
     if !live_trading_signing_approved_host_scope_configured(config, &deployment_host) {
         return Ok("not_run_no_approved_host_readback_in_lt3_local_dry_run".to_string());
     }
+    if !config.live_trading.legal_access_approved {
+        return Ok("not_run_legal_access_not_approved".to_string());
+    }
 
     let geoblock = live_trading_geoblock_readback(config).await;
     if !live_trading_approval_context_matches(config, &deployment_host, &geoblock) {
@@ -11220,11 +11223,7 @@ async fn live_trading_authenticated_readback_evidence_with_geoblock(
         .max(1);
     let evidence =
         live_beta_readback::authenticated_readback_preflight_evidence_with_balance_allowance_signature_type(AuthenticatedReadbackInput {
-            prerequisites: ReadbackPrerequisites {
-                lb3_hold_released: true,
-                legal_access_approved: true,
-                deployment_geoblock_passed,
-            },
+            prerequisites: live_trading_readback_prerequisites(config, deployment_geoblock_passed),
             account: live_trading_account.account.clone(),
             credentials,
             required_collateral_allowance_units,
@@ -11235,6 +11234,17 @@ async fn live_trading_authenticated_readback_evidence_with_geoblock(
             .as_balance_allowance_param())
         .await?;
     Ok((live_trading_account.account, evidence))
+}
+
+fn live_trading_readback_prerequisites(
+    config: &AppConfig,
+    deployment_geoblock_passed: bool,
+) -> ReadbackPrerequisites {
+    ReadbackPrerequisites {
+        lb3_hold_released: true,
+        legal_access_approved: config.live_trading.legal_access_approved,
+        deployment_geoblock_passed,
+    }
 }
 
 fn current_host_label() -> String {
@@ -12103,16 +12113,51 @@ fn live_trading_account_preflight(
                 .into(),
         );
     };
+    let wallet_address = account.wallet_address.trim();
+    let funder_address = account.funder_address.trim();
+    validate_live_trading_account_binding_before_readback(
+        wallet_address,
+        funder_address,
+        signature_type,
+    )?;
     Ok(LiveTradingAccountPreflight {
         account: AccountPreflight {
             clob_host: normalize_lb4_clob_host(&config.polymarket.clob_rest_url),
             chain_id: 137,
-            wallet_address: account.wallet_address.clone(),
-            funder_address: account.funder_address.clone(),
+            wallet_address: wallet_address.to_string(),
+            funder_address: funder_address.to_string(),
             signature_type: signature_type.as_legacy_evaluator_signature_type(),
         },
         signature_type,
     })
+}
+
+fn validate_live_trading_account_binding_before_readback(
+    wallet_address: &str,
+    funder_address: &str,
+    signature_type: LiveTradingReadbackSignatureType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !is_valid_live_trading_evm_address(wallet_address) {
+        return Err("LT3 readback account wallet_address must be a nonzero EVM address".into());
+    }
+    if !is_valid_live_trading_evm_address(funder_address) {
+        return Err("LT3 readback account funder_address must be a nonzero EVM address".into());
+    }
+    if signature_type == LiveTradingReadbackSignatureType::Eoa
+        && !wallet_address.eq_ignore_ascii_case(funder_address)
+    {
+        return Err("LT3 readback account eoa wallet_address must match funder_address".into());
+    }
+    Ok(())
+}
+
+fn is_valid_live_trading_evm_address(value: &str) -> bool {
+    let Some(stripped) = value.strip_prefix("0x") else {
+        return false;
+    };
+    stripped.len() == 40
+        && stripped.chars().all(|ch| ch.is_ascii_hexdigit())
+        && stripped.chars().any(|ch| ch != '0')
 }
 
 fn normalize_lb4_clob_host(url: &str) -> String {
@@ -13095,6 +13140,35 @@ mod tests {
     }
 
     #[test]
+    fn live_trading_readback_prerequisites_use_final_live_legal_gate() {
+        let mut config = approved_live_trading_config();
+        config.live_trading.legal_access_approved = false;
+
+        let blocked = live_trading_readback_prerequisites(&config, true);
+        assert!(blocked.lb3_hold_released);
+        assert!(!blocked.legal_access_approved);
+        assert!(blocked.deployment_geoblock_passed);
+
+        config.live_trading.legal_access_approved = true;
+        let approved = live_trading_readback_prerequisites(&config, true);
+        assert!(approved.legal_access_approved);
+    }
+
+    #[tokio::test]
+    async fn live_trading_signing_readback_status_blocks_without_final_live_legal_gate() {
+        let mut config = approved_live_trading_config();
+        config.live_trading.approved_host = live_trading_deployment_host_identity();
+        config.live_trading.legal_access_approved = false;
+        let secret_report = present_live_trading_secret_report(&config);
+
+        let status = live_trading_signing_authenticated_readback_status(&config, &secret_report)
+            .await
+            .expect("status check completes without readback");
+
+        assert_eq!(status, "not_run_legal_access_not_approved");
+    }
+
+    #[test]
     fn live_trading_signing_readback_status_requires_passed_live_network_report() {
         let mut report = live_beta_readback::sample_readback_preflight(ReadbackPrerequisites {
             lb3_hold_released: true,
@@ -13147,6 +13221,39 @@ mod tests {
         );
         assert_eq!(account.signature_type.as_balance_allowance_param(), "3");
         assert_eq!(SignatureType::from_config("poly_1271"), None);
+    }
+
+    #[test]
+    fn live_trading_signing_account_preflight_rejects_invalid_addresses_before_readback() {
+        let mut config = approved_live_trading_config();
+        config.live_trading.wallet_address = "not-address".to_string();
+        config.live_trading.funder_address =
+            "0x2222222222222222222222222222222222222222".to_string();
+        config.live_trading.signature_type = "poly_proxy".to_string();
+
+        let error = live_trading_account_preflight(&config)
+            .expect_err("invalid wallet address must fail before readback")
+            .to_string();
+        assert!(error.contains("wallet_address"));
+
+        config.live_trading.wallet_address =
+            "0x1111111111111111111111111111111111111111".to_string();
+        config.live_trading.funder_address =
+            "0x0000000000000000000000000000000000000000".to_string();
+
+        let error = live_trading_account_preflight(&config)
+            .expect_err("invalid funder address must fail before readback")
+            .to_string();
+        assert!(error.contains("funder_address"));
+
+        config.live_trading.funder_address =
+            "0x2222222222222222222222222222222222222222".to_string();
+        config.live_trading.signature_type = "eoa".to_string();
+
+        let error = live_trading_account_preflight(&config)
+            .expect_err("EOA wallet/funder mismatch must fail before readback")
+            .to_string();
+        assert!(error.contains("eoa"));
     }
 
     #[test]
@@ -13210,6 +13317,24 @@ mod tests {
         config.live_trading.approved_country = "BR".to_string();
         config.live_trading.approved_region = "SP".to_string();
         config
+    }
+
+    fn present_live_trading_secret_report(
+        config: &AppConfig,
+    ) -> secret_handling::SecretPresenceReport {
+        let inventory = config.live_trading.secret_inventory();
+        secret_handling::SecretPresenceReport {
+            backend: inventory.backend,
+            checks: inventory
+                .handles
+                .into_iter()
+                .map(|handle| secret_handling::SecretPresenceCheck {
+                    label: handle.label,
+                    handle: handle.handle,
+                    present: true,
+                })
+                .collect(),
+        }
     }
 
     #[test]

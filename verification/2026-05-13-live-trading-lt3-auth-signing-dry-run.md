@@ -31,13 +31,14 @@ Rechecked on 2026-05-13:
   - `P15M_LIVE_TRADING_CLOB_L2_CREDENTIAL`
   - `P15M_LIVE_TRADING_CLOB_L2_PASSPHRASE`
   - `P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY`
-- Added final-live account binding config fields under `[live_trading]`:
+- Added final-live gate/account binding config fields under `[live_trading]`:
+  - `legal_access_approved`
   - `wallet_address`
   - `funder_address`
   - `signature_type`
 - Added CLI:
   - `live-trading-signing-dry-run --approval-id <LT3-id>`
-- Added approved-host authenticated readback wiring for enabled final-live configs. The command checks exact approved host/country/region scope before using final-live L2 handle values for read-only account readback. The artifact can pass with `final_live_config_enabled=true` only when that readback returns `authenticated_readback_status=passed`.
+- Added approved-host authenticated readback wiring for enabled final-live configs. The command checks exact approved host/country/region scope, explicit final-live legal/access approval, and local account-binding validity before using final-live L2 handle values for read-only account readback. The artifact can pass with `final_live_config_enabled=true` only when that readback returns `authenticated_readback_status=passed`.
 - Added redacted artifacts:
   - `artifacts/live_trading/LT3-LOCAL-DRY-RUN/signing_dry_run.redacted.json`
   - `artifacts/live_trading/LT3-LOCAL-DRY-RUN/signing_payload_shape.redacted.json`
@@ -87,7 +88,7 @@ Result:
 
 Interpretation: an enabled final-live config can no longer emit a passing LT3 signing dry-run artifact unless approved-host authenticated readback has passed.
 
-No approved-host live-network readback was run from this local branch context because the tracked default config has no approved host/country/region. The code path is wired for the post-approval command in `LIVE_TRADING_IMPLEMENTATION_PLAN.md` and remains fail-closed outside exact approved scope.
+No approved-host live-network readback was run from this local branch context because the tracked default config has no approved host/country/region and `live_trading.legal_access_approved` defaults to `false`. The code path is wired for the post-approval command in `LIVE_TRADING_IMPLEMENTATION_PLAN.md` and remains fail-closed outside exact approved scope plus explicit final-live legal/access approval.
 
 ## Secret Handling
 
@@ -109,6 +110,7 @@ No approved-host live-network readback was run from this local branch context be
 - Default config funder address: empty/fail-closed.
 - Default config signature type: empty/fail-closed.
 - Local `.env` override wallet/funder/signature-type binding: present and consumed by the LT3 dry-run.
+- Local LT3 preflight rejects invalid or zero wallet/funder EVM addresses before any authenticated readback endpoint calls. EOA mode also requires wallet and funder to match before readback.
 - Supported final-live signature types: `eoa`, `poly_proxy`, `gnosis_safe`, `poly_1271`, or numeric `0` through `3`.
 - `poly_1271` support is scoped to final-live LT3 readback only; the shared legacy Live Beta/Live Alpha `SignatureType::from_config` parser does not accept `poly_1271`, so existing submit helpers cannot receive it through the LB4 account path.
 - Tests cover a pass-capable LT3 binding with explicit handles present and `poly_1271`, while still proving `not_submitted=true` and `network_post_enabled=false`.
@@ -122,9 +124,11 @@ No approved-host live-network readback was run from this local branch context be
 | `set -a; source .env; set +a; LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-DRY-RUN` | PASS | Redacted LT3 local artifact generated with `status=passed`, `final_live_config_enabled=false`, `secret_handles_present=true`, `not_submitted=true`, and `network_post_enabled=false`. |
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked` and `approved_authenticated_readback_not_passed`. |
 | `cargo test --offline secret_handling` | PASS | 5 tests passed. |
-| `set -a; source .env; set +a; cargo test --offline live_trading_signing` | PASS | 8 module tests and 6 CLI/id/readback-gate tests passed. |
+| `cargo test --offline live_trading_signing` | PASS | 8 module tests and 8 CLI/id/readback-gate tests passed, including final-live legal gate and invalid account-binding pre-readback blockers. |
+| `cargo test --offline live_trading_env_overrides_bind_local_account_without_committing_defaults` | PASS | Confirms env overrides bind final-live account config and explicit final-live legal/access approval without committing local values. |
+| `cargo test --offline live_trading_readback_prerequisites_use_final_live_legal_gate` | PASS | Confirms LT3 authenticated readback prerequisites source legal/access from `live_trading.legal_access_approved` instead of a hard-coded pass. |
 | `cargo test --offline balance_allowance_signature_type_params_match_official_v2_client` | PASS | Confirms legacy `SignatureType::from_config("poly_1271")` is rejected while final-live readback can still use balance-allowance query param `3`. |
-| `cargo test --offline --quiet` | PASS | 451 lib tests, 105 bin tests, and 0 doc tests passed after the POLY_1271 scope fix. |
+| `cargo test --offline --quiet` | PASS | 451 lib tests, 108 bin tests, and 0 doc tests passed after the legal/access and pre-readback account-binding fixes. |
 | `cargo clippy --offline -- -D warnings` | PASS | Passed through `scripts/verify-pr.sh` after this note was added. |
 | `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. |
 
@@ -133,8 +137,9 @@ No approved-host live-network readback was run from this local branch context be
 - No raw private keys, API secrets, passphrases, raw signatures, or auth headers are emitted by the LT3 artifact.
 - `rg` scan over the LT3 artifact and new signing/config surfaces found only safe handle names and header field names.
 - `src/live_trading_signing.rs` unit tests assert the module contains no request client construction, submit dispatch token, cancel dispatch token, or raw secret placeholders.
+- Approved-host readback now still fails closed unless `live_trading.legal_access_approved=true`, and invalid wallet/funder strings are rejected before authenticated L2 GETs.
 - No live order submit, cancel submit, heartbeat POST, cap sentinel write, taker expansion, production sizing, multi-wallet deployment, asset expansion, cancel-all behavior, or authenticated write client was added.
 
 ## Exit Gate
 
-LT3 is locally implemented and verified for code review. The signing/auth local dry-run gate passes with sourced local final-live handles and env-supplied wallet/funder/signature-type binding while tracked defaults remain fail-closed. Enabled final-live configs now fail closed unless exact approved-host scope allows authenticated readback and that readback passes. Stop here; do not start LT4 maker shadow work from this branch without security/signing review and operator approval.
+LT3 is locally implemented and verified for code review. The signing/auth local dry-run gate passes with sourced local final-live handles and env-supplied wallet/funder/signature-type binding while tracked defaults remain fail-closed. Enabled final-live configs now fail closed unless exact approved-host scope, explicit final-live legal/access approval, valid final-live account binding, and authenticated readback all pass. Stop here; do not start LT4 maker shadow work from this branch without security/signing review and operator approval.

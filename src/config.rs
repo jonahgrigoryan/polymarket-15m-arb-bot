@@ -65,6 +65,14 @@ impl AppConfig {
         apply_string_override("P15M_METRICS_BIND_ADDR", &mut self.metrics.bind_addr);
         apply_bool_override("LIVE_TRADING_ENABLED", &mut self.live_trading.enabled);
         apply_bool_override("P15M_LIVE_TRADING_ENABLED", &mut self.live_trading.enabled);
+        apply_bool_override(
+            "LIVE_TRADING_LEGAL_ACCESS_APPROVED",
+            &mut self.live_trading.legal_access_approved,
+        );
+        apply_bool_override(
+            "P15M_LIVE_TRADING_LEGAL_ACCESS_APPROVED",
+            &mut self.live_trading.legal_access_approved,
+        );
         apply_string_override("WALLET_ADDRESS", &mut self.live_trading.wallet_address);
         apply_string_override(
             "P15M_LIVE_TRADING_WALLET_ADDRESS",
@@ -447,6 +455,8 @@ pub struct LiveBetaReadbackAccountConfig {
 pub struct LiveTradingConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub legal_access_approved: bool,
     #[serde(default)]
     pub approved_host: String,
     #[serde(default)]
@@ -1061,6 +1071,7 @@ mod tests {
             "wss://ws-live-data.polymarket.com"
         );
         assert!(!config.live_trading.enabled);
+        assert!(!config.live_trading.legal_access_approved);
         assert_eq!(config.live_trading.secret_handles.backend, "env");
         assert_eq!(
             config.live_trading.secret_handles.clob_l2_access,
@@ -1151,6 +1162,7 @@ mod tests {
         let config: AppConfig = toml::from_str(&legacy_config).expect("legacy config parses");
 
         assert!(!config.live_trading.enabled);
+        assert!(!config.live_trading.legal_access_approved);
         assert_eq!(
             config.live_trading.secret_handles.signer_private_key,
             "P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY"
@@ -1267,11 +1279,13 @@ mod tests {
     #[test]
     fn live_trading_env_overrides_bind_local_account_without_committing_defaults() {
         let previous_enabled = env::var("P15M_LIVE_TRADING_ENABLED").ok();
+        let previous_legal = env::var("LIVE_TRADING_LEGAL_ACCESS_APPROVED").ok();
         let previous_wallet = env::var("WALLET_ADDRESS").ok();
         let previous_funder = env::var("FUNDER_ADDRESS").ok();
         let previous_signature_type = env::var("SIGNATURE_TYPE").ok();
 
         env::set_var("P15M_LIVE_TRADING_ENABLED", "true");
+        env::set_var("LIVE_TRADING_LEGAL_ACCESS_APPROVED", "true");
         env::set_var(
             "WALLET_ADDRESS",
             "0x1111111111111111111111111111111111111111",
@@ -1284,6 +1298,7 @@ mod tests {
 
         let mut config: AppConfig = toml::from_str(VALID_CONFIG).expect("default config parses");
         assert!(!config.live_trading.enabled);
+        assert!(!config.live_trading.legal_access_approved);
         assert!(config.live_trading.wallet_address.is_empty());
         assert!(config.live_trading.funder_address.is_empty());
         assert!(config.live_trading.signature_type.is_empty());
@@ -1294,6 +1309,7 @@ mod tests {
             .expect("env-bound final-live config validates");
 
         assert!(config.live_trading.enabled);
+        assert!(config.live_trading.legal_access_approved);
         assert_eq!(
             config.live_trading.wallet_address,
             "0x1111111111111111111111111111111111111111"
@@ -1305,6 +1321,7 @@ mod tests {
         assert_eq!(config.live_trading.signature_type, "poly_proxy");
 
         restore_env("P15M_LIVE_TRADING_ENABLED", previous_enabled);
+        restore_env("LIVE_TRADING_LEGAL_ACCESS_APPROVED", previous_legal);
         restore_env("WALLET_ADDRESS", previous_wallet);
         restore_env("FUNDER_ADDRESS", previous_funder);
         restore_env("SIGNATURE_TYPE", previous_signature_type);
