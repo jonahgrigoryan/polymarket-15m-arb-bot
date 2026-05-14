@@ -250,6 +250,9 @@ fn block_reasons(
     if !input.approval_id.starts_with("LT3-") {
         reasons.push("approval_id_not_lt3".to_string());
     }
+    if input.final_live_config_enabled && local_dry_run {
+        reasons.push("local_approval_id_not_allowed_for_enabled_final_live".to_string());
+    }
     if (input.final_live_config_enabled || !local_dry_run)
         && input.authenticated_readback_status.trim() != AUTHENTICATED_READBACK_PASSED
     {
@@ -569,6 +572,40 @@ mod tests {
             .contains(&"approved_authenticated_readback_not_passed".to_string()));
         assert!(artifact.body.not_submitted);
         assert!(!artifact.body.network_post_enabled);
+    }
+
+    #[test]
+    fn live_trading_signing_dry_run_blocks_enabled_config_with_local_approval_id() {
+        let artifact = build_live_trading_signing_dry_run(LiveTradingSigningDryRunInput {
+            approval_id: "LT3-LOCAL-DRY-RUN",
+            run_id: "lt3-test",
+            captured_at_ms: 1,
+            captured_at_rfc3339: "2026-05-13T00:00:00Z",
+            clob_host: "https://clob.polymarket.com",
+            chain_id: 137,
+            final_live_config_enabled: true,
+            wallet_address: "0x1111111111111111111111111111111111111111",
+            funder_address: "0x2222222222222222222222222222222222222222",
+            signature_type: "poly_proxy",
+            secret_inventory: &sample_inventory(),
+            secret_report: &sample_report(true),
+            authenticated_readback_status: AUTHENTICATED_READBACK_PASSED,
+            readback_auth_headers_generated: true,
+        })
+        .expect("blocked artifact still builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        assert!(artifact
+            .body
+            .block_reasons
+            .contains(&"local_approval_id_not_allowed_for_enabled_final_live".to_string()));
+        assert!(!artifact
+            .body
+            .block_reasons
+            .contains(&"approved_authenticated_readback_not_passed".to_string()));
+        assert!(artifact.body.not_submitted);
+        assert!(!artifact.body.network_post_enabled);
+        assert!(!artifact.body.order_submit_auth_headers_generated);
     }
 
     #[test]
