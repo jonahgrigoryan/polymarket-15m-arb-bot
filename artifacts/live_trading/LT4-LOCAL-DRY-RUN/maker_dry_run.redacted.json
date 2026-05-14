@@ -1,9 +1,9 @@
 {
   "schema_version": "lt4.live_trading_maker_shadow.v1",
   "approval_id": "LT4-LOCAL-DRY-RUN",
-  "run_id": "18af722fa03a9350-bca2-0",
-  "captured_at_ms": 1778765926712,
-  "captured_at_rfc3339": "2026-05-14T13:38:46Z",
+  "run_id": "18af7320d38ef768-d1bd-0",
+  "captured_at_ms": 1778766962660,
+  "captured_at_rfc3339": "2026-05-14T13:56:02Z",
   "docs_checked": [
     "https://docs.polymarket.com/api-reference/authentication",
     "https://docs.polymarket.com/trading/orderbook",
@@ -15,6 +15,7 @@
   "approval_artifact_path": "verification/2026-05-14-live-trading-lt4-approval-candidate.md",
   "dry_run_report_path": "artifacts/live_trading/LT4-LOCAL-DRY-RUN/maker_dry_run.redacted.json",
   "final_live_config_enabled": false,
+  "final_live_legal_access_approved": false,
   "deployment": {
     "host": "Jonahs-MacBook-Pro.local",
     "approved_host": "",
@@ -34,6 +35,8 @@
   },
   "geoblock": {
     "status": "not_checked",
+    "country": null,
+    "region": null,
     "age_ms": null,
     "max_age_ms": 30000
   },
@@ -57,7 +60,7 @@
     "price": 0.0,
     "size": 0.0,
     "notional": 0.0,
-    "expiry_unix": 1778766016,
+    "expiry_unix": 1778767052,
     "maker_fee_bps": null,
     "estimated_fee_pusd": null,
     "tick_size": null,
@@ -67,7 +70,7 @@
     "fair_probability": null,
     "edge_bps_at_submit": null,
     "min_edge_bps": 0.0,
-    "market_end_unix": 1778765926,
+    "market_end_unix": 1778766962,
     "no_trade_seconds_before_close": 30,
     "book_age_ms": null,
     "max_book_age_ms": 1000,
@@ -105,7 +108,9 @@
   "status": "blocked",
   "block_reasons": [
     "account_binding_missing",
+    "approved_country_not_configured",
     "approved_host_not_matched",
+    "approved_region_not_configured",
     "condition_id_missing",
     "edge_at_submit_below_threshold",
     "fee_not_known",
@@ -113,6 +118,7 @@
     "geoblock_not_passed",
     "geoblock_stale_or_not_checked",
     "heartbeat_required_not_fresh",
+    "legal_access_not_approved",
     "market_slug_missing",
     "max_single_order_notional_missing",
     "missing_baseline_binding",
@@ -133,5 +139,5 @@
     "unresolved_live_order_state_unknown"
   ],
   "approval_review_required": true,
-  "artifact_hash": "sha256:1aadc8c278aa48b8bf3438848cb3acc872304d486405ff7eadd70a0f7cf39866"
+  "artifact_hash": "sha256:1f0d535b7c0e90bcdee00f54f588350c4805d139bb5049093c099f88de8a53fb"
 }

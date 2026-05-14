@@ -47,6 +47,7 @@ pub struct LiveTradingMakerDryRunBody {
     pub approval_artifact_path: String,
     pub dry_run_report_path: String,
     pub final_live_config_enabled: bool,
+    pub final_live_legal_access_approved: bool,
     pub deployment: MakerDeploymentSummary,
     pub account: MakerAccountSummary,
     pub baseline: MakerBaselineBinding,
@@ -97,6 +98,8 @@ impl MakerBaselineBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MakerFreshnessStatus {
     pub status: String,
+    pub country: Option<String>,
+    pub region: Option<String>,
     pub age_ms: Option<u64>,
     pub max_age_ms: u64,
 }
@@ -218,6 +221,7 @@ pub struct LiveTradingMakerDryRunInput<'a> {
     pub approval_artifact_path: &'a str,
     pub dry_run_report_path: &'a str,
     pub final_live_config_enabled: bool,
+    pub final_live_legal_access_approved: bool,
     pub deployment: MakerDeploymentSummary,
     pub account: MakerAccountSummary,
     pub baseline: MakerBaselineBinding,
@@ -285,6 +289,7 @@ pub fn build_live_trading_maker_dry_run(
         approval_artifact_path: input.approval_artifact_path.to_string(),
         dry_run_report_path: input.dry_run_report_path.to_string(),
         final_live_config_enabled: input.final_live_config_enabled,
+        final_live_legal_access_approved: input.final_live_legal_access_approved,
         deployment: input.deployment,
         account: input.account,
         baseline: input.baseline,
@@ -308,11 +313,15 @@ fn evaluate_maker_candidate_blocks(input: &LiveTradingMakerDryRunInput<'_>) -> V
     if !input.final_live_config_enabled {
         reasons.push("final_live_config_disabled".to_string());
     }
+    if !input.final_live_legal_access_approved {
+        reasons.push("legal_access_not_approved".to_string());
+    }
     if input.deployment.approved_host.trim().is_empty()
         || input.deployment.host != input.deployment.approved_host
     {
         reasons.push("approved_host_not_matched".to_string());
     }
+    push_jurisdiction_blocks(&mut reasons, input);
     if input.account.wallet_address.trim().is_empty()
         || input.account.funder_address.trim().is_empty()
         || input.account.signature_type.trim().is_empty()
@@ -487,6 +496,22 @@ fn evaluate_maker_candidate_blocks(input: &LiveTradingMakerDryRunInput<'_>) -> V
     reasons
 }
 
+fn push_jurisdiction_blocks(reasons: &mut Vec<String>, input: &LiveTradingMakerDryRunInput<'_>) {
+    let approved_country = input.deployment.approved_country.trim();
+    if approved_country.is_empty() {
+        reasons.push("approved_country_not_configured".to_string());
+    } else if input.geoblock.country.as_deref() != Some(approved_country) {
+        reasons.push("approved_country_mismatch".to_string());
+    }
+
+    let approved_region = input.deployment.approved_region.trim();
+    if approved_region.is_empty() {
+        reasons.push("approved_region_not_configured".to_string());
+    } else if input.geoblock.region.as_deref() != Some(approved_region) {
+        reasons.push("approved_region_mismatch".to_string());
+    }
+}
+
 pub fn live_trading_maker_dry_run_json(
     artifact: &LiveTradingMakerDryRunArtifact,
 ) -> Result<String, LiveTradingMakerError> {
@@ -520,6 +545,7 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | artifact_hash | `{artifact_hash}` |
 | run_id | `{run_id}` |
 | captured_at_rfc3339 | `{captured_at_rfc3339}` |
+| final_live_legal_access_approved | `{final_live_legal_access_approved}` |
 | host | `{host}` |
 | approved_host | `{approved_host}` |
 | approved_country | `{approved_country}` |
@@ -553,6 +579,8 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | cap_writes | `{cap_writes}` |
 | cap_state_path | `{cap_state_path}` |
 | geoblock_status | `{geoblock_status}` |
+| geoblock_country | `{geoblock_country}` |
+| geoblock_region | `{geoblock_region}` |
 | heartbeat_status | `{heartbeat_status}` |
 | book_age_ms | `{book_age_ms}` |
 | reference_age_ms | `{reference_age_ms}` |
@@ -574,6 +602,7 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
         artifact_hash = artifact.artifact_hash,
         run_id = body.run_id,
         captured_at_rfc3339 = body.captured_at_rfc3339,
+        final_live_legal_access_approved = body.final_live_legal_access_approved,
         host = body.deployment.host,
         approved_host = field_or_blocked(&body.deployment.approved_host),
         approved_country = field_or_blocked(&body.deployment.approved_country),
@@ -607,6 +636,8 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
         cap_writes = body.caps.cap_writes,
         cap_state_path = body.caps.cap_state_path,
         geoblock_status = body.geoblock.status,
+        geoblock_country = option_string_field(body.geoblock.country.as_deref()),
+        geoblock_region = option_string_field(body.geoblock.region.as_deref()),
         heartbeat_status = body.heartbeat.status,
         book_age_ms = option_u64_field(candidate.book_age_ms),
         reference_age_ms = option_u64_field(candidate.reference_age_ms),
@@ -697,6 +728,13 @@ fn field_or_blocked(value: &str) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn option_string_field(value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "BLOCKED: unavailable".to_string())
 }
 
 fn decimal_field(value: f64) -> String {
@@ -875,14 +913,72 @@ mod tests {
     }
 
     #[test]
+    fn live_trading_maker_blocks_missing_or_mismatched_jurisdiction() {
+        let mut missing = passing_input();
+        missing.deployment.approved_country.clear();
+        missing.deployment.approved_region.clear();
+
+        let missing_artifact = build_live_trading_maker_dry_run(missing).expect("artifact builds");
+
+        assert_eq!(missing_artifact.body.status, "blocked");
+        for expected in [
+            "approved_country_not_configured",
+            "approved_region_not_configured",
+        ] {
+            assert!(
+                missing_artifact
+                    .body
+                    .block_reasons
+                    .contains(&expected.to_string()),
+                "missing {expected}"
+            );
+        }
+
+        let mut mismatched = passing_input();
+        mismatched.geoblock.country = Some("MX".to_string());
+        mismatched.geoblock.region = Some("CMX".to_string());
+
+        let mismatched_artifact =
+            build_live_trading_maker_dry_run(mismatched).expect("artifact builds");
+
+        assert_eq!(mismatched_artifact.body.status, "blocked");
+        for expected in ["approved_country_mismatch", "approved_region_mismatch"] {
+            assert!(
+                mismatched_artifact
+                    .body
+                    .block_reasons
+                    .contains(&expected.to_string()),
+                "missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_trading_maker_blocks_unapproved_legal_access() {
+        let mut input = passing_input();
+        input.final_live_legal_access_approved = false;
+
+        let artifact = build_live_trading_maker_dry_run(input).expect("artifact builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        assert!(artifact
+            .body
+            .block_reasons
+            .contains(&"legal_access_not_approved".to_string()));
+    }
+
+    #[test]
     fn live_trading_maker_approval_markdown_contains_required_envelope_fields() {
         let artifact = build_live_trading_maker_dry_run(passing_input()).expect("artifact builds");
         let markdown = live_trading_maker_approval_markdown(&artifact);
 
         for field in [
+            "final_live_legal_access_approved",
             "host",
             "wallet",
             "funder",
+            "geoblock_country",
+            "geoblock_region",
             "baseline_id",
             "market_slug",
             "side",
@@ -910,6 +1006,7 @@ mod tests {
             dry_run_report_path:
                 "artifacts/live_trading/LT4-LOCAL-DRY-RUN/maker_dry_run.redacted.json",
             final_live_config_enabled: true,
+            final_live_legal_access_approved: true,
             deployment: MakerDeploymentSummary {
                 host: "approved-host".to_string(),
                 approved_host: "approved-host".to_string(),
@@ -930,6 +1027,8 @@ mod tests {
             },
             geoblock: MakerFreshnessStatus {
                 status: "passed".to_string(),
+                country: Some("BR".to_string()),
+                region: Some("SP".to_string()),
                 age_ms: Some(1_000),
                 max_age_ms: 30_000,
             },

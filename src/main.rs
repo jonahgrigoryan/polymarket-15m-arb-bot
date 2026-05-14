@@ -8411,6 +8411,7 @@ async fn capture_live_trading_maker_dry_run(
         approval_artifact_path: &approval_artifact_path.display().to_string(),
         dry_run_report_path: &dry_run_report_path.display().to_string(),
         final_live_config_enabled: config.live_trading.enabled,
+        final_live_legal_access_approved: config.live_trading.legal_access_approved,
         deployment: MakerDeploymentSummary {
             host: deployment_host,
             approved_host: config.live_trading.approved_host.clone(),
@@ -8430,6 +8431,8 @@ async fn capture_live_trading_maker_dry_run(
         },
         geoblock: MakerFreshnessStatus {
             status: geoblock_status.to_string(),
+            country: geoblock.country.clone(),
+            region: geoblock.region.clone(),
             age_ms: if geoblock_status == "passed" {
                 Some(0)
             } else {

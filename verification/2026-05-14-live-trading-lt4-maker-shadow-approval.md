@@ -30,7 +30,7 @@ Rechecked on 2026-05-14:
 
 - Added `src/live_trading_maker.rs` with:
   - final-live maker dry-run artifact schema `lt4.live_trading_maker_shadow.v1`,
-  - maker quote/candidate checks for market identifier completeness, price-times-size notional consistency, edge-at-submit, fee presence, tick-size alignment, min size, book/reference/predictive age, no-trade window, post-only order type, post-only marketability, single-order notional cap, matched paper/live shadow decision, baseline binding, heartbeat, unresolved live order state, incidents, and caps,
+  - maker quote/candidate checks for final-live legal/access approval, approved host/jurisdiction binding, market identifier completeness, price-times-size notional consistency, edge-at-submit, fee presence, tick-size alignment, min size, book/reference/predictive age, no-trade window, post-only order type, post-only marketability, single-order notional cap, matched paper/live shadow decision, baseline binding, heartbeat, unresolved live order state, incidents, and caps,
   - approval-envelope Markdown generation with host, wallet/funder, baseline, market, side, order type, price, size, expiry, fee, and cap fields present even when blocked,
   - no-submit/no-cancel/no-sign-for-submit/no-cap-write/no-taker/no-batch/no-cancel-all proof fields.
 - Added CLI:
@@ -56,12 +56,12 @@ Result:
 
 - Command status: PASS
 - Artifact status: `blocked`
-- Run ID: `18af722fa03a9350-bca2-0`
+- Run ID: `18af7320d38ef768-d1bd-0`
 - Approval envelope path: `verification/2026-05-14-live-trading-lt4-approval-candidate.md`
-- Approval envelope file hash: `sha256:102da6fd6a7f5141c91ef72f37e2266b1a14fd2344ec99814afb992ec08324ec`
+- Approval envelope file hash: `sha256:b5231b0e1d60dffded60322c3439a4bfac402c023a7a2632627a5462cc51e965`
 - Dry-run report path: `artifacts/live_trading/LT4-LOCAL-DRY-RUN/maker_dry_run.redacted.json`
-- Dry-run report file hash: `sha256:918737cf6c8156f439327ccfbe83f99e02d8d06be9407504f8eec43b07b21441`
-- Dry-run artifact hash: `sha256:1aadc8c278aa48b8bf3438848cb3acc872304d486405ff7eadd70a0f7cf39866`
+- Dry-run report file hash: `sha256:51593b0b5d15e1a97627e7585cee73f301e92754d0bac7ccc431254fdac47700`
+- Dry-run artifact hash: `sha256:1f0d535b7c0e90bcdee00f54f588350c4805d139bb5049093c099f88de8a53fb`
 - No-submit proof:
   - `not_submitted=true`
   - `network_post_enabled=false`
@@ -94,7 +94,9 @@ Interpretation: tracked default config remains fail-closed. The LT4 dry-run writ
 Blockers:
 
 - `account_binding_missing`
+- `approved_country_not_configured`
 - `approved_host_not_matched`
+- `approved_region_not_configured`
 - `condition_id_missing`
 - `edge_at_submit_below_threshold`
 - `fee_not_known`
@@ -102,6 +104,7 @@ Blockers:
 - `geoblock_not_passed`
 - `geoblock_stale_or_not_checked`
 - `heartbeat_required_not_fresh`
+- `legal_access_not_approved`
 - `market_slug_missing`
 - `max_single_order_notional_missing`
 - `missing_baseline_binding`
@@ -135,6 +138,7 @@ If a future approved-host LT4 dry-run has a safe candidate, the envelope must bi
 - known maker fee estimate,
 - fresh book/reference/predictive state,
 - fresh geoblock and heartbeat state,
+- approved legal/access gate and exact approved country/region match,
 - zero unresolved live orders and zero unreviewed incidents,
 - complete baseline binding and cap fields.
 
@@ -153,14 +157,14 @@ Comparable paper/live review is not feasible from the tracked default local dry-
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `cargo test --offline live_trading_maker` | PASS | 8 lib tests and 2 CLI tests passed, covering complete candidate pass, marketable post-only blocking, missing market identifier blocking, over-cap single-order notional blocking, stale notional mismatch/cap blocking, paper/live shadow mismatch blocking, missing baseline/tick/stale-state blocking, approval envelope field coverage, CLI parse, and dry-run-only command guard. |
+| `cargo test --offline live_trading_maker` | PASS | 10 lib tests and 2 CLI tests passed, covering complete candidate pass, marketable post-only blocking, missing market identifier blocking, missing/mismatched approved jurisdiction blocking, unapproved legal access blocking, over-cap single-order notional blocking, stale notional mismatch/cap blocking, paper/live shadow mismatch blocking, missing baseline/tick/stale-state blocking, approval envelope field coverage, CLI parse, and dry-run-only command guard. |
 | `cargo test --offline live_quote_manager` | PASS | 37 existing quote-manager tests passed. |
 | `cargo test --offline live_trading_readback_uses_final_live_allowance_requirement` | PASS | Regression proves final-live readback allowance requirement is sourced from `config.live_trading`, not `config.live_beta.readback_account`. |
 | `cargo run --offline -- --config config/default.toml live-trading-maker-canary --dry-run --approval-id LT4-LOCAL-DRY-RUN --approval-artifact verification/2026-05-14-live-trading-lt4-approval-candidate.md` | PASS | Wrote blocked LT4 approval candidate and redacted report with no-submit proof. |
 | `shasum -a 256 verification/2026-05-14-live-trading-lt4-approval-candidate.md artifacts/live_trading/LT4-LOCAL-DRY-RUN/maker_dry_run.redacted.json` | PASS | Hashes recorded above. |
 | `rg -n -i "private[_ -]?key\|api[_ -]?key\|passphrase\|poly_signature\|signature\"\\s*:\\s*\"0x\|secret\|P15M_\|POLY_\|auth header\|authorization" verification/2026-05-14-live-trading-lt4-approval-candidate.md artifacts/live_trading/LT4-LOCAL-DRY-RUN/maker_dry_run.redacted.json` | PASS | No matches in generated LT4 artifacts. |
 | `git diff --check` | PASS | Whitespace check passed. |
-| `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. Full tests covered 457 lib tests, 114 bin tests, and 0 doc tests. |
+| `scripts/verify-pr.sh` | PASS | Formatting, full tests, clippy, diff whitespace, safety scan, no-secret scan, and ignored-local-secret-file checks passed. Full tests covered 463 lib tests, 114 bin tests, and 0 doc tests. |
 
 ## Safety Scan
 
