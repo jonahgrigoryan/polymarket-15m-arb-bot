@@ -7,9 +7,9 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | field | value |
 | --- | --- |
 | approval_id | `LT4-LOCAL-DRY-RUN` |
-| artifact_hash | `sha256:fe6e4510732e0569a711bd161afcb9160eb56a2ba135a892c341ac4b1564f758` |
-| run_id | `18af6f6a7cc086e0-98ea-0` |
-| captured_at_rfc3339 | `2026-05-14T12:48:00Z` |
+| artifact_hash | `sha256:1aadc8c278aa48b8bf3438848cb3acc872304d486405ff7eadd70a0f7cf39866` |
+| run_id | `18af722fa03a9350-bca2-0` |
+| captured_at_rfc3339 | `2026-05-14T13:38:46Z` |
 | host | `Jonahs-MacBook-Pro.local` |
 | approved_host | `BLOCKED: missing` |
 | approved_country | `BLOCKED: missing` |
@@ -31,7 +31,7 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | price | `BLOCKED: unavailable` |
 | size | `BLOCKED: unavailable` |
 | notional | `BLOCKED: unavailable` |
-| expiry_unix | `1778762970` |
+| expiry_unix | `1778766016` |
 | tick_size | `BLOCKED: unavailable` |
 | min_order_size | `BLOCKED: unavailable` |
 | maker_fee_bps | `BLOCKED: unavailable` |

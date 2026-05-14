@@ -1,9 +1,9 @@
 {
   "schema_version": "lt4.live_trading_maker_shadow.v1",
   "approval_id": "LT4-LOCAL-DRY-RUN",
-  "run_id": "18af6f6a7cc086e0-98ea-0",
-  "captured_at_ms": 1778762880985,
-  "captured_at_rfc3339": "2026-05-14T12:48:00Z",
+  "run_id": "18af722fa03a9350-bca2-0",
+  "captured_at_ms": 1778765926712,
+  "captured_at_rfc3339": "2026-05-14T13:38:46Z",
   "docs_checked": [
     "https://docs.polymarket.com/api-reference/authentication",
     "https://docs.polymarket.com/trading/orderbook",
@@ -57,7 +57,7 @@
     "price": 0.0,
     "size": 0.0,
     "notional": 0.0,
-    "expiry_unix": 1778762970,
+    "expiry_unix": 1778766016,
     "maker_fee_bps": null,
     "estimated_fee_pusd": null,
     "tick_size": null,
@@ -67,7 +67,7 @@
     "fair_probability": null,
     "edge_bps_at_submit": null,
     "min_edge_bps": 0.0,
-    "market_end_unix": 1778762880,
+    "market_end_unix": 1778765926,
     "no_trade_seconds_before_close": 30,
     "book_age_ms": null,
     "max_book_age_ms": 1000,
@@ -133,5 +133,5 @@
     "unresolved_live_order_state_unknown"
   ],
   "approval_review_required": true,
-  "artifact_hash": "sha256:fe6e4510732e0569a711bd161afcb9160eb56a2ba135a892c341ac4b1564f758"
+  "artifact_hash": "sha256:1aadc8c278aa48b8bf3438848cb3acc872304d486405ff7eadd70a0f7cf39866"
 }

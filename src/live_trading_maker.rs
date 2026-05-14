@@ -9,6 +9,7 @@ use crate::domain::Side;
 pub const MODULE: &str = "live_trading_maker";
 pub const LT4_SCHEMA_VERSION: &str = "lt4.live_trading_maker_shadow.v1";
 pub const LT4_GTD_SECURITY_BUFFER_SECONDS: u64 = 60;
+pub const LT4_NOTIONAL_TOLERANCE_PUSD: f64 = 0.000_001;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LiveTradingMakerDryRunArtifact {
@@ -348,10 +349,20 @@ fn evaluate_maker_candidate_blocks(input: &LiveTradingMakerDryRunInput<'_>) -> V
     if input.caps.max_open_orders != 1 {
         reasons.push("max_open_orders_not_one".to_string());
     }
+    let derived_notional = derived_candidate_notional(candidate);
+    if let Some(derived_notional) = derived_notional {
+        if positive_finite(candidate.notional)
+            && (candidate.notional - derived_notional).abs() > LT4_NOTIONAL_TOLERANCE_PUSD
+        {
+            reasons.push("notional_mismatch".to_string());
+        }
+    }
+    let notional_for_cap = derived_notional.unwrap_or(candidate.notional);
     if !positive_finite(input.caps.max_single_order_notional_pusd) {
         reasons.push("max_single_order_notional_missing".to_string());
-    } else if positive_finite(candidate.notional)
-        && candidate.notional > input.caps.max_single_order_notional_pusd + f64::EPSILON
+    } else if positive_finite(notional_for_cap)
+        && notional_for_cap
+            > input.caps.max_single_order_notional_pusd + LT4_NOTIONAL_TOLERANCE_PUSD
     {
         reasons.push("max_single_order_notional_exceeded".to_string());
     }
@@ -469,6 +480,8 @@ fn evaluate_maker_candidate_blocks(input: &LiveTradingMakerDryRunInput<'_>) -> V
     }
     if input.shadow_comparison.status != "comparable" {
         reasons.push("paper_shadow_comparison_not_feasible".to_string());
+    } else if !shadow_decisions_match(&input.shadow_comparison) {
+        reasons.push("paper_live_shadow_mismatch".to_string());
     }
 
     reasons
@@ -661,6 +674,23 @@ fn tick_aligned(price: f64, tick_size: f64) -> bool {
     (ticks - ticks.round()).abs() < 1e-9
 }
 
+fn derived_candidate_notional(candidate: &MakerOrderCandidate) -> Option<f64> {
+    if positive_finite(candidate.price) && positive_finite(candidate.size) {
+        Some(candidate.price * candidate.size)
+    } else {
+        None
+    }
+}
+
+fn shadow_decisions_match(shadow: &MakerShadowComparison) -> bool {
+    let paper_decision = shadow.paper_decision.trim();
+    let live_decision = shadow.live_decision.trim();
+    !paper_decision.is_empty()
+        && !live_decision.is_empty()
+        && paper_decision == live_decision
+        && shadow.comparison == "matched"
+}
+
 fn field_or_blocked(value: &str) -> String {
     if value.trim().is_empty() {
         "BLOCKED: missing".to_string()
@@ -797,7 +827,8 @@ mod tests {
     #[test]
     fn live_trading_maker_blocks_single_order_notional_above_cap() {
         let mut input = passing_input();
-        input.candidate.notional = 5.01;
+        input.candidate.size = 11.0;
+        input.candidate.notional = 5.39;
         input.caps.max_single_order_notional_pusd = 5.0;
 
         let artifact = build_live_trading_maker_dry_run(input).expect("artifact builds");
@@ -807,6 +838,40 @@ mod tests {
             .body
             .block_reasons
             .contains(&"max_single_order_notional_exceeded".to_string()));
+    }
+
+    #[test]
+    fn live_trading_maker_blocks_stale_notional_that_hides_cap_breach() {
+        let mut input = passing_input();
+        input.candidate.size = 11.0;
+        input.candidate.notional = 2.45;
+        input.caps.max_single_order_notional_pusd = 5.0;
+
+        let artifact = build_live_trading_maker_dry_run(input).expect("artifact builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        for expected in ["notional_mismatch", "max_single_order_notional_exceeded"] {
+            assert!(
+                artifact.body.block_reasons.contains(&expected.to_string()),
+                "missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_trading_maker_blocks_comparable_shadow_decision_mismatch() {
+        let mut input = passing_input();
+        input.shadow_comparison.paper_decision = "skip".to_string();
+        input.shadow_comparison.live_decision = "maker_place_quote".to_string();
+        input.shadow_comparison.comparison = "diverged".to_string();
+
+        let artifact = build_live_trading_maker_dry_run(input).expect("artifact builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        assert!(artifact
+            .body
+            .block_reasons
+            .contains(&"paper_live_shadow_mismatch".to_string()));
     }
 
     #[test]
