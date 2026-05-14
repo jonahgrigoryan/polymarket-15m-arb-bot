@@ -106,7 +106,7 @@ Local approval id note: `LT3-LOCAL-*` ids are for disabled local evidence only. 
 - The implementation records handle names and boolean presence only.
 - The implementation never loads or serializes secret values for the LT3 artifact.
 - Missing, duplicate, or value-like final-live secret handles fail before producing pass status.
-- Empty final-live env secret values count as missing, not present.
+- Empty or whitespace-only final-live env secret values count as missing, not present.
 - Existing Live Beta secret presence validation was run with the local secret environment loaded; output contained handle names and presence booleans only.
 - Fresh `.env` sourced re-check on 2026-05-13 found the exact LT3 final-live handles present:
   - `P15M_LIVE_TRADING_CLOB_L2_ACCESS`
@@ -136,7 +136,8 @@ Local approval id note: `LT3-LOCAL-*` ids are for disabled local evidence only. 
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-READBACK-BLOCK-CHECK --output-root /tmp/lt3-readback-block-check` | PASS | Enabled final-live config generated a fail-closed artifact with `status=blocked`, `local_approval_id_not_allowed_for_enabled_final_live`, `approved_authenticated_readback_not_passed`, `authenticated_readback_status=not_run_local_approval_id_not_allowed_for_enabled_final_live`, and `readback_auth_headers_generated=false`. |
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_ENABLED=true cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LA7-approval-1 --output-root /tmp/lt3-non-lt3-readback-block-check` | PASS | Non-LT3 approval id generated a fail-closed artifact with `approval_id_not_lt3`, `authenticated_readback_status=not_run_approval_id_not_lt3`, and `readback_auth_headers_generated=false`. |
 | `set -a; source .env; set +a; P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY= LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-EMPTY-SECRET-CHECK --output-root /tmp/lt3-empty-secret-block-check` | PASS | Empty final-live signer env value generated `status=blocked`, `secret_handles_missing`, and `secret_handles_present=false`; values were not printed. |
-| `cargo test --offline secret_handling` | PASS | 6 tests passed, including empty env secret values counting as missing. |
+| `set -a; source .env; set +a; P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY='   ' LIVE_TRADING_ENABLED=false P15M_LIVE_TRADING_ENABLED=false cargo run --offline -- --config config/default.toml live-trading-signing-dry-run --approval-id LT3-LOCAL-WHITESPACE-SECRET-CHECK --output-root /tmp/lt3-whitespace-secret-block-check` | PASS | Whitespace-only final-live signer env value generated `status=blocked`, `secret_handles_missing`, and `secret_handles_present=false`; values were not printed. |
+| `cargo test --offline secret_handling` | PASS | 6 tests passed, including empty and whitespace-only env secret values counting as missing. |
 | `cargo test --offline live_trading_signing_dry_run_blocks_enabled_config_with_local_approval_id` | PASS | Regression proves `LT3-LOCAL-*` cannot pass enabled final-live artifacts even when authenticated readback status is `passed`. |
 | `cargo test --offline live_trading_signing_readback_status_skips_local_approval_ids_before_readback` | PASS | Regression proves `LT3-LOCAL-*` skips the authenticated readback branch before readback auth headers are generated. |
 | `cargo test --offline live_trading_signing_readback_status_skips_non_lt3_approval_ids_before_readback` | PASS | Regression proves Live Alpha/Beta approval ids skip the authenticated readback branch before readback auth headers are generated. |
@@ -157,7 +158,7 @@ Local approval id note: `LT3-LOCAL-*` ids are for disabled local evidence only. 
 - `src/live_trading_signing.rs` unit tests assert the module contains no request client construction, submit dispatch token, cancel dispatch token, or raw secret placeholders.
 - The artifact keeps `order_submit_auth_headers_generated=false` as a no-submit invariant while recording whether read-only authenticated readback generated L2 headers.
 - Local `LT3-LOCAL-*` and non-LT3 approval ids cannot produce a passing enabled final-live artifact and skip the authenticated readback branch before readback auth headers or live CLOB GETs are generated.
-- Empty final-live env secret values are treated as missing, so an empty signer/private-key handle cannot produce pass-capable LT3 evidence.
+- Empty or whitespace-only final-live env secret values are treated as missing, so an unusable signer/private-key handle cannot produce pass-capable LT3 evidence.
 - Approved-host identity uses a syscall-backed hostname source rather than PATH-resolved executables; the spoofed-PATH regression test proves fake `hostname`/`uname` binaries do not affect the gate.
 - Approved-host readback now still fails closed unless `live_trading.legal_access_approved=true`, and invalid wallet/funder strings are rejected before authenticated L2 GETs.
 - No live order submit, cancel submit, heartbeat POST, cap sentinel write, taker expansion, production sizing, multi-wallet deployment, asset expansion, cancel-all behavior, or authenticated write client was added.

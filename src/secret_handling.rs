@@ -74,7 +74,9 @@ pub struct EnvSecretPresenceProvider;
 
 impl SecretPresenceProvider for EnvSecretPresenceProvider {
     fn contains_handle(&self, handle: &str) -> bool {
-        env::var_os(handle).is_some_and(|value| !value.as_os_str().is_empty())
+        env::var(handle)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -270,11 +272,14 @@ mod tests {
     }
 
     #[test]
-    fn env_secret_presence_provider_treats_empty_values_as_missing() {
+    fn env_secret_presence_provider_treats_empty_or_whitespace_values_as_missing() {
         let handle = format!("P15M_TEST_EMPTY_SECRET_{}", std::process::id());
         let provider = EnvSecretPresenceProvider;
 
         env::set_var(&handle, "");
+        assert!(!provider.contains_handle(&handle));
+
+        env::set_var(&handle, " \t  ");
         assert!(!provider.contains_handle(&handle));
 
         env::set_var(&handle, "present");
