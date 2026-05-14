@@ -84,9 +84,20 @@ max_orders_per_day = 0
 
 [live_trading]
 enabled = false
+legal_access_approved = false
 approved_host = ""
 approved_country = ""
 approved_region = ""
+wallet_address = ""
+funder_address = ""
+signature_type = ""
+
+[live_trading.secret_handles]
+backend = "env"
+clob_l2_access = "P15M_LIVE_TRADING_CLOB_L2_ACCESS"
+clob_l2_credential = "P15M_LIVE_TRADING_CLOB_L2_CREDENTIAL"
+clob_l2_passphrase = "P15M_LIVE_TRADING_CLOB_L2_PASSPHRASE"
+signer_private_key = "P15M_LIVE_TRADING_SIGNER_PRIVATE_KEY"
 
 [assets]
 symbols = ["BTC", "ETH", "SOL"]
