@@ -283,7 +283,7 @@ fn block_reasons(
     reasons
 }
 
-fn is_local_dry_run_approval_id(approval_id: &str) -> bool {
+pub fn is_local_dry_run_approval_id(approval_id: &str) -> bool {
     approval_id.starts_with("LT3-LOCAL-")
 }
 
