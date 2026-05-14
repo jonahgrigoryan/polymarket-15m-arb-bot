@@ -350,12 +350,28 @@ fn evaluate_maker_candidate_blocks(input: &LiveTradingMakerDryRunInput<'_>) -> V
     }
     if !positive_finite(input.caps.max_single_order_notional_pusd) {
         reasons.push("max_single_order_notional_missing".to_string());
+    } else if positive_finite(candidate.notional)
+        && candidate.notional > input.caps.max_single_order_notional_pusd + f64::EPSILON
+    {
+        reasons.push("max_single_order_notional_exceeded".to_string());
     }
     if input.caps.required_collateral_allowance_units == 0 {
         reasons.push("required_collateral_allowance_missing".to_string());
     }
     if input.caps.cap_writes {
         reasons.push("cap_write_not_allowed_in_lt4".to_string());
+    }
+    if candidate.market_slug.trim().is_empty() {
+        reasons.push("market_slug_missing".to_string());
+    }
+    if candidate.condition_id.trim().is_empty() {
+        reasons.push("condition_id_missing".to_string());
+    }
+    if candidate.token_id.trim().is_empty() {
+        reasons.push("token_id_missing".to_string());
+    }
+    if candidate.outcome.trim().is_empty() {
+        reasons.push("outcome_missing".to_string());
     }
     if !candidate.post_only {
         reasons.push("post_only_required".to_string());
@@ -752,6 +768,45 @@ mod tests {
                 "missing {expected}"
             );
         }
+    }
+
+    #[test]
+    fn live_trading_maker_blocks_missing_market_identifiers() {
+        let mut input = passing_input();
+        input.candidate.market_slug.clear();
+        input.candidate.condition_id.clear();
+        input.candidate.token_id.clear();
+        input.candidate.outcome.clear();
+
+        let artifact = build_live_trading_maker_dry_run(input).expect("artifact builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        for expected in [
+            "market_slug_missing",
+            "condition_id_missing",
+            "token_id_missing",
+            "outcome_missing",
+        ] {
+            assert!(
+                artifact.body.block_reasons.contains(&expected.to_string()),
+                "missing {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_trading_maker_blocks_single_order_notional_above_cap() {
+        let mut input = passing_input();
+        input.candidate.notional = 5.01;
+        input.caps.max_single_order_notional_pusd = 5.0;
+
+        let artifact = build_live_trading_maker_dry_run(input).expect("artifact builds");
+
+        assert_eq!(artifact.body.status, "blocked");
+        assert!(artifact
+            .body
+            .block_reasons
+            .contains(&"max_single_order_notional_exceeded".to_string()));
     }
 
     #[test]

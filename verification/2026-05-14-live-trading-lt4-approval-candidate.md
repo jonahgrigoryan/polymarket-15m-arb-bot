@@ -7,9 +7,9 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | field | value |
 | --- | --- |
 | approval_id | `LT4-LOCAL-DRY-RUN` |
-| artifact_hash | `sha256:a26c39383d780207a2668374f0741c6c912e4fc31d170b3c070ea49a321ea6a4` |
-| run_id | `18af66e26c0f0cf8-4c3b-0` |
-| captured_at_rfc3339 | `2026-05-14T10:11:40Z` |
+| artifact_hash | `sha256:fe6e4510732e0569a711bd161afcb9160eb56a2ba135a892c341ac4b1564f758` |
+| run_id | `18af6f6a7cc086e0-98ea-0` |
+| captured_at_rfc3339 | `2026-05-14T12:48:00Z` |
 | host | `Jonahs-MacBook-Pro.local` |
 | approved_host | `BLOCKED: missing` |
 | approved_country | `BLOCKED: missing` |
@@ -31,7 +31,7 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | price | `BLOCKED: unavailable` |
 | size | `BLOCKED: unavailable` |
 | notional | `BLOCKED: unavailable` |
-| expiry_unix | `1778753590` |
+| expiry_unix | `1778762970` |
 | tick_size | `BLOCKED: unavailable` |
 | min_order_size | `BLOCKED: unavailable` |
 | maker_fee_bps | `BLOCKED: unavailable` |
@@ -58,4 +58,4 @@ This artifact is for LT4 review only. It does not authorize LT5, does not submit
 | order_submit_auth_headers_generated | `false` |
 | batch_order_path_enabled | `false` |
 | cancel_all_path_enabled | `false` |
-| block_reasons | `account_binding_missing,approved_host_not_matched,edge_at_submit_below_threshold,fee_not_known,final_live_config_disabled,geoblock_not_passed,geoblock_stale_or_not_checked,heartbeat_required_not_fresh,max_single_order_notional_missing,missing_baseline_binding,near_close_market,notional_invalid,paper_shadow_comparison_not_feasible,post_only_marketability_unknown,price_invalid,required_collateral_allowance_missing,size_invalid,stale_book,stale_predictive,stale_reference,unknown_min_size,unknown_tick_size,unresolved_live_order_state_unknown` |
+| block_reasons | `account_binding_missing,approved_host_not_matched,condition_id_missing,edge_at_submit_below_threshold,fee_not_known,final_live_config_disabled,geoblock_not_passed,geoblock_stale_or_not_checked,heartbeat_required_not_fresh,market_slug_missing,max_single_order_notional_missing,missing_baseline_binding,near_close_market,notional_invalid,outcome_missing,paper_shadow_comparison_not_feasible,post_only_marketability_unknown,price_invalid,required_collateral_allowance_missing,size_invalid,stale_book,stale_predictive,stale_reference,token_id_missing,unknown_min_size,unknown_tick_size,unresolved_live_order_state_unknown` |
