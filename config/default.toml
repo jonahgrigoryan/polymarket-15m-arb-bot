@@ -91,6 +91,11 @@ approved_region = ""
 wallet_address = ""
 funder_address = ""
 signature_type = ""
+baseline_id = ""
+baseline_capture_run_id = ""
+baseline_artifact_path = ""
+baseline_hash = ""
+required_collateral_allowance_units = 0
 
 [live_trading.secret_handles]
 backend = "env"

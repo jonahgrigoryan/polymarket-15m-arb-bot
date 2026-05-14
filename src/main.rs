@@ -90,6 +90,13 @@ use polymarket_15m_arb_bot::{
         LiveTakerCanaryLiveApprovalFields, LiveTakerGateDecision, LiveTakerRuntimeState,
         LiveTakerSubmissionReport, LiveTakerSubmitInput, LA7_TAKER_CANARY_FOK_OR_FAK,
     },
+    live_trading_maker::{
+        build_live_trading_maker_dry_run, live_trading_maker_approval_markdown,
+        live_trading_maker_dry_run_json, LiveTradingMakerDryRunArtifact,
+        LiveTradingMakerDryRunInput, MakerAccountSummary, MakerBaselineBinding, MakerCapSummary,
+        MakerDeploymentSummary, MakerFreshnessStatus, MakerHeartbeatStatus, MakerLiveStateSummary,
+        MakerOrderCandidate, MakerShadowComparison,
+    },
     live_trading_preflight::{
         evaluate_live_trading_preflight, live_trading_preflight_json, LiveTradingGeoblockReadback,
         LiveTradingPreflightArtifact, LiveTradingPreflightInput, NoLiveActions,
@@ -493,6 +500,21 @@ enum Commands {
         )]
         output_root: PathBuf,
     },
+    /// Build the LT4 final live-trading maker shadow dry-run and approval envelope without any live write.
+    LiveTradingMakerCanary {
+        #[arg(
+            long,
+            help = "Required LT4 dry-run mode; never signs, submits, cancels, posts heartbeat, or writes caps"
+        )]
+        dry_run: bool,
+        #[arg(long, help = "LT4 approval ID for this maker dry-run artifact")]
+        approval_id: String,
+        #[arg(
+            long,
+            help = "Local LT4 maker approval-envelope candidate artifact to write"
+        )]
+        approval_artifact: PathBuf,
+    },
     /// Dry-run or execute the separately approved one-order LA7 taker canary.
     LiveAlphaTakerCanary {
         #[arg(long, help = "Required dry-run mode; never submits, signs, or cancels")]
@@ -551,6 +573,7 @@ impl Commands {
             Commands::LiveAlphaAccountBaseline { .. } => "live-alpha-account-baseline",
             Commands::LiveTradingPreflight { .. } => "live-trading-preflight",
             Commands::LiveTradingSigningDryRun { .. } => "live-trading-signing-dry-run",
+            Commands::LiveTradingMakerCanary { .. } => "live-trading-maker-canary",
             Commands::LiveAlphaTakerCanary { .. } => "live-alpha-taker-canary",
             Commands::LiveAlphaScaleReport { .. } => "live-alpha-scale-report",
         }
@@ -570,6 +593,7 @@ impl Commands {
             Commands::LiveAlphaAccountBaseline { .. } => RuntimeMode::Validate,
             Commands::LiveTradingPreflight { .. } => RuntimeMode::Validate,
             Commands::LiveTradingSigningDryRun { .. } => RuntimeMode::Validate,
+            Commands::LiveTradingMakerCanary { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaTakerCanary { .. } => RuntimeMode::Validate,
             Commands::LiveAlphaScaleReport { .. } => RuntimeMode::Validate,
         }
@@ -1052,6 +1076,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &run_id,
                     approval_id,
                     &output_root,
+                )
+                .await?;
+            }
+            Commands::LiveTradingMakerCanary {
+                dry_run,
+                approval_id,
+                approval_artifact,
+            } => {
+                run_live_trading_maker_canary_command(
+                    &config,
+                    &run_id,
+                    dry_run,
+                    approval_id,
+                    &approval_artifact,
                 )
                 .await?;
             }
@@ -8237,6 +8275,14 @@ struct LiveTradingSigningDryRunCommandResult {
     output_dir: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct LiveTradingMakerDryRunCommandResult {
+    artifact: LiveTradingMakerDryRunArtifact,
+    output_dir: PathBuf,
+    approval_artifact_path: PathBuf,
+    dry_run_report_path: PathBuf,
+}
+
 async fn run_live_trading_preflight_command(
     config: &AppConfig,
     run_id: &str,
@@ -8265,6 +8311,24 @@ async fn run_live_trading_signing_dry_run_command(
     let result =
         capture_live_trading_signing_dry_run(config, run_id, &approval_id, output_root).await?;
     print_live_trading_signing_dry_run_result(&result);
+    Ok(())
+}
+
+async fn run_live_trading_maker_canary_command(
+    config: &AppConfig,
+    run_id: &str,
+    dry_run: bool,
+    approval_id: String,
+    approval_artifact: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !dry_run {
+        return Err("live-trading-maker-canary requires --dry-run in LT4".into());
+    }
+    validate_live_trading_approval_id(&approval_id)?;
+
+    let result =
+        capture_live_trading_maker_dry_run(config, run_id, &approval_id, approval_artifact).await?;
+    print_live_trading_maker_dry_run_result(&result);
     Ok(())
 }
 
@@ -8312,6 +8376,169 @@ async fn capture_live_trading_signing_dry_run(
         artifact,
         output_dir,
     })
+}
+
+async fn capture_live_trading_maker_dry_run(
+    config: &AppConfig,
+    run_id: &str,
+    approval_id: &str,
+    approval_artifact_path: &Path,
+) -> Result<LiveTradingMakerDryRunCommandResult, Box<dyn std::error::Error>> {
+    validate_live_trading_approval_id(approval_id)?;
+    let captured_at_ms = unix_time_ms();
+    let captured_at_rfc3339 = OffsetDateTime::from_unix_timestamp(captured_at_ms / 1000)
+        .map_err(|error| format!("LT4 maker timestamp invalid: {error}"))?
+        .format(&Rfc3339)
+        .map_err(|error| format!("LT4 maker timestamp format failed: {error}"))?;
+    let output_dir = PathBuf::from("artifacts/live_trading").join(approval_id);
+    let dry_run_report_path = output_dir.join("maker_dry_run.redacted.json");
+    let deployment_host = live_trading_deployment_host_identity();
+    let geoblock = live_trading_geoblock_readback(config).await;
+    let geoblock_status = match geoblock.status.as_str() {
+        "passed" => "passed",
+        "blocked" => "blocked",
+        "error" => "error",
+        _ => "not_checked",
+    };
+    let heartbeat_required = config.live_alpha.heartbeat_required;
+
+    let artifact = build_live_trading_maker_dry_run(LiveTradingMakerDryRunInput {
+        approval_id,
+        run_id,
+        captured_at_ms,
+        captured_at_rfc3339: &captured_at_rfc3339,
+        docs_checked: live_trading_maker_docs_checked(),
+        approval_artifact_path: &approval_artifact_path.display().to_string(),
+        dry_run_report_path: &dry_run_report_path.display().to_string(),
+        final_live_config_enabled: config.live_trading.enabled,
+        final_live_legal_access_approved: config.live_trading.legal_access_approved,
+        deployment: MakerDeploymentSummary {
+            host: deployment_host,
+            approved_host: config.live_trading.approved_host.clone(),
+            approved_country: config.live_trading.approved_country.clone(),
+            approved_region: config.live_trading.approved_region.clone(),
+        },
+        account: MakerAccountSummary {
+            wallet_address: config.live_trading.wallet_address.clone(),
+            funder_address: config.live_trading.funder_address.clone(),
+            signature_type: config.live_trading.signature_type.clone(),
+        },
+        baseline: MakerBaselineBinding {
+            baseline_id: config.live_trading.baseline_id.clone(),
+            baseline_capture_run_id: config.live_trading.baseline_capture_run_id.clone(),
+            baseline_hash: config.live_trading.baseline_hash.clone(),
+            baseline_artifact_path: config.live_trading.baseline_artifact_path.clone(),
+        },
+        geoblock: MakerFreshnessStatus {
+            status: geoblock_status.to_string(),
+            country: geoblock.country.clone(),
+            region: geoblock.region.clone(),
+            age_ms: if geoblock_status == "passed" {
+                Some(0)
+            } else {
+                None
+            },
+            max_age_ms: 30_000,
+        },
+        heartbeat: MakerHeartbeatStatus {
+            required: heartbeat_required,
+            fresh: !heartbeat_required,
+            status: if heartbeat_required {
+                "not_checked_missing_heartbeat_readback".to_string()
+            } else {
+                "not_required".to_string()
+            },
+        },
+        live_state: MakerLiveStateSummary {
+            unresolved_live_order_count: None,
+            unreviewed_incident_count: 0,
+        },
+        candidate: blocked_lt4_maker_candidate(config, captured_at_ms),
+        caps: MakerCapSummary {
+            max_orders: 1,
+            max_open_orders: 1,
+            max_single_order_notional_pusd: config.live_alpha.risk.max_single_order_notional,
+            required_collateral_allowance_units: live_trading_required_collateral_allowance_units(
+                config,
+            ),
+            cap_writes: false,
+            cap_state_path: "not_written_in_lt4_dry_run".to_string(),
+        },
+        shadow_comparison: MakerShadowComparison {
+            status: "not_feasible".to_string(),
+            paper_decision: "not_loaded_in_local_lt4_dry_run".to_string(),
+            live_decision: "blocked_no_safe_candidate".to_string(),
+            comparison: "blocked_until_same_market_window_paper_decision_is_available".to_string(),
+        },
+    })?;
+    artifact.validate()?;
+
+    write_live_trading_maker_dry_run_artifacts(&artifact, &output_dir, approval_artifact_path)?;
+
+    Ok(LiveTradingMakerDryRunCommandResult {
+        artifact,
+        output_dir,
+        approval_artifact_path: approval_artifact_path.to_path_buf(),
+        dry_run_report_path,
+    })
+}
+
+fn live_trading_maker_docs_checked() -> Vec<String> {
+    vec![
+        "https://docs.polymarket.com/api-reference/authentication".to_string(),
+        "https://docs.polymarket.com/trading/orderbook".to_string(),
+        "https://docs.polymarket.com/trading/orders/overview".to_string(),
+        "https://docs.polymarket.com/api-reference/markets/get-clob-market-info".to_string(),
+        "https://docs.polymarket.com/api-reference/rate-limits".to_string(),
+        "https://docs.polymarket.com/api-reference/geoblock".to_string(),
+    ]
+}
+
+fn blocked_lt4_maker_candidate(config: &AppConfig, captured_at_ms: i64) -> MakerOrderCandidate {
+    let now_unix = captured_at_ms.max(0).unsigned_abs().saturating_div(1_000);
+    let no_trade_seconds_before_close = config.strategy.final_seconds_no_trade;
+    let max_book_age_ms = nonzero_or_default(config.risk.stale_book_ms, 5_000);
+    let max_reference_age_ms = nonzero_or_default(config.risk.stale_reference_ms, 5_000);
+    let max_predictive_age_ms = nonzero_or_default(config.feeds.stale_after_ms, 5_000);
+
+    MakerOrderCandidate {
+        market_slug: String::new(),
+        condition_id: String::new(),
+        token_id: String::new(),
+        outcome: String::new(),
+        side: Side::Buy,
+        order_type: "GTD".to_string(),
+        post_only: true,
+        price: 0.0,
+        size: 0.0,
+        notional: 0.0,
+        expiry_unix: now_unix.saturating_add(90),
+        maker_fee_bps: None,
+        estimated_fee_pusd: None,
+        tick_size: None,
+        min_order_size: None,
+        best_bid: None,
+        best_ask: None,
+        fair_probability: None,
+        edge_bps_at_submit: None,
+        min_edge_bps: config.live_alpha.maker.min_edge_bps as f64,
+        market_end_unix: now_unix,
+        no_trade_seconds_before_close,
+        book_age_ms: None,
+        max_book_age_ms,
+        reference_age_ms: None,
+        max_reference_age_ms,
+        predictive_age_ms: None,
+        max_predictive_age_ms,
+    }
+}
+
+fn nonzero_or_default(value: u64, fallback: u64) -> u64 {
+    if value == 0 {
+        fallback
+    } else {
+        value
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8798,6 +9025,29 @@ fn write_live_trading_signing_dry_run_artifacts(
     Ok(())
 }
 
+fn write_live_trading_maker_dry_run_artifacts(
+    artifact: &LiveTradingMakerDryRunArtifact,
+    output_dir: &Path,
+    approval_artifact_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(output_dir)?;
+    if let Some(parent) = approval_artifact_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        output_dir.join("maker_dry_run.redacted.json"),
+        live_trading_maker_dry_run_json(artifact)?,
+    )?;
+    fs::write(
+        approval_artifact_path,
+        live_trading_maker_approval_markdown(artifact),
+    )?;
+    Ok(())
+}
+
 fn print_live_trading_preflight_result(result: &LiveTradingPreflightCommandResult) {
     println!(
         "live_trading_preflight_baseline_id={}",
@@ -8950,6 +9200,97 @@ fn print_live_trading_signing_dry_run_result(result: &LiveTradingSigningDryRunCo
             .output_dir
             .join("signing_dry_run.redacted.json")
             .display()
+    );
+}
+
+fn print_live_trading_maker_dry_run_result(result: &LiveTradingMakerDryRunCommandResult) {
+    println!(
+        "live_trading_maker_dry_run_approval_id={}",
+        result.artifact.body.approval_id
+    );
+    println!(
+        "live_trading_maker_dry_run_run_id={}",
+        result.artifact.body.run_id
+    );
+    println!(
+        "live_trading_maker_dry_run_status={}",
+        result.artifact.body.status
+    );
+    println!(
+        "live_trading_maker_dry_run_block_reasons={}",
+        result.artifact.body.block_reasons.join(",")
+    );
+    println!(
+        "live_trading_maker_dry_run_not_submitted={}",
+        result.artifact.body.no_submit_proof.not_submitted
+    );
+    println!(
+        "live_trading_maker_dry_run_network_post_enabled={}",
+        result.artifact.body.no_submit_proof.network_post_enabled
+    );
+    println!(
+        "live_trading_maker_dry_run_network_cancel_enabled={}",
+        result.artifact.body.no_submit_proof.network_cancel_enabled
+    );
+    println!(
+        "live_trading_maker_dry_run_signed_order_for_submission={}",
+        result
+            .artifact
+            .body
+            .no_submit_proof
+            .signed_order_for_submission
+    );
+    println!(
+        "live_trading_maker_dry_run_raw_signature_generated={}",
+        result.artifact.body.no_submit_proof.raw_signature_generated
+    );
+    println!(
+        "live_trading_maker_dry_run_order_submit_auth_headers_generated={}",
+        result
+            .artifact
+            .body
+            .no_submit_proof
+            .order_submit_auth_headers_generated
+    );
+    println!(
+        "live_trading_maker_dry_run_taker_submission_enabled={}",
+        result
+            .artifact
+            .body
+            .no_submit_proof
+            .taker_submission_enabled
+    );
+    println!(
+        "live_trading_maker_dry_run_batch_order_path_enabled={}",
+        result
+            .artifact
+            .body
+            .no_submit_proof
+            .batch_order_path_enabled
+    );
+    println!(
+        "live_trading_maker_dry_run_cancel_all_path_enabled={}",
+        result.artifact.body.no_submit_proof.cancel_all_path_enabled
+    );
+    println!(
+        "live_trading_maker_dry_run_cap_writes={}",
+        result.artifact.body.no_submit_proof.cap_writes
+    );
+    println!(
+        "live_trading_maker_dry_run_artifact_hash={}",
+        result.artifact.artifact_hash
+    );
+    println!(
+        "live_trading_maker_dry_run_output_dir={}",
+        result.output_dir.display()
+    );
+    println!(
+        "live_trading_maker_dry_run_report_path={}",
+        result.dry_run_report_path.display()
+    );
+    println!(
+        "live_trading_maker_dry_run_approval_artifact_path={}",
+        result.approval_artifact_path.display()
     );
 }
 
@@ -11269,17 +11610,12 @@ async fn live_trading_authenticated_readback_evidence_with_geoblock(
 {
     let credentials = live_trading_l2_credentials_from_env(&config.live_trading.secret_handles)?;
     let live_trading_account = live_trading_account_preflight(config)?;
-    let required_collateral_allowance_units = config
-        .live_beta
-        .readback_account
-        .required_collateral_allowance_units
-        .max(1);
     let evidence =
         live_beta_readback::authenticated_readback_preflight_evidence_with_balance_allowance_signature_type(AuthenticatedReadbackInput {
             prerequisites: live_trading_readback_prerequisites(config, deployment_geoblock_passed),
             account: live_trading_account.account.clone(),
             credentials,
-            required_collateral_allowance_units,
+            required_collateral_allowance_units: live_trading_required_collateral_allowance_units(config),
             request_timeout_ms: config.polymarket.request_timeout_ms,
         },
         live_trading_account
@@ -11287,6 +11623,10 @@ async fn live_trading_authenticated_readback_evidence_with_geoblock(
             .as_balance_allowance_param())
         .await?;
     Ok((live_trading_account.account, evidence))
+}
+
+fn live_trading_required_collateral_allowance_units(config: &AppConfig) -> u64 {
+    config.live_trading.required_collateral_allowance_units
 }
 
 fn live_trading_readback_prerequisites(
@@ -13629,6 +13969,71 @@ mod tests {
             }
             other => panic!("expected live-trading-signing-dry-run command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn live_trading_maker_canary_dry_run_command_parses_required_surface() {
+        let cli = Cli::try_parse_from([
+            "polymarket-15m-arb-bot",
+            "--config",
+            "config/default.toml",
+            "live-trading-maker-canary",
+            "--dry-run",
+            "--approval-id",
+            "LT4-LOCAL-DRY-RUN",
+            "--approval-artifact",
+            "verification/lt4-approval-candidate.md",
+        ])
+        .expect("LT4 maker dry-run parses");
+
+        match cli.command {
+            Commands::LiveTradingMakerCanary {
+                dry_run,
+                approval_id,
+                approval_artifact,
+            } => {
+                assert!(dry_run);
+                assert_eq!(approval_id, "LT4-LOCAL-DRY-RUN");
+                assert_eq!(
+                    approval_artifact,
+                    PathBuf::from("verification/lt4-approval-candidate.md")
+                );
+            }
+            other => panic!("expected live-trading-maker-canary command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_trading_readback_uses_final_live_allowance_requirement() {
+        let mut config = approved_live_trading_config();
+        config
+            .live_beta
+            .readback_account
+            .required_collateral_allowance_units = 7;
+        config.live_trading.required_collateral_allowance_units = 42;
+
+        assert_eq!(
+            live_trading_required_collateral_allowance_units(&config),
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn live_trading_maker_canary_requires_dry_run() {
+        let config: AppConfig =
+            toml::from_str(include_str!("../config/default.toml")).expect("default config parses");
+
+        let error = run_live_trading_maker_canary_command(
+            &config,
+            "run-1",
+            false,
+            "LT4-LOCAL-DRY-RUN".to_string(),
+            Path::new("verification/lt4-approval-candidate.md"),
+        )
+        .await
+        .expect_err("LT4 maker canary requires dry-run");
+
+        assert!(error.to_string().contains("--dry-run"));
     }
 
     #[tokio::test]

@@ -470,6 +470,16 @@ pub struct LiveTradingConfig {
     #[serde(default)]
     pub signature_type: String,
     #[serde(default)]
+    pub baseline_id: String,
+    #[serde(default)]
+    pub baseline_capture_run_id: String,
+    #[serde(default)]
+    pub baseline_artifact_path: String,
+    #[serde(default)]
+    pub baseline_hash: String,
+    #[serde(default)]
+    pub required_collateral_allowance_units: u64,
+    #[serde(default)]
     pub secret_handles: LiveTradingSecretHandlesConfig,
 }
 
