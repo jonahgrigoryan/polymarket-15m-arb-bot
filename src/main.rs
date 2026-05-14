@@ -96,7 +96,7 @@ use polymarket_15m_arb_bot::{
         ReadOnlyFreshnessStatus,
     },
     live_trading_signing::{
-        build_live_trading_signing_dry_run, is_local_dry_run_approval_id,
+        build_live_trading_signing_dry_run, is_local_dry_run_approval_id, is_lt3_approval_id,
         live_trading_signing_dry_run_json, live_trading_signing_payload_shape_json,
         LiveTradingSigningDryRunArtifact, LiveTradingSigningDryRunInput,
     },
@@ -8346,6 +8346,11 @@ async fn live_trading_signing_authenticated_readback_status(
             "not_run_local_dry_run",
         ));
     }
+    if !is_lt3_approval_id(approval_id) {
+        return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
+            "not_run_approval_id_not_lt3",
+        ));
+    }
     if is_local_dry_run_approval_id(approval_id) {
         return Ok(LiveTradingSigningAuthenticatedReadbackStatus::not_run(
             "not_run_local_approval_id_not_allowed_for_enabled_final_live",
@@ -13277,6 +13282,30 @@ mod tests {
             status.status,
             "not_run_local_approval_id_not_allowed_for_enabled_final_live"
         );
+        assert!(!status.readback_auth_headers_generated);
+    }
+
+    #[tokio::test]
+    async fn live_trading_signing_readback_status_skips_non_lt3_approval_ids_before_readback() {
+        let mut config = approved_live_trading_config();
+        config.live_trading.approved_host = live_trading_deployment_host_identity();
+        config.live_trading.legal_access_approved = true;
+        config.live_trading.wallet_address =
+            "0x1111111111111111111111111111111111111111".to_string();
+        config.live_trading.funder_address =
+            "0x2222222222222222222222222222222222222222".to_string();
+        config.live_trading.signature_type = "poly_proxy".to_string();
+        let secret_report = present_live_trading_secret_report(&config);
+
+        let status = live_trading_signing_authenticated_readback_status(
+            &config,
+            &secret_report,
+            "LA7-approval-1",
+        )
+        .await
+        .expect("non-LT3 approval id skips readback");
+
+        assert_eq!(status.status, "not_run_approval_id_not_lt3");
         assert!(!status.readback_auth_headers_generated);
     }
 

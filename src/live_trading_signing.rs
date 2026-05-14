@@ -247,7 +247,7 @@ fn block_reasons(
     if !input.final_live_config_enabled && !local_dry_run {
         reasons.push("final_live_config_disabled".to_string());
     }
-    if !input.approval_id.starts_with("LT3-") {
+    if !is_lt3_approval_id(input.approval_id) {
         reasons.push("approval_id_not_lt3".to_string());
     }
     if input.final_live_config_enabled && local_dry_run {
@@ -285,6 +285,10 @@ fn block_reasons(
 
 pub fn is_local_dry_run_approval_id(approval_id: &str) -> bool {
     approval_id.starts_with("LT3-LOCAL-")
+}
+
+pub fn is_lt3_approval_id(approval_id: &str) -> bool {
+    approval_id.starts_with("LT3-")
 }
 
 fn wallet_binding_summary(
@@ -445,35 +449,42 @@ mod tests {
 
     #[test]
     fn live_trading_signing_validate_rejects_unsafe_offline_only_flags() {
-        let mut artifact = build_valid_artifact();
-        artifact.body.network_cancel_enabled = true;
-        artifact = LiveTradingSigningDryRunArtifact::new(artifact.body).expect("rehash");
-        let err = artifact
-            .validate()
-            .expect_err("unsafe flag must fail validate");
-        match err {
-            LiveTradingSigningError::Validation(messages) => {
-                assert!(messages
-                    .iter()
-                    .any(|msg| msg.contains("network_cancel_enabled")));
+        fn assert_rejected(expected: &str, mutate: impl FnOnce(&mut LiveTradingSigningDryRunBody)) {
+            let mut artifact = build_valid_artifact();
+            mutate(&mut artifact.body);
+            artifact = LiveTradingSigningDryRunArtifact::new(artifact.body).expect("rehash");
+            let err = artifact
+                .validate()
+                .expect_err("unsafe flag must fail validate");
+            match err {
+                LiveTradingSigningError::Validation(messages) => {
+                    assert!(messages.iter().any(|msg| msg.contains(expected)));
+                }
+                other => panic!("unexpected {other:?}"),
             }
-            other => panic!("unexpected {other:?}"),
         }
 
-        let mut artifact = build_valid_artifact();
-        artifact.body.order_submit_auth_headers_generated = true;
-        artifact = LiveTradingSigningDryRunArtifact::new(artifact.body).expect("rehash");
-        let err = artifact
+        assert_rejected("not_submitted", |body| body.not_submitted = false);
+        assert_rejected("network_post_enabled", |body| {
+            body.network_post_enabled = true
+        });
+        assert_rejected("network_cancel_enabled", |body| {
+            body.network_cancel_enabled = true
+        });
+        assert_rejected("raw_signature_generated", |body| {
+            body.raw_signature_generated = true
+        });
+        assert_rejected("order_submit_auth_headers_generated", |body| {
+            body.order_submit_auth_headers_generated = true
+        });
+
+        let mut readback_artifact = build_valid_artifact();
+        readback_artifact.body.readback_auth_headers_generated = true;
+        readback_artifact =
+            LiveTradingSigningDryRunArtifact::new(readback_artifact.body).expect("rehash");
+        readback_artifact
             .validate()
-            .expect_err("order-submit auth headers must fail validate");
-        match err {
-            LiveTradingSigningError::Validation(messages) => {
-                assert!(messages
-                    .iter()
-                    .any(|msg| msg.contains("order_submit_auth_headers_generated")));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
+            .expect("readback auth headers are allowed for approved readback evidence");
     }
 
     #[test]
